@@ -1,0 +1,119 @@
+{
+  "path": "bla",
+  "device": "cpu",
+  "epochs": 3,
+  "weight_decay": 1e-5,
+  "log_level": "debug",
+  "optimizer":
+  {
+    "lr": 1e-5,
+    "bs": 256,
+    "momentum": 0.9
+  },
+  "architecture":
+  [
+    {
+      "type": "conv",
+      "args":
+        {
+          "in_channels": 0,
+          "out_channels": 0,
+          "kernel_size": 0,
+          "stride": 0,
+          "padding": 0,
+          "dilation": 0,
+          "groups": 0,
+          "bias": 0,
+          "padding_mode": 0
+        }
+    },
+    {
+      "type": "pool",
+      "args":
+        {
+          "kernel_size": 0,
+          "stride": 0,
+          "padding": 0,
+          "dilation": 0
+        }
+    },
+    {
+      "type": "relu",
+      "args":
+        {
+        }
+    },
+    {
+      "type": "conv",
+      "args":
+        {
+          "in_channels": 0,
+          "out_channels": 0,
+          "kernel_size": 0,
+          "stride": 0,
+          "padding": 0,
+          "dilation": 0,
+          "groups": 0,
+          "bias": 0,
+          "padding_mode": 0
+        }
+    },
+    {
+      "type": "pool",
+      "args":
+        {
+          "kernel_size": 0,
+          "stride": 0,
+          "padding": 0,
+          "dilation": 0
+        }
+    },
+    {
+      "type": "relu",
+      "args":
+        {
+        }
+    },
+    {
+      "type": "conv",
+      "args":
+        {
+          "in_channels": 0,
+          "out_channels": 0,
+          "kernel_size": 0,
+          "stride": 0,
+          "padding": 0,
+          "dilation": 0,
+          "groups": 0,
+          "bias": 0,
+          "padding_mode": 0
+        }
+    },
+    {
+      "type": "pool",
+      "args":
+        {
+          "kernel_size": 0,
+          "stride": 0,
+          "padding": 0,
+          "dilation": 0
+        }
+    },
+    {
+      "type": "relu",
+      "args":
+        {
+        }
+    }
+  ],
+  "DNI":
+  {
+    "position": -1,
+    "architecture":
+    {
+      "n_layers_conv": 3,
+      "n_layers_linear": 2,
+      "use_batch_normalization": true
+    }
+  }
+}
