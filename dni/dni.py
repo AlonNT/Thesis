@@ -322,11 +322,11 @@ class BasicSynthesizer(torch.nn.Module):
 
         # zero-initialize the last layer, as in the paper
         if n_hidden > 0:
-            init.constant(self.layers[-1].weight, 0)
+            init.constant_(self.layers[-1].weight, 0)
         else:
-            init.constant(self.input_trigger.weight, 0)
+            init.constant_(self.input_trigger.weight, 0)
             if context_dim is not None:
-                init.constant(self.input_context.weight, 0)
+                init.constant_(self.input_context.weight, 0)
 
     def forward(self, trigger, context):
         """Synthesizes a `message` based on `trigger` and `context`.
