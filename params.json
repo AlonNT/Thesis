@@ -11,12 +11,12 @@
   },
   "architecture":
   [
-    { "type": "conv", "args": { "in_channels": 3, "out_channels": 8, "kernel_size": 5, "padding": 2 } },
-    { "type": "BatchNorm2d", "args": { "num_features": 8 } },
+    { "type": "conv", "args": { "in_channels": 3, "out_channels": 16, "kernel_size": 5, "padding": 2 } },
+    { "type": "BatchNorm2d", "args": { "num_features": 16 } },
     { "type": "pool", "args": { "kernel_size": 2, "stride": 2 } },
     { "type": "relu", "args": {} },
-    { "type": "conv", "args": { "in_channels": 8, "out_channels": 16, "kernel_size": 5, "padding": 2 } },
-    { "type": "BatchNorm2d", "args": { "num_features": 16 } },
+    { "type": "conv", "args": { "in_channels": 8, "out_channels": 32, "kernel_size": 5, "padding": 2 } },
+    { "type": "BatchNorm2d", "args": { "num_features": 32 } },
     { "type": "pool", "args": { "kernel_size": 2, "stride": 2 } },
     { "type": "relu", "args": {} },
     { "type": "affine", "args": { "in_features": 1024, "out_features": 256} },
