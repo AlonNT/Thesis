@@ -1,93 +1,12 @@
-import math
-from typing import List, Dict, Union, Optional
-
 import torch
 
 from dni import dni
 from consts import CLASSES
 
-dispatcher = {
-    'conv': torch.nn.Conv2d,
-    'pool': torch.nn.MaxPool2d,
-    'relu': torch.nn.ReLU,
-    'affine': torch.nn.Linear,
-    'BatchNorm2d': torch.nn.BatchNorm2d,
-    'BatchNorm1d': torch.nn.BatchNorm1d,
-}
 
-
-class MLPAuxiliaryNet(torch.nn.Module):
-    """
-    Basic `Synthesizer` based on an MLP with ReLU activation.
-
-    Args:
-        output_dim: Dimensionality of the synthesized `messages`.
-        n_hidden (optional): Number of hidden layers. Defaults to 0.
-        hidden_dim (optional): Dimensionality of the hidden layers. Defaults to
-            `output_dim`.
-        trigger_dim (optional): Dimensionality of the trigger. Defaults to
-            `output_dim`.
-        context_dim (optional): Dimensionality of the context. If `None`, do
-            not use context. Defaults to `None`.
-    """
-
-    def __init__(self, output_dim: int, n_hidden: int = 0, hidden_dim: Optional[int] = None,
-                 trigger_dim: Optional[int] = None, context_dim: Optional[int] = None):
-        super().__init__()
-
-        if hidden_dim is None:
-            hidden_dim: int = output_dim
-        if trigger_dim is None:
-            trigger_dim: int = output_dim
-
-        top_layer_dim: int = output_dim if n_hidden == 0 else hidden_dim
-
-        self.input_trigger: torch.nn.Linear = torch.nn.Linear(in_features=trigger_dim, out_features=top_layer_dim)
-
-        if context_dim is not None:
-            self.input_context: torch.nn.Linear = torch.nn.Linear(in_features=context_dim, out_features=top_layer_dim)
-        else:
-            self.input_context = None
-
-        self.layers: torch.nn.ModuleList = torch.nn.ModuleList([
-            torch.nn.Linear(in_features=hidden_dim,
-                            out_features=(hidden_dim if layer_index < n_hidden - 1 else output_dim))
-            for layer_index in range(n_hidden)
-        ])
-
-        # zero-initialize the last layer, as in the paper
-        last_layer: torch.nn.Linear = self.layers[-1] if n_hidden > 0 else self.input_trigger
-        torch.nn.init.constant_(last_layer.weight, 0)
-        if (n_hidden == 0) and (context_dim is not None):
-            torch.nn.init.constant_(self.input_context.weight, 0)
-
-    def forward(self, trigger, context):
-        """Synthesizes a `message` based on `trigger` and `context`.
-
-        Args:
-            trigger: `trigger` to synthesize the `message` based on. Size:
-                (`batch_size`, `trigger_dim`).
-            context: `context` to condition the synthesizer. Ignored if
-                `context_dim` has not been specified in the constructor. Size:
-                (`batch_size`, `context_dim`).
-
-        Returns:
-            The synthesized `message`.
-        """
-        x = self.input_trigger(trigger)
-
-        if self.input_context is not None:
-            x += self.input_context(context)
-
-        for layer in self.layers:
-            x = layer(torch.nn.functional.relu(x))
-
-        return x
-
-
-class ConvAuxiliaryNet(torch.nn.Module):
+class ConvSynthesizer(torch.nn.Module):
     def __init__(self, n_channels: int, context_dim: int = len(CLASSES)):
-        super(ConvAuxiliaryNet, self).__init__()
+        super(ConvSynthesizer, self).__init__()
 
         self.input_trigger: torch.nn.Module = torch.nn.Conv2d(n_channels, n_channels, kernel_size=5, padding=2)
         self.input_trigger_bn: torch.nn.Module = torch.nn.BatchNorm2d(n_channels)
@@ -116,61 +35,70 @@ class ConvAuxiliaryNet(torch.nn.Module):
 
 
 class MainNetDNI(torch.nn.Module):
-    def __init__(self,
-                 architecture: List[Dict[str, Union[str, Dict[str, int]]]],
-                 dni_positions: Union[None, str, List[int]]):
+    def __init__(self):
         super(MainNetDNI, self).__init__()
 
-        self.layers: torch.nn.ModuleList = torch.nn.ModuleList(
-            [dispatcher[layer['type']](**layer['args']) for layer in architecture]
-        )
+        self.conv1_channels = 16
+        self.conv2_channels = 32
+        self.conv3_channels = 64
+        self.conv_kernel_size = 5
+        self.conv_padding = 2
+        self.pool_kernel_size = 2
+        self.mlp_hidden_dim = 256
+        self.mlp_n_hidden_layers = 1
+        image_size = 32
 
-        self.dni_aux_nets: torch.nn.ModuleDict = self.get_auxiliary_nets(dni_positions)
+        self.blocks: torch.nn.ModuleList = torch.nn.ModuleList([])
+
+        self.blocks.append(torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels=3,
+                            out_channels=self.conv1_channels,
+                            kernel_size=self.conv_kernel_size,
+                            padding=self.conv_padding),
+            torch.nn.BatchNorm2d(self.conv1_channels),
+            torch.nn.MaxPool2d(kernel_size=self.pool_kernel_size),
+            torch.nn.ReLU(),
+        ))
+
+        self.blocks.append(torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels=self.conv1_channels,
+                            out_channels=self.conv2_channels,
+                            kernel_size=self.conv_kernel_size,
+                            padding=self.conv_padding),
+            torch.nn.BatchNorm2d(self.conv2_channels),
+            torch.nn.MaxPool2d(kernel_size=self.pool_kernel_size),
+            torch.nn.ReLU(),
+        ))
+
+        self.blocks.append(torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels=self.conv2_channels,
+                            out_channels=self.conv3_channels,
+                            kernel_size=self.conv_kernel_size,
+                            padding=self.conv_padding),
+            torch.nn.BatchNorm2d(self.conv3_channels),
+            torch.nn.MaxPool2d(kernel_size=self.pool_kernel_size),
+            torch.nn.ReLU()
+        ))
+
+        down_sample_factor = 2 ** len(self.blocks)
+        spatial_size = image_size // down_sample_factor
+        input_dim = self.conv3_channels * (spatial_size ** 2)
+        self.mlp = get_mlp(input_dim=input_dim, output_dim=len(CLASSES),
+                           n_hidden_layers=self.mlp_n_hidden_layers, hidden_dim=self.mlp_hidden_dim)
+
+        self.backward_interfaces = torch.nn.ModuleList([
+            dni.BackwardInterface(ConvSynthesizer(n_channels))
+            for n_channels in [self.conv1_channels, self.conv2_channels, self.conv3_channels]
+        ])
 
     def forward(self, x):
-        input_flattened = False
-        for i, layer in enumerate(self.layers):
-            # Flatten the convolutional layer's output to feed the linear layer.
-            if isinstance(layer, torch.nn.Linear) and not input_flattened:
-                x = x.view(-1, math.prod(x.shape[1:]))
-                input_flattened = True
+        for i, block in enumerate(self.blocks):
+            x = block(x)
+            x = self.backward_interfaces[i](x)
 
-            x = layer(x)
+        classes_scores = self.mlp(x)
 
-            if str(i) in self.dni_aux_nets:
-                x = self.dni_aux_nets[str(i)](x)  # TODO enable using context
-
-        return x
-
-    def get_positions(self, positions: List[int]) -> List[int]:
-        if positions is None:
-            return list()
-        elif positions == 'every_layer':
-            return [i for i, l in enumerate(self.layers)
-                    if isinstance(l, torch.nn.Conv2d) or isinstance(l, torch.nn.Linear)]
-        else:
-            assert isinstance(positions, list) and len(positions) > 0 and all(isinstance(i, int) for i in positions), \
-                "positions should be None, string or a list of indices"
-            return positions
-
-    def get_auxiliary_nets(self, positions: Union[None, str, List[int]]):
-        positions: List[int] = self.get_positions(positions)
-
-        auxiliary_nets: Dict[int, Union[torch.nn.Module]] = dict()
-        for i in positions:
-            layer: torch.nn.Module = self.layers[i]
-
-            if isinstance(layer, torch.nn.Conv2d):
-                aux_net = ConvAuxiliaryNet(n_channels=layer.out_channels)
-            elif isinstance(layer, torch.nn.Linear):
-                aux_net = MLPAuxiliaryNet(output_dim=layer.out_features)
-            else:
-                raise ValueError(f'Auxiliary network was asked for layer {i} but it\'s not linear/convolutional layer.')
-
-            auxiliary_nets[i] = dni.BackwardInterface(aux_net)
-
-        # For some reason `ModuleDict` expects its keys to be strings, so be it.
-        return torch.nn.ModuleDict({str(k): v for k, v in auxiliary_nets.items()})
+        return classes_scores
 
 
 def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_dim: int = 0) -> torch.nn.Sequential:

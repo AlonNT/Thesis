@@ -57,10 +57,7 @@ def evaluate_model(model: torch.nn.Module, criterion, dataloader, device):
 
             # In DGL the model forward function also return the inputs representation
             # (in addition to the classes' scores which are the prediction of the relevant auxiliary network)
-            if isinstance(result, tuple):
-                _, outputs = result
-            else:
-                outputs = result
+            outputs = result[1] if isinstance(result, tuple) else result
 
             _, predictions = torch.max(outputs, 1)
             loss = criterion(outputs, labels)
@@ -168,7 +165,7 @@ def train_model(model, criterion, optimizer_params, dataloaders, dataset_sizes, 
         epoch_loss_sum = 0.0
         epoch_corrects_sum = 0
 
-        for inputs, labels in dataloaders['train']:
+        for batch_index, (inputs, labels) in enumerate(dataloaders['train']):
             training_step += 1
             loss, predictions = perform_train_step(model, inputs, labels, criterion, optim, device, is_dgl)
 
@@ -186,6 +183,9 @@ def train_model(model, criterion, optimizer_params, dataloaders, dataset_sizes, 
                 interval_loss = interval_loss_sum / log_interval
                 interval_accuracy = (100 * interval_corrects_sum) / (log_interval * minibatch_size)
                 wandb.log(data={'train_accuracy': interval_accuracy, 'train_loss': interval_loss}, step=training_step)
+                logger.debug(f'Train-step {training_step:0>8d} | '
+                             f'loss={interval_loss:.4f} accuracy={interval_accuracy:.2f}')
+
                 interval_loss_sum = 0.0
                 interval_corrects_sum = 0
 
