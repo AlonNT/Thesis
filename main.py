@@ -17,7 +17,7 @@ def main():
     if args.device.startswith('cuda:') and not torch.cuda.is_available():
         raise ValueError("CUDA is not available, yet \'device\' was given as \'cuda:i\'.")
 
-    logger_format = '<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>'
+    logger_format = '<magenta>{time:YYYY-MM-DD HH:mm:ss}</magenta> | <level>{message}</level>'
 
     datetime_string = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     out_dir = os.path.join(args.path, datetime_string)
@@ -61,9 +61,6 @@ def main():
     device = torch.device(args.device)
     model = model.to(device)
 
-    # Define a Loss function and optimizer.
-    # We use a Classification Cross-Entropy loss,
-    # and SGD with momentum and weight_decay.
     criterion = torch.nn.CrossEntropyLoss().to(device)
     optimizer_params = dict(optimizer_type=args.optimizer_type, lr=args.learning_rate,
                             weight_decay=args.weight_decay, momentum=args.momentum)
@@ -72,8 +69,8 @@ def main():
     wandb.init(project='bgd', config=args)
     wandb.watch(model)
 
-    train_model(model, criterion, optimizer_params, dataloaders, dataset_sizes, device, args.epochs,
-                log_interval=args.log_interval, is_dgl=args.dgl, is_cdni=args.cdni)
+    train_model(model, criterion, optimizer_params, dataloaders, device,
+                args.epochs, args.log_interval, args.dgl, args.cdni)
 
 
 def parse_args():

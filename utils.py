@@ -238,7 +238,39 @@ def get_optim(model, optimizer_params, is_dgl):
         return optimizer_constuctor(model.parameters(), **optimizer_params)
 
 
-def train_model(model, criterion, optimizer_params, dataloaders, dataset_sizes, device,
+class Accumulator:
+    """
+    Accumulate loss and correct predictions of an interval,
+    to calculate later mean-loss & accuracy.
+    """
+    def __init__(self):
+        self.loss_sum: float = 0.0
+        self.corrects_sum: int = 0
+        self.total_samples: int = 0
+        self.begin_time: float = time.time()
+
+    def reset(self):
+        self.loss_sum: float = 0.0
+        self.corrects_sum: int = 0
+        self.total_samples: int = 0
+        self.begin_time: float = time.time()
+
+    def update(self, mean_loss: float, num_corrects: int, n_samples: int):
+        self.loss_sum += mean_loss * n_samples
+        self.corrects_sum += num_corrects
+        self.total_samples += n_samples
+
+    def get_mean_loss(self) -> float:
+        return self.loss_sum / self.total_samples
+
+    def get_accuracy(self) -> float:
+        return 100 * (self.corrects_sum / self.total_samples)
+
+    def get_time(self) -> float:
+        return time.time() - self.begin_time
+
+
+def train_model(model, criterion, optimizer_params, dataloaders, device,
                 num_epochs=25, log_interval=100, is_dgl=False, is_cdni=False):
     """
     A general function to train a model and return the best model found.
@@ -247,7 +279,6 @@ def train_model(model, criterion, optimizer_params, dataloaders, dataset_sizes, 
     :param criterion: which loss to train on
     :param optimizer_params: the optimizer to train with
     :param dataloaders: the dataloaders to feed the model
-    :param dataset_sizes: the sizes of the datasets
     :param device: which device to train on
     :param num_epochs: how many epochs to train
     :param log_interval: How many training/testing steps between each logging (to wandb).
@@ -255,28 +286,20 @@ def train_model(model, criterion, optimizer_params, dataloaders, dataset_sizes, 
     :param is_cdni: Whether this model is trained using DNI with context or not (affects the train-step functionality).
     :return: the model with the lowest test error
     """
-    begin_time = time.time()
-
     best_weights = copy.deepcopy(model.state_dict())
     best_accuracy = 0.0
 
     optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]] = get_optim(model, optimizer_params, is_dgl)
 
-    training_step = 0  # Will be incremented at the beginning of each training-step.
-
-    # Accumulate loss and correct predictions of the log interval, to calculate later interval loss & accuracy.
-    interval_loss_sum = 0.0
-    interval_corrects_sum = 0
+    training_step = 0
+    interval_accumulator = Accumulator()
+    epoch_accumulator = Accumulator()
 
     for epoch in range(num_epochs):
-        epoch_begin_time = time.time()
         model.train()
+        epoch_accumulator.reset()
 
-        # Accumulate loss and correct predictions of the entire epoch, to calculate later epoch loss & accuracy.
-        epoch_loss_sum = 0.0
-        epoch_corrects_sum = 0
-
-        for batch_index, (inputs, labels) in enumerate(dataloaders['train']):
+        for inputs, labels in dataloaders['train']:
             training_step += 1
 
             inputs = inputs.to(device)
@@ -284,48 +307,39 @@ def train_model(model, criterion, optimizer_params, dataloaders, dataset_sizes, 
 
             loss, predictions = perform_train_step(model, inputs, labels, criterion, optim, is_dgl, is_cdni)
 
-            minibatch_size = inputs.size(0)  # This equals the batch-size argument except in the last mini-batch
-
+            minibatch_size = inputs.size(0)  # This equals the batch-size, except in the last minibatch
             current_loss_value = loss.item()
             current_corrects_count = torch.sum(torch.eq(predictions, labels.data)).item()
-
-            epoch_loss_sum += current_loss_value * minibatch_size
-            epoch_corrects_sum += current_corrects_count
-            interval_loss_sum += current_loss_value
-            interval_corrects_sum += current_corrects_count
+            epoch_accumulator.update(current_loss_value, current_corrects_count, minibatch_size)
+            interval_accumulator.update(current_loss_value, current_corrects_count, minibatch_size)
 
             if training_step % log_interval == 0:
-                interval_loss = interval_loss_sum / log_interval
-                interval_accuracy = (100 * interval_corrects_sum) / (log_interval * minibatch_size)
-                wandb.log(data={'train_accuracy': interval_accuracy, 'train_loss': interval_loss}, step=training_step)
+                # if (training_step > 10000) and (interval_accumulator.get_mean_loss() > 0.05):
+                #     import ipdb; ipdb.set_trace()
+                wandb.log(data={'train_accuracy': interval_accumulator.get_accuracy(),
+                                'train_loss': interval_accumulator.get_mean_loss()}, step=training_step)
+                interval_accumulator.reset()
                 # logger.debug(f'Train-step {training_step:0>8d} | '
                 #              f'loss={interval_loss:.4f} accuracy={interval_accuracy:.2f}')
 
-                interval_loss_sum = 0.0
-                interval_corrects_sum = 0
-
-        epoch_train_loss = epoch_loss_sum / dataset_sizes['train']
-        epoch_train_accuracy = 100 * (epoch_corrects_sum / dataset_sizes['train'])
+        epoch_train_loss = epoch_accumulator.get_mean_loss()
+        epoch_train_accuracy = epoch_accumulator.get_accuracy()
 
         epoch_test_loss, epoch_test_accuracy = evaluate_model(model, criterion, dataloaders['test'], device)
         wandb.log(data={'test_accuracy': epoch_test_accuracy, 'test_loss': epoch_test_loss}, step=training_step)
 
-        # if the current model reached the best results so far,
-        # deep copy the weights of the model
+        # if the current model reached the best results so far, deep copy the weights of the model.
         if epoch_test_accuracy > best_accuracy:
             best_accuracy = epoch_test_accuracy
             best_weights = copy.deepcopy(model.state_dict())
 
-        epoch_time_elapsed = time.time() - epoch_begin_time
+        epoch_time_elapsed = epoch_accumulator.get_time()
         logger.info(f'Epoch {epoch+1:0>2d}/{num_epochs:0>2d} | '
                     f'{int(epoch_time_elapsed // 60):d}m {int(epoch_time_elapsed) % 60:0>2d}s | '
                     f'Train loss={epoch_train_loss:.4f} accuracy={epoch_train_accuracy:.2f}% | '
                     f'Test loss={epoch_test_loss:.4f} accuracy={epoch_test_accuracy:.2f}%')
 
-    time_elapsed = time.time() - begin_time
-    logger.info(f'Training {num_epochs:0>2d} epochs completed in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s')
     logger.info(f'Best test accuracy: {best_accuracy:.2f}%')
 
-    # load best model weights
-    model.load_state_dict(best_weights)
+    model.load_state_dict(best_weights)  # load best model weights
     return model
