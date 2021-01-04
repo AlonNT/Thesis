@@ -9,7 +9,15 @@ that will possibly allow parallelization over the layers
 
 ### [A Simple Framework for Contrastive Learning of Visual Representations]
 
-This paper presents SimCLR: a simple framework for contrastive learning of visual representations.
+This paper presents SimCLR: a simple framework for contrastive learning of visual representations. \
+The self-supervised task is to identify that different augmentations of the same image are the same.
+
+![SimCLR architecture](images/simclr_architecture.png "SimCLR Architecture")
+
+Take home messages:
+- Composition of data augmentations is important.
+- Adding a nonlinear transformation between the representation and the contrastive loss helps.
+- Contrastive learning benefits from larger batch sizes and more training steps compared to supervised learning.
 
 ### [Big Self-Supervised Models are Strong Semi-Supervised Learners]
 
@@ -29,17 +37,71 @@ Future read.
 
 ### [Putting An End to End-to-End: Gradient-Isolated Learning of Representations]
 
+Train a neural-network in a self-supervised, local manner (i.e. without labels and without end-to-end backpropagation). 
+
+![Greedy InfoMax architecture](images/greedy_infomax_architecture.png "Greedy InfoMax architecture")
+
+It uses the InfoNCE objective developed in CPC paper ([Representation Learning with Contrastive Predictive Coding]). \
+Essentially, this objective pairs the representations of temporally nearby patches 
+and contrasts them against random pairs. Therefore, as shown in CPC paper, it maximizes the mutual information 
+between temporally nearby representations.
+
+Take home messages:
+- Local learning is possible in the regime of self-supervised learning. 
+- Interesting self-supervised task - maximize the mutual information between temporally nearby representations 
+  (e.g. different patches of the same image).
+
 ### [LoCo: Local Contrastive Representation Learning]
+
+Show that by overlapping local blocks stacking on top of each other, 
+we effectively increase the decoder depth 
+and allow upper blocks to implicitly send feedbacks to lower blocks.
+
+![Loco v.s. Greedy InfoMax](images/loco_vs_greedy_infomax.png "Loco v.s. Greedy InfoMax")
+
+This simple design closes the performance gap between local learning
+and end-to-end contrastive learning algorithms for the first time.
+Aside from standard ImageNet experiments, also show results on complex downstream tasks
+such as object detection and instance segmentation.
+
+Take home messages:
+- The overlapping enables "communication" between lower and upper layers.
+- Self-supervised local learning can reach the performance of supervised back-propagation learning.
 
 ## Synthetic Gradients
 
 ### [Decoupled Neural Interfaces using Synthetic Gradients]
 
+Use auxiliary networks to decouple sub-graphs, enabling updating them independently and asynchronously.
+
+![Decoupled Interfaces](images/decoupled_interfaces.png "Decoupled Interfaces")
+
+In particular focus on using the modelled synthetic gradient in place of true back-propagated error gradients.
+
+![Synthetic Gradients](images/synthetic_gradients.png "Synthetic Gradients")
+
+Predicting the inputs to downstream layers is also possible, completely unlocking (i.e. forward-locking) the training.
+
+![Completely Unlocked Model](images/completely_unlocked.png "Completely Unlocked Model")
+
+Take home messages:
+- Notions of backward-locking, update-locking and forward-locking. \
+  All of them are possible (to some extent).
+- It works, but (quite) worse than regular back-propagation.
+
 ### [Understanding Synthetic Gradients and Decoupled Neural Interfaces]
+
+Provide some theoretical explanations to synthetic gradients, for example:
+- The critical points of the original optimization problem are maintained when using synthetic-gradients.
+- Analyze the learning dynamics of synthetic gradients. 
 
 ## Layerwise Optimization
 
 ### [A Provably Correct Algorithm for Deep Learning that Actually Works]
+
+Create a toy dataset containing digits that are generated hierarchically, and prove layerwise optimization works.
+
+![Hierarchical Digits Generation](images/hierarchical_digits_generation.png "hierarchical_digits_generation")
 
 ### [Greedy Layerwise Learning Can Scale to ImageNet]
 
