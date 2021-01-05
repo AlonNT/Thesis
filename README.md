@@ -14,7 +14,7 @@ This paper presents SimCLR: a simple framework for contrastive learning of visua
 The self-supervised task is to identify that different augmentations of the same image are the same.
 
 <p align="center">
-<img src="images/simclr_architecture.png" alt="SimCLR Architecture" width="40%"/>
+<img src="images/simclr_architecture.png" alt="SimCLR Architecture" width="70%"/>
 </p>
 
 Take home messages:
@@ -44,7 +44,9 @@ representations that provably decreases the sample complexity of downstream supe
 
 Train a neural-network in a self-supervised, local manner (i.e. without labels and without end-to-end backpropagation).
 
-![Greedy InfoMax architecture](images/greedy_infomax_architecture.png "Greedy InfoMax architecture")
+<p align="center">
+<img src="images/greedy_infomax_architecture.png" alt="Greedy InfoMax architecture" width="60%"/>
+</p>
 
 It uses the InfoNCE objective developed in CPC paper ([Representation Learning with Contrastive Predictive Coding]). \
 Essentially, this objective pairs the representations of temporally nearby patches and contrasts them against random
@@ -61,7 +63,9 @@ Take home messages:
 Show that by overlapping local blocks stacking on top of each other, we effectively increase the decoder depth and allow
 upper blocks to implicitly send feedbacks to lower blocks.
 
-![Loco v.s. Greedy InfoMax](images/loco_vs_greedy_infomax.png "Loco v.s. Greedy InfoMax")
+<p align="center">
+<img src="images/loco_vs_greedy_infomax.png" alt="Loco v.s. Greedy InfoMax" width="90%"/>
+</p>
 
 This simple design closes the performance gap between local learning and end-to-end contrastive learning algorithms for
 the first time. Aside from standard ImageNet experiments, also show results on complex downstream tasks such as object
@@ -78,15 +82,21 @@ Take home messages:
 
 Use auxiliary networks to decouple sub-graphs, enabling updating them independently and asynchronously.
 
-![Decoupled Interfaces](images/decoupled_interfaces.png "Decoupled Interfaces")
+<p align="center">
+<img src="images/decoupled_interfaces.png" alt="Decoupled Interfaces" width="40%"/>
+</p>
 
 In particular focus on using the modelled synthetic gradient in place of true back-propagated error gradients.
 
-![Synthetic Gradients](images/synthetic_gradients.png "Synthetic Gradients")
+<p align="center">
+<img src="images/synthetic_gradients.png" alt="Synthetic Gradients" width="20%"/>
+</p>
 
 Predicting the inputs to downstream layers is also possible, completely unlocking (i.e. forward-unlocking) the training.
 
-![Completely Unlocked Model](images/completely_unlocked.png "Completely Unlocked Model")
+<p align="center">
+<img src="images/completely_unlocked.png" alt="Completely Unlocked Model" width="70%"/>
+</p>
 
 Take home messages:
 
@@ -107,13 +117,17 @@ Provide some theoretical explanations to synthetic gradients, for example:
 
 Create a toy dataset containing digits that are generated hierarchically, and prove layerwise optimization works.
 
-![Hierarchical Digits Generation](images/hierarchical_digits_generation.png "Hierarchical Digits Generation")
+<p align="center">
+<img src="images/hierarchical_digits_generation.png" alt="Hierarchical Digits Generation" width="90%"/>
+</p>
 
 ### [Greedy Layerwise Learning Can Scale to ImageNet] (Dec 2018)
 
 Show that greedy layerwise optimization can reach competitive performance on ImageNet.
 
-![Greedy Layerwise Model](images/greedy_layerwise_model.png "Greedy Layerwise Model")
+<p align="center">
+<img src="images/greedy_layerwise_model.png" alt="Greedy Layerwise Model" width="90%"/>
+</p>
 
 Take home messages:
 - local optimization works.
@@ -125,24 +139,34 @@ Take home messages:
 Show that the greedy layerwise model can be trained in parallel, 
 with the possibility of adding a buffer between two adjacent layers to completely unlocking the training process.
 
-![DGL v.s. DNI](images/dgl_vs_dni_models.png "DGL v.s. DNI")
+<p align="center">
+<img src="images/dgl_vs_dni_models.png" alt="DGL v.s. DNI" width="90%"/>
+</p>
 
 ### [Parallel Training of Deep Networks with Local Updates] (Dec 2020)
 
 Provide the first large scale investigation into local update methods in both vision and language domains.
 
-![Comparing Local Learning Methods](images/comparing_local_learning_methods.png "Comparing Local Learning Methods")
+<p align="center">
+<img src="images/comparing_local_learning_methods.png" alt="Comparing Local Learning Methods" width="90%"/>
+</p>
 
 Take home messages:
 - Same as LoCo (which was done in the self-supervised setting),
   overlapping of layers seems to help also in the supervised local learning framework.
 - Gradients of earlier layers differ from the true gradients (of regular back-prop).
-  ![Gradient Similarities](images/gradient_silimarity_local_and_global.png "Gradient Similarities")
+  <p align="center">
+  <img src="images/gradient_silimarity_local_and_global.png" alt="Gradient Similarities" width="30%"/>
+  </p>
 - Global back-propagation demonstrates higher capacity, in that it is able to memorize the dataset
   better than local greedy backpropagation.
-  ![Fitting to Random Labels](images/fitting_to_random_labels.png "Fitting to Random Labels")
+  <p align="center">
+  <img src="images/fitting_to_random_labels.png" alt="Fitting to Random Labels" width="30%"/>
+  </p>
 - Local methods learn different features (e.g. the first conv filters "look" different).
-  ![Filters Comparison](images/filters_comparison.png "Filters Comparison")
+  <p align="center">
+  <img src="images/filters_comparison.png" alt="Filters Comparison" width="80%"/>
+  </p>
 
 ## Feedback Alignment
 
@@ -151,7 +175,9 @@ Take home messages:
 Instead of multiplying the back-propagated gradients with the forward weight matrix transposed,
 multiply by a random matrix. The motivation is to obtain a more biological plausible learning rule.
 
-![Feedback Alignment](images/feedback_alignment.png "Feedback Alignment")
+<p align="center">
+<img src="images/feedback_alignment.png" alt="Feedback Alignment" width="30%"/>
+</p>
 
 Take home messages:
 - The network "learns to learn".
@@ -159,7 +185,9 @@ Take home messages:
   meaning the direction of progress is still "descending". \
   Interestingly, the angle between the pseudo-inverse of the forward weight matrix goes to zero.
   
-  ![Angles Comparison](images/angles_comparison.png "Angles Comparison")
+  <p align="center">
+  <img src="images/angles_comparison.png" alt="Angles Comparison" width="40%"/>
+  </p>
 
   Note that there is also the "Nature communications" version: [Random synaptic feedback weights support error backpropagation for deep learning]
 
@@ -169,7 +197,9 @@ Instead of using a random matrix to multiply with the back-propagated gradient,
 use a random matrix for multiplying the top error directly (without backward passing through the top layers).
 This enables backward-unlocking of the training process.
 
-![Direct Feedback Alignment](images/direct_feedback_alignment.png "Direct Feedback Alignment")
+<p align="center">
+<img src="images/direct_feedback_alignment.png" alt="Direct Feedback Alignment" width="50%"/>
+</p>
 
 Take home messages:
 - Learning is possible even when the feedback path is disconnected from the forward path.
@@ -182,7 +212,9 @@ Showed empirically that direct feedback alignment works on a variety of differen
 such as neural view synthesis (e.g. NeRF), click-through rate prediction with recommender systems,
 geometric learning with graph-convolutional networks and NLP with transformers.
 
-![Neural View Synthesis](images/nerf_comparison.png "Neural View Synthesis")
+<p align="center">
+<img src="images/nerf_comparison.png" alt="Neural View Synthesis" width="90%"/>
+</p>
 
 Take home messages:
 - Seems to work okay but not as good as back-prop.
