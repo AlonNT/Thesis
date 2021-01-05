@@ -13,7 +13,9 @@ layers
 This paper presents SimCLR: a simple framework for contrastive learning of visual representations. \
 The self-supervised task is to identify that different augmentations of the same image are the same.
 
-![SimCLR architecture](images/simclr_architecture.png "SimCLR Architecture")
+<p align="center">
+<img src="images/simclr_architecture.png" alt="SimCLR Architecture" width="40%"/>
+</p>
 
 Take home messages:
 
@@ -156,6 +158,7 @@ Take home messages:
 - The angle between the directions of feedback alignment and back-prop decreases to below 90 degrees,
   meaning the direction of progress is still "descending". \
   Interestingly, the angle between the pseudo-inverse of the forward weight matrix goes to zero.
+  
   ![Angles Comparison](images/angles_comparison.png "Angles Comparison")
 
   Note that there is also the "Nature communications" version: [Random synaptic feedback weights support error backpropagation for deep learning]
