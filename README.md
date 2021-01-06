@@ -1,8 +1,62 @@
-# Beyond Back-Propagation
+# Introduction
 
 Trying to figure out a way to optimize neural-networks differently, that will possibly allow parallelization over the
 layers
 (inherently impossible in back-propagation).
+
+# Experiments
+
+I implemented Decoupled Greedy Learning (took some inspiration from [DGL repo])
+I also use [DNI repo] which implemented "Decoupled Neural Interfaces" to incorporate synthetic gradients in my experiments.
+I launched training on CIFAR-10 dataset.
+The main architecture is (Conv-BatchNorm-ReLU-MaxPool) x 3, followed by a multi-layer-perceptron with 1 hidden layer.
+Each conv layer has 128 channels with kernel-size 5 and resolution-preserving padding.
+Each affine hidden layer in a multi-layer-perceptron contains 256 channels.
+There are 4 variants to the model and training process:
+- Regular: The main architecture without changes, as explained previously.
+- DGL: Decoupled-Greedy-Learning \
+  This model contains an auxiliary network after each block (i.e. Conv-BatchNorm-ReLU-MaxPool).
+  Each auxiliary network is a multi-layer-perceptron with 1 hidden layer,
+  which predicts the final target (i.e. the classes' scores),
+  and it provides the gradient for the relevant block.
+  Note that the last "auxiliary network" is actually a part of the final model. \
+  The model is implemented in the class `MainNetDGL` in the file `model.py`.
+- DNI: Decoupled-Neural-Interface \
+  This model contains an auxiliary network after each block (i.e. Conv-BatchNorm-ReLU-MaxPool).
+  Each auxiliary network is a CNN containing Conv-BatchNorm-Conv-BatchNorm-Conv
+  which preserve the input tensor dimensions (both channels and spatial size).
+  The auxiliary network predicts the back-propagated gradient of the downstream layers.
+  The model is implemented in the class `MainNetDNI` in the file `model.py`.
+- cDNI: Context-Decoupled-Neural-Interface.
+  This is the same as DNI except that a "context" (i.e. the label) is provided for each auxiliary network.
+  This is done by multiplying the one-hot vector representing the label with a linear layer
+  and performs element-wise addition of the result with the output of the first conv layer.
+
+The graphs describing the experiments results are attached.
+Ignore the sudden "peaks", it is some sort of numerical issue with my accumulator of the loss and accuracy.
+
+<p align="center">
+<img src="images/train_loss_dgl_dni.svg" alt="Train loss" width="80%"/>
+</p>
+<p align="center">
+<img src="images/test_loss_dgl_dni.svg" alt="Test loss" width="80%"/>
+</p>
+<p align="center">
+<img src="images/train_acc_dgl_dni.svg" alt="Train Accuracy" width="80%"/>
+</p>
+<p align="center">
+<img src="images/test_acc_dgl_dni.svg" alt="Test Accuracy" width="80%"/>
+</p>
+
+Conclusions:
+- Both DGL and the regular model completely overfitted the training-data pretty fast,
+  but DNI didn't, and cDNI "almost" did it but not completely. \
+  This is probably due to the fact that synthetic gradients don't use the full capacity of the model which causes under-fitting.
+- DGL slightly outperformed the regular model with respect to the test accuracy (77.6% v.s. 76.5%). \
+  cDNI reached 73.7% (later slightly degraded to 71%-72%). \
+  DNI lack behind with 65.6% (later degraded to 58%-60%). \
+  My hypothesis is that DGL causes some sort of "regularization" which caused it to outperform
+  the regular training, even though they both reached 0 loss.
 
 # Related Work
 
@@ -262,3 +316,7 @@ Take home messages:
 [Convex Optimization]: https://web.stanford.edu/~boyd/cvxbook/bv_cvxbook.pdf
 
 [Online Learning and Online Convex Optimization]: https://www.cs.huji.ac.il/~shais/papers/OLsurvey.pdf
+
+[DGL repo]: https://github.com/eugenium/DGL
+
+[DNI repo]: https://github.com/koz4k/dni-pytorch
