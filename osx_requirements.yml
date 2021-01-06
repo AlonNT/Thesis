@@ -1,0 +1,12 @@
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+dependencies:
+  - pytorch
+  - torchvision
+  - seaborn
+  - matplotlib
+  - pandas
+  - loguru
+  - wandb
