@@ -36,16 +36,16 @@ The graphs describing the experiments results are attached.
 Ignore the sudden "peaks", it is some sort of numerical issue with my accumulator of the loss and accuracy.
 
 <p align="center">
-<img src="images/train_loss_dgl_dni.svg" alt="Train loss" width="80%"/>
+<img src="images/train_loss_dgl_dni.svg" alt="Train loss" width="95%"/>
 </p>
 <p align="center">
-<img src="images/test_loss_dgl_dni.svg" alt="Test loss" width="80%"/>
+<img src="images/test_loss_dgl_dni.svg" alt="Test loss" width="95%"/>
 </p>
 <p align="center">
-<img src="images/train_acc_dgl_dni.svg" alt="Train Accuracy" width="80%"/>
+<img src="images/train_acc_dgl_dni.svg" alt="Train Accuracy" width="95%"/>
 </p>
 <p align="center">
-<img src="images/test_acc_dgl_dni.svg" alt="Test Accuracy" width="80%"/>
+<img src="images/test_acc_dgl_dni.svg" alt="Test Accuracy" width="95%"/>
 </p>
 
 Conclusions:
