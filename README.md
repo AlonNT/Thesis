@@ -64,7 +64,7 @@ Conclusions:
 
 ### [A Simple Framework for Contrastive Learning of Visual Representations] (Feb 2020)
 
-This paper presents SimCLR: a simple framework for contrastive learning of visual representations. \
+This paper presents SimCLR: A simple framework for contrastive learning of visual representations. \
 The self-supervised task is to identify that different augmentations of the same image are the same.
 
 <p align="center">
@@ -79,7 +79,27 @@ Take home messages:
 
 ### [Big Self-Supervised Models are Strong Semi-Supervised Learners] (Jun 2020)
 
-Future read.
+This paper presents SimCLRv2: A model based on SimCLR with improvements that reached new state-of-the-art. Generally, the training phase contains three stages: self-supervised pretraining, followed by supervised fine-tuning, and finally distillation with unlabeled examples. Additionally:
+- The backbone which learns the representation in a self-supervised way is much larger than original SimCLR - ResNet-152 (3x+SK) v.s. ResNet-50 (4x).
+- Later, in the third stage, the model can be made smaller via student-teacher distillation.
+- The model uses several "deep-learning tricks" that "make better use of the parameters", such as selective kernels, channel-wise attention mechanism, etc.
+
+<p align="center">
+<img src="images/SimCLRv2_general_idea.png" alt="SimCLRv2 framework" width="60%"/>
+</p>
+
+Take home messages:
+- Notions of task-agnostic v.s. task-specific use of unlabeled data. 
+  The first stage (self-supervised pretraining as in original SimCLR) is task-agnostic, 
+  whereas the last stage of distillation via unlabeled examples is task-specific.
+- The fewer the labels, the more it is possible to benefit from a bigger model.
+  <p align="center">
+  <img src="images/SimCLRv2_improvements_per_size.png" alt="Improvement per #parameters" width="40%"/>
+  </p>
+- Bigger / deeper projection heads improve representation learning.
+  <p align="center">
+  <img src="images/SimCLRv1_head_size.png" alt="Bigger heads" width="40%"/>
+  </p>
 
 ### [Representation Learning with Contrastive Predictive Coding] (Jul 2018)
 
