@@ -6,10 +6,87 @@ import torchvision
 import itertools
 import wandb
 
-from typing import List, Union
+from typing import List, Union, Optional
 from loguru import logger
 
 from consts import CLASSES
+
+
+def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_dim: int = 0) -> torch.nn.Sequential:
+    """
+    This function builds a MLP (i.e. Multi-Layer-Perceptron) and return it as a PyTorch's sequential model.
+
+    :param input_dim: The dimension of the input tensor.
+    :param output_dim: The dimension of the output tensor.
+    :param n_hidden_layers: Number of hidden layers.
+    :param hidden_dim: The dimension of each hidden layer.
+    :return: A sequential model which is the constructed MLP.
+    """
+    # Begins with a flatten layer. It's useful when the input is 4D from a conv layer, and harmless otherwise..
+    layers: List[torch.nn.Module] = [torch.nn.Flatten()]
+
+    for i in range(n_hidden_layers):
+        layers.append(torch.nn.Linear(in_features=input_dim if i == 0 else hidden_dim,
+                                      out_features=hidden_dim))
+        layers.append(torch.nn.ReLU())
+
+    layers.append(torch.nn.Linear(in_features=input_dim if n_hidden_layers == 0 else hidden_dim,
+                                  out_features=output_dim))
+
+    return torch.nn.Sequential(*layers)
+
+
+def get_cnn(conv_layers_channels: Optional[List[int]] = None,
+            affine_layers_channels: Optional[List[int]] = None) -> torch.nn.Sequential:
+    """
+    This function builds a CNN and return it as a PyTorch's sequential model.
+
+    :param conv_layers_channels: A list of integers containing the channels of each convolution block.
+                                 Each block will contain Conv - BatchNorm - MaxPool - ReLU.
+                                 Defaults to 128, 128, 128.
+    :param affine_layers_channels: A list of integers containing the channels of each linear layer.
+                                 Defaults to 256, 10.
+    :return: A sequential model which is the constructed CNN.
+    """
+    if conv_layers_channels is None:
+        conv_layers_channels = [128, 128, 128]
+    if affine_layers_channels is None:
+        affine_layers_channels = [256, len(CLASSES)]
+
+    conv_kernel_size = 5
+    padding = 2
+    pool_kernel_size = 2
+    image_size = 32
+
+    layers: List[torch.nn.Module] = list()
+
+    in_channels = 3  # 3 channels corresponding to RGB channels in the original images.
+    for conv_layer_channels in conv_layers_channels:
+        out_channels = conv_layer_channels
+
+        layers.append(torch.nn.Conv2d(in_channels=in_channels,
+                                      out_channels=out_channels,
+                                      kernel_size=conv_kernel_size,
+                                      padding=padding))
+        layers.append(torch.nn.BatchNorm2d(out_channels))
+        layers.append(torch.nn.ReLU())
+        layers.append(torch.nn.MaxPool2d(kernel_size=pool_kernel_size))
+
+        in_channels = out_channels
+
+    layers.append(torch.nn.Flatten())
+
+    down_sample_factor = 2 ** len(conv_layers_channels)
+    spatial_size = image_size // down_sample_factor
+    in_features = conv_layers_channels[-1] * (spatial_size ** 2)
+    for i, affine_layer_channels in enumerate(affine_layers_channels):
+        layers.append(torch.nn.Linear(in_features=in_features, out_features=affine_layer_channels))
+        if i < len(affine_layers_channels) - 1:  # Do not append ReLU in the last affine layer.
+            layers.append(torch.nn.ReLU())
+
+        in_features = affine_layer_channels
+
+    return torch.nn.Sequential(*layers)
 
 
 def one_hot(indices: torch.Tensor, device: torch.device):
@@ -27,36 +104,56 @@ def one_hot(indices: torch.Tensor, device: torch.device):
     return torch.autograd.Variable(result)
 
 
-def get_data(batch_size: int = 32):
+def get_dataloaders(batch_size: int = 32,
+                    normalize_to_unit_gaussian: bool = False,
+                    normalize_to_plus_minus_one: bool = False,
+                    random_crop: bool = False,
+                    random_horizontal_flip: bool = False,
+                    random_erasing: bool = False):
     """
-    Get the CIFAR10 data.
+    Get dataloaders for the CIFAR10 dataset.
     :param batch_size: The size of the mini-batches to initialize the dataloaders.
-    :return: image_datasets: Dictionary mapping "train"/"test" to its dataset
-             dataloaders:    Dictionary mapping "train"/"test" to its dataloader
-             dataset_sizes:  Dictionary mapping "train"/"test" to its dataset size
-             classes:        tuple of 10 classes names in the correct order
+    :param normalize_to_unit_gaussian: If true, normalize the values to be in the range [-1,1] (instead of [0,1]).
+    :param normalize_to_plus_minus_one: If true, normalize the values to be a unit gaussian.
+    :param random_crop: If true, performs padding of 4 followed by random crop.
+    :param random_horizontal_flip: If true, performs random horizontal flip.
+    :param random_erasing: If true, performs erase a random rectangle in the image.
+                           See https://arxiv.org/pdf/1708.04896.pdf.
+    :return: A dictionary mapping "train"/"test" to its dataloader.
     """
-    # For the use of 0.5 for the normalization, see:
-    # https://discuss.pytorch.org/t/normalization-in-the-mnist-example/457/7
-    image_datasets = {x: torchvision.datasets.CIFAR10(root='./data',
-                                                      train=(x == 'train'),
-                                                      transform=torchvision.transforms.Compose(
-                                                          [torchvision.transforms.ToTensor(),
-                                                           torchvision.transforms.Normalize((0.5, 0.5, 0.5),
-                                                                                            (0.5, 0.5, 0.5))]
-                                                      ),
-                                                      download=False)  # Change to download=True in the first time.
-                      for x in ['train', 'test']}
+    transforms = {'train': list(), 'test': list()}
+    if random_horizontal_flip:
+        transforms['train'].append(torchvision.transforms.RandomHorizontalFlip())
+    if random_crop:
+        transforms['train'].append(torchvision.transforms.RandomCrop(size=32, padding=4))
+    for t in ['train', 'test']:
+        transforms[t].append(torchvision.transforms.ToTensor())
+    if normalize_to_plus_minus_one or normalize_to_unit_gaussian:
+        assert not (normalize_to_plus_minus_one and normalize_to_unit_gaussian)
+        # For the different normalization values see:
+        # https://discuss.pytorch.org/t/normalization-in-the-mnist-example/457/7
+        if normalize_to_unit_gaussian:
+            normalization_values = [(0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)]
+        else:
+            normalization_values = [(0.5, 0.5, 0.5), (0.5, 0.5, 0.5)]
+        for t in ['train', 'test']:
+            transforms[t].append(torchvision.transforms.Normalize(*normalization_values))
+    if random_erasing:
+        transforms['train'].append(torchvision.transforms.RandomErasing())
 
-    dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'test']}
+    datasets = {t: torchvision.datasets.CIFAR10(root='./data',
+                                                train=(t == 'train'),
+                                                transform=torchvision.transforms.Compose(transforms[t]),
+                                                download=False)
+                for t in ['train', 'test']}
 
-    dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x],
+    dataloaders = {t: torch.utils.data.DataLoader(datasets[t],
                                                   batch_size=batch_size,
-                                                  shuffle=True,
+                                                  shuffle=(t == 'train'),
                                                   num_workers=0)
-                   for x in ['train', 'test']}
+                   for t in ['train', 'test']}
 
-    return image_datasets, dataloaders, dataset_sizes
+    return dataloaders
 
 
 def evaluate_model(model, criterion, dataloader, device):
@@ -113,15 +210,17 @@ def perform_train_step_dgl(model, inputs, labels, criterion, optim):
     """
     inputs_representation = inputs
     for i in range(len(model.blocks)):
-        optim[i].zero_grad()
+        if optim[i] is not None:
+            optim[i].zero_grad()
 
         inputs_representation, outputs = model(inputs_representation,
                                                first_block_index=i, last_block_index=i)
-        _, predictions = torch.max(outputs, 1)
-        loss = criterion(outputs, labels)
+        if outputs is not None:
+            _, predictions = torch.max(outputs, 1)
+            loss = criterion(outputs, labels)
 
-        loss.backward()
-        optim[i].step()
+            loss.backward()
+            optim[i].step()
 
         inputs_representation = inputs_representation.detach()
 
@@ -229,9 +328,13 @@ def get_optim(model, optimizer_params, is_dgl):
         optimizers = list()
 
         for i in range(len(model.blocks)):
-            parameters_to_train = itertools.chain(model.blocks[i].parameters(), model.auxiliary_nets[i].parameters())
-            optimizer = optimizer_constuctor(parameters_to_train, **optimizer_params)
-            optimizers.append(optimizer)
+            if model.auxiliary_nets[i] is None:
+                optimizers.append(None)
+            else:
+                parameters_to_train = itertools.chain(model.blocks[i].parameters(),
+                                                      model.auxiliary_nets[i].parameters())
+                optimizer = optimizer_constuctor(parameters_to_train, **optimizer_params)
+                optimizers.append(optimizer)
 
         return optimizers
     else:

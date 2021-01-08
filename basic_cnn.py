@@ -1,87 +1,10 @@
 import torch
 
-from typing import List, Optional
+from typing import Optional
 
 from dni import dni
 from consts import CLASSES
-from utils import one_hot
-
-
-def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_dim: int = 0) -> torch.nn.Sequential:
-    """
-    This function builds a MLP (i.e. Multi-Layer-Perceptron) and return it as a PyTorch's sequential model.
-
-    :param input_dim: The dimension of the input tensor.
-    :param output_dim: The dimension of the output tensor.
-    :param n_hidden_layers: Number of hidden layers.
-    :param hidden_dim: The dimension of each hidden layer.
-    :return: A sequential model which is the constructed MLP.
-    """
-    # Begins with a flatten layer. It's useful when the input is 4D from a conv layer, and harmless otherwise..
-    layers: List[torch.nn.Module] = [torch.nn.Flatten()]
-
-    for i in range(n_hidden_layers):
-        layers.append(torch.nn.Linear(in_features=input_dim if i == 0 else hidden_dim,
-                                      out_features=hidden_dim))
-        layers.append(torch.nn.ReLU())
-
-    layers.append(torch.nn.Linear(in_features=input_dim if n_hidden_layers == 0 else hidden_dim,
-                                  out_features=output_dim))
-
-    return torch.nn.Sequential(*layers)
-
-
-def get_cnn(conv_layers_channels: Optional[List[int]] = None,
-            affine_layers_channels: Optional[List[int]] = None) -> torch.nn.Sequential:
-    """
-    This function builds a CNN and return it as a PyTorch's sequential model.
-
-    :param conv_layers_channels: A list of integers containing the channels of each convolution block.
-                                 Each block will contain Conv - BatchNorm - MaxPool - ReLU.
-                                 Defaults to 128, 128, 128.
-    :param affine_layers_channels: A list of integers containing the channels of each linear layer.
-                                 Defaults to 256, 10.
-    :return: A sequential model which is the constructed CNN.
-    """
-    if conv_layers_channels is None:
-        conv_layers_channels = [128, 128, 128]
-    if affine_layers_channels is None:
-        affine_layers_channels = [256, len(CLASSES)]
-
-    conv_kernel_size = 5
-    padding = 2
-    pool_kernel_size = 2
-    image_size = 32
-
-    layers: List[torch.nn.Module] = list()
-
-    in_channels = 3  # 3 channels corresponding to RGB channels in the original images.
-    for conv_layer_channels in conv_layers_channels:
-        out_channels = conv_layer_channels
-
-        layers.append(torch.nn.Conv2d(in_channels=in_channels,
-                                      out_channels=out_channels,
-                                      kernel_size=conv_kernel_size,
-                                      padding=padding))
-        layers.append(torch.nn.BatchNorm2d(out_channels))
-        layers.append(torch.nn.ReLU())
-        layers.append(torch.nn.MaxPool2d(kernel_size=pool_kernel_size))
-
-        in_channels = out_channels
-
-    layers.append(torch.nn.Flatten())
-
-    down_sample_factor = 2 ** len(conv_layers_channels)
-    spatial_size = image_size // down_sample_factor
-    in_features = conv_layers_channels[-1] * (spatial_size ** 2)
-    for i, affine_layer_channels in enumerate(affine_layers_channels):
-        layers.append(torch.nn.Linear(in_features=in_features, out_features=affine_layer_channels))
-        if i < len(affine_layers_channels) - 1:  # Do not append ReLU in the last affine layer.
-            layers.append(torch.nn.ReLU())
-
-        in_features = affine_layer_channels
-
-    return torch.nn.Sequential(*layers)
+from utils import one_hot, get_mlp
 
 
 class ConvSynthesizer(torch.nn.Module):
@@ -130,7 +53,7 @@ class ConvSynthesizer(torch.nn.Module):
         return x
 
 
-class MainNetDNI(torch.nn.Module):
+class CNNwDNI(torch.nn.Module):
     """
     This class represents the main network which uses Decoupled-Neural-Interfaces.
     The network consists of 3 blocks of Conv - BatchNorm - MaxPool - ReLU.
@@ -138,7 +61,7 @@ class MainNetDNI(torch.nn.Module):
     from the synthetic gradients module, which is a ConvSynthesizer (see above).
     """
     def __init__(self, use_context: bool = False):
-        super(MainNetDNI, self).__init__()
+        super(CNNwDNI, self).__init__()
 
         self.use_context = use_context
 
@@ -223,7 +146,7 @@ class MainNetDNI(torch.nn.Module):
         return classes_scores
 
 
-class MainNetDGL(torch.nn.Module):
+class CNNwDGL(torch.nn.Module):
     """
     This class represents the main network which is a CNN using Decoupled-Greedy-Learning.
     The network consists of 3 blocks of Conv - BatchNorm - MaxPool - ReLU.
@@ -231,7 +154,7 @@ class MainNetDGL(torch.nn.Module):
     The last MLP is conceptually a part of the network, since in test-mode it will provide the predictions.
     """
     def __init__(self):
-        super(MainNetDGL, self).__init__()
+        super(CNNwDGL, self).__init__()
 
         # Hyper-parameters defining the architecture.
         self.conv1_channels = 128

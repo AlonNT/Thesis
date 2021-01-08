@@ -7,8 +7,28 @@ import wandb
 import torch
 from loguru import logger
 
-from model import MainNetDGL, MainNetDNI, get_cnn
-from utils import get_data, train_model
+from basic_cnn import CNNwDGL, CNNwDNI
+from vgg import VGG, VGGwDGL
+from utils import get_dataloaders, train_model, get_cnn
+
+
+def get_model(args):
+    if args.model == "CNN":
+        if args.dgl:
+            return CNNwDGL(), 'CNN with DGL'
+        elif args.dni:
+            return CNNwDNI(), 'CNN with DNI'
+        elif args.cdni:
+            return CNNwDNI(use_context=True), 'CNN with cDNI'
+        else:
+            return get_cnn(), 'CNN'
+    elif args.model.startswith('VGG'):
+        if args.dgl:
+            return VGGwDGL(args.model), f'{args.model} with DGL'
+        else:
+            return VGG(args.model), args.model
+    else:
+        raise ValueError(f'Illegal \'model\': {args.model}.')
 
 
 def main():
@@ -31,15 +51,9 @@ def main():
     logger.add(sink=sys.stdout, format=logger_format)
     logger.add(sink=os.path.join(out_dir, 'run.log'), format=logger_format)
 
-    if args.dni:
-        model_str = 'CNN with DNI'
-    elif args.cdni:
-        model_str = 'CNN with cDNI'
-    elif args.dgl:
-        model_str = 'CNN with DGL'
-    else:
-        model_str = 'Regular CNN'
-    logger.info(f'Starting to train {model_str} '
+    model, model_name = get_model(args)
+
+    logger.info(f'Starting to train {model_name} '
                 f'for {args.epochs} epochs '
                 f'(using device {args.device}) | '
                 f'optimizer-type={args.optimizer_type}, '
@@ -49,24 +63,20 @@ def main():
                 f'momentum={args.momentum}',
                 f'log-interval={args.log_interval}')
 
-    if args.dgl:
-        model = MainNetDGL()
-    elif args.dni:
-        model = MainNetDNI()
-    elif args.cdni:
-        model = MainNetDNI(use_context=True)
-    else:
-        model = get_cnn()
-
     device = torch.device(args.device)
     model = model.to(device)
 
     criterion = torch.nn.CrossEntropyLoss().to(device)
     optimizer_params = dict(optimizer_type=args.optimizer_type, lr=args.learning_rate,
                             weight_decay=args.weight_decay, momentum=args.momentum)
-    image_datasets, dataloaders, dataset_sizes = get_data(args.batch_size)
+    dataloaders = get_dataloaders(args.batch_size,
+                                  normalize_to_unit_gaussian=args.normalize_to_unit_gaussian,
+                                  normalize_to_plus_minus_one=args.normalize_to_plus_minus_one,
+                                  random_crop=args.random_crop,
+                                  random_horizontal_flip=args.random_horizontal_flip,
+                                  random_erasing=args.random_erasing)
 
-    wandb.init(project='bgd', config=args)
+    wandb.init(project='thesis', config=args)
     wandb.watch(model)
 
     train_model(model, criterion, optimizer_params, dataloaders, device,
@@ -79,6 +89,7 @@ def parse_args():
                     'This enables running the different experiments while logging to a log-file and to wandb.'
     )
 
+    default_model = 'VGG16'
     default_path = 'experiments'
     default_device = 'cpu'
     default_epochs = 1500
@@ -89,6 +100,9 @@ def parse_args():
     default_momentum = 0.9
     default_log_interval = 100
 
+    parser.add_argument('--model', type=str, default=default_model,
+                        help=f'The model name for the network architecture. '
+                             f'Default is {default_model}.')
     parser.add_argument('--path', type=str, default=default_path,
                         help=f'Output path for the experiment - '
                              f'a sub-directory named with the data and time will be created within. '
@@ -123,6 +137,17 @@ def parse_args():
                         help='Use decoupled neural interfaces.')
     parser.add_argument('--cdni', action='store_true',
                         help='Use decoupled neural interfaces with context.')
+
+    parser.add_argument('--normalize_to_unit_gaussian', action='store_true',
+                        help='If true, normalize the values to be a unit gaussian.')
+    parser.add_argument('--normalize_to_plus_minus_one', action='store_true',
+                        help='If true, normalize the values to be in the range [-1,1] (instead of [0,1]).')
+    parser.add_argument('--random_crop', action='store_true',
+                        help='If true, performs padding of 4 followed by random crop.')
+    parser.add_argument('--random_horizontal_flip', action='store_true',
+                        help='If true, performs random horizontal flip.')
+    parser.add_argument('--random_erasing', action='store_true',
+                        help='If true, performs erase a random rectangle in the image.')
 
     return parser.parse_args()
 

@@ -20,13 +20,13 @@ There are 4 variants to the model and training process:
   which predicts the final target (i.e. the classes' scores),
   and it provides the gradient for the relevant block.
   Note that the last "auxiliary network" is actually a part of the final model. \
-  The model is implemented in the class `MainNetDGL` in the file `model.py`.
+  The model is implemented in the class `CNNwDGL` in the file `model.py`.
 - DNI: Decoupled-Neural-Interface \
   This model contains an auxiliary network after each block (i.e. Conv-BatchNorm-ReLU-MaxPool).
   Each auxiliary network is a CNN containing Conv-BatchNorm-Conv-BatchNorm-Conv
   which preserve the input tensor dimensions (both channels and spatial size).
   The auxiliary network predicts the back-propagated gradient of the downstream layers.
-  The model is implemented in the class `MainNetDNI` in the file `model.py`.
+  The model is implemented in the class `CNNwDNI` in the file `model.py`.
 - cDNI: Context-Decoupled-Neural-Interface.
   This is the same as DNI except that a "context" (i.e. the label) is provided for each auxiliary network.
   This is done by multiplying the one-hot vector representing the label with a linear layer
