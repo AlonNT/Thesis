@@ -103,7 +103,22 @@ Take home messages:
 
 ### [Representation Learning with Contrastive Predictive Coding] (Jul 2018)
 
-Future read.
+Propose a universal unsupervised learning approach to extract useful representations called Contrastive Predictive Coding. Use a probabilistic contrastive
+loss which induces the latent space to capture information that is maximally useful to predict future samples. Demonstrate the approach on speech, images, text and RL.
+
+<p align="center">
+<img src="images/cpc_arch.png" alt="CPC architecture" width="70%"/>
+</p>
+
+On images (which are not time-series) the model split an image to a grid of overlapping patches, and uses a PixelCNN-style autoregressive model to make predictions about the latent activations in following rows top-to-bottom.
+
+<p align="center">
+<img src="images/cpc_for_images.png" alt="CPC for images" width="60%"/>
+</p>
+
+Take home messages:
+- They show theoretically that optimizing the InfoNCE loss maximizes a lower bound on the mutual information between the future data-point representation and the context vector (summarizing the past).
+- In its time, reached state-of-the-art on unsupervised classification, but this was still quite far from supervised learning.
 
 ### [Context Encoders: Feature Learning by Inpainting] (Apr 2016)
 
