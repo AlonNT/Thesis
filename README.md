@@ -6,6 +6,8 @@ layers
 
 # Experiments
 
+## 1st iteration
+
 I implemented Decoupled Greedy Learning (took some inspiration from [DGL repo])
 I also use [DNI repo] which implemented "Decoupled Neural Interfaces" to incorporate synthetic gradients in my experiments.
 I launched training on CIFAR-10 dataset.
@@ -57,6 +59,38 @@ Conclusions:
   DNI lack behind with 65.6% (later degraded to 58%-60%). \
   My hypothesis is that DGL causes some sort of "regularization" which caused it to outperform
   the regular training, even though they both reached 0 loss.
+
+## 2nd iteration
+
+In the previous iteration, the (best) models reached about 76%-77%, which is below what is normally achieved on the CIFAR-10 dataset.
+In order to increase performance I added data-augmentations:
+- Random hosizontal flip.
+- Random 32x32 crop (after padding with 4 to obtain 40x40 images).
+- Data normalization helped a little bit (about 0.5%), 
+  but there was no significant difference between normalizing to \[-1,+1\] or to a unit gaussian, 
+  so for simplicity \[-1,+1\] was chosen for future experiments.
+Adding data-augmentations significantly improved performance - from 76%-77% to 85%-86%.
+Now there is even less difference between DGL and regular back-prop, and they both reached peak performance of 86.5% test accuracy. \
+One notable difference is that DGL's train-loss in decreased slower than regular training, but eventually they both reached (almost) 0 loss.
+
+<p align="center">
+<img src="images/BasicCNN_DGL_vs_noDGL_train_loss.svg" alt="Train loss" width="95%"/>
+</p>
+<p align="center">
+<img src="images/BasicCNN_DGL_vs_noDGL_test_loss.svg" alt="Test loss" width="95%"/>
+</p>
+<p align="center">
+<img src="images/BasicCNN_DGL_vs_noDGL_train_acc.svg" alt="Train Accuracy" width="95%"/>
+</p>
+<p align="center">
+<img src="images/BasicCNN_DGL_vs_noDGL_test_acc.svg" alt="Test Accuracy" width="95%"/>
+</p>
+
+Next, I implemented VGG models (VGG11/13/16/19) in order to reproduce the performance in the literature which is above 90%.
+Comparing VGG16 to our previous BasicCNN shows increased performance (from 86% to 89%). After performing an informal hyper-parameters tuning performance reached XX% without DGL v.s. XX% with DGL.
+
+**TODO add graphs of the best model v.s. the basic CNN** \
+**TODO add graphs of the best model regular v.s. DGL**
 
 # Related Work
 
