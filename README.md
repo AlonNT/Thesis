@@ -122,7 +122,21 @@ Take home messages:
 
 ### [Context Encoders: Feature Learning by Inpainting] (Apr 2016)
 
-Future read.
+Present Context-Encoders - a convolutional neural network trained to generate the contents of an arbitrary image region conditioned on its surroundings. In order to succeed at this task, context encoders need to both understand the content of the entire image. Quantitatively demonstrate the effectiveness of the features for CNN pre-training on classification, detection, and segmentation tasks.
+
+<p align="center">
+<img src="images/inpainting_example.png" alt="Inpainting example" width="40%"/>
+</p>
+
+<p align="center">
+<img src="images/context_encoder_arch.png" alt="Context Encoder Architecture" width="90%"/>
+</p>
+
+Take home messages:
+- Similar in spirit to auto-encoders and denoising auto-encoders. \
+  However, in auto-encoders the representation is likely to just compress the image content without learning a semantically meaningful representation. \ 
+  Denoising auto-encoders is more similar in spirit, but here a large region is missing and not just localized and low-level corruption, 
+  so the high level semantics of the image need to be understood.
 
 ### [Predicting What You Already Know Helps: Provable Self-Supervised Learning] (Aug 2020)
 
