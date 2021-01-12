@@ -62,13 +62,14 @@ Conclusions:
 
 ## 2nd iteration
 
-In the previous iteration, the (best) models reached about 76%-77%, which is below what is normally achieved on the CIFAR-10 dataset.
+In the previous iteration, the (best) models reached about 76%-77%, which is below what is normally achieved on the CIFAR-10 dataset. \
 In order to increase performance I added data-augmentations:
 - Random hosizontal flip.
 - Random 32x32 crop (after padding with 4 to obtain 40x40 images).
 - Data normalization helped a little bit (about 0.5%), 
   but there was no significant difference between normalizing to \[-1,+1\] or to a unit gaussian, 
   so for simplicity \[-1,+1\] was chosen for future experiments.
+  
 Adding data-augmentations significantly improved performance - from 76%-77% to 85%-86%.
 Now there is even less difference between DGL and regular back-prop, and they both reached peak performance of 86.5% test accuracy. \
 One notable difference is that DGL's train-loss in decreased slower than regular training, but eventually they both reached (almost) 0 loss.
@@ -86,11 +87,45 @@ One notable difference is that DGL's train-loss in decreased slower than regular
 <img src="images/BasicCNN_DGL_vs_noDGL_test_acc.svg" alt="Test Accuracy" width="95%"/>
 </p>
 
-Next, I implemented VGG models (VGG11/13/16/19) in order to reproduce the performance in the literature which is above 90%.
-Comparing VGG16 to our previous BasicCNN shows increased performance (from 86% to 89%). After performing an informal hyper-parameters tuning performance reached XX% without DGL v.s. XX% with DGL.
+Next, I implemented the VGG models (VGG11/13/16/19), in order to reproduce the performance in the literature which is above 90%. The model I use for the experiment is VGG16 which consists of the following modules: \
+(Conv(64)-BatchNorm-ReLU) x 2 \
+MaxPool \
+(Conv(128)-BatchNorm-ReLU) x 2 \
+MaxPool \
+(Conv(256)-BatchNorm-ReLU) x 3 \
+MaxPool \
+(Conv(512)-BatchNorm-ReLU) x 3 \
+MaxPool \
+(Conv(512)-BatchNorm-ReLU) x 3 \
+MaxPool \
+Linear(10)
+- Note that the VGG model was originally built for ImageNet dataset and not for CIFAR-10. \
+  For example, it contains 5 down-sampling layers which cause the last convolutional block to reach spatial size of 1x1 whereas in ImageNet it's 7x7. \
+  Additionally, the original VGG model contains additional 2 fully-connected layers with 4096 channels 
+  which I omitted (as in the CIFAR-10 implementation of VGG I found online).
 
-**TODO add graphs of the best model v.s. the basic CNN** \
-**TODO add graphs of the best model regular v.s. DGL**
+Comparing VGG16 to our previous BasicCNN shows increased performance (from 86.5% to 93.2%). DGL now performs worse than regular back-prop, achieving 89.5%.
+
+<p align="center">
+<img src="images/VGG16_DGL_vs_noDGL_train_loss.svg" alt="Train loss" width="95%"/>
+</p>
+<p align="center">
+<img src="images/VGG16_DGL_vs_noDGL_test_loss.svg" alt="Test loss" width="95%"/>
+</p>
+<p align="center">
+<img src="images/VGG16_DGL_vs_noDGL_train_acc.svg" alt="Train Accuracy" width="95%"/>
+</p>
+<p align="center">
+<img src="images/VGG16_DGL_vs_noDGL_test_acc.svg" alt="Test Accuracy" width="95%"/>
+</p>
+
+Conclusions:
+- DGL extends to other types of architectures like VGG.
+  - Note that originall 
+- DGL performs worse than regular back-prop (but in the same ballpark). 
+  -  It is possible that further hyper-parameters search might bridge the gap, as during my (informal) hyper-parameters search I noticed the increasing the learning-rate helped regular back-prop and harmed DGL training.
+  - It is possible that different auxiliary networks will increase DGL performance. \
+    Currently the auxiliary network used for DGL is one hidden layer MLP with 512 channels. 
 
 # Related Work
 
