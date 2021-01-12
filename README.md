@@ -64,7 +64,7 @@ Conclusions:
 
 In the previous iteration, the (best) models reached about 76%-77%, which is below what is normally achieved on the CIFAR-10 dataset. \
 In order to increase performance I added data-augmentations:
-- Random hosizontal flip.
+- Random horizontal flip.
 - Random 32x32 crop (after padding with 4 to obtain 40x40 images).
 - Data normalization helped a little bit (about 0.5%), 
   but there was no significant difference between normalizing to \[-1,+1\] or to a unit gaussian, 
@@ -120,9 +120,7 @@ Comparing VGG16 to our previous BasicCNN shows increased performance (from 86.5%
 </p>
 
 Conclusions:
-- DGL extends to other types of architectures like VGG.
-  - Note that originall 
-- DGL performs worse than regular back-prop (but in the same ballpark). 
+- DGL extends to other types of architectures like VGG, performing in the same ballpark as regular back-prop but slightly worse.
   -  It is possible that further hyper-parameters search might bridge the gap, as during my (informal) hyper-parameters search I noticed the increasing the learning-rate helped regular back-prop and harmed DGL training.
   - It is possible that different auxiliary networks will increase DGL performance. \
     Currently the auxiliary network used for DGL is one hidden layer MLP with 512 channels. 
