@@ -1,3 +1,33 @@
+- [Introduction](#introduction)
+- [Experiments](#experiments)
+  - [1st iteration](#1st-iteration)
+  - [2nd iteration](#2nd-iteration)
+- [Related Work](#related-work)
+  - [Representation Learning](#representation-learning)
+    - [SimCLR](#a-simple-framework-for-contrastive-learning-of-visual-representations-feb-2020)
+    - [SimCLRv2](#big-self-supervised-models-are-strong-semi-supervised-learners-jun-2020)
+    - [CPC](#representation-learning-with-contrastive-predictive-coding-jul-2018)
+    - [Conext-Encoders](#context-encoders-feature-learning-by-inpainting-apr-2016)
+    - [Predicting What You Already Know Helps](#predicting-what-you-already-know-helps-provable-self-supervised-learning-aug-2020)
+    - [Putting An End to End-to-End](#putting-an-end-to-end-to-end-gradient-isolated-learning-of-representations-may-2019)
+    - [LoCo](#loco-local-contrastive-representation-learning-aug-2020)
+  - [Synthetic Gradients](#synthetic-gradients)
+    - [Synthetic Gradients](#decoupled-neural-interfaces-using-synthetic-gradients-aug-2016)
+    - [Understanding Synthetic Gradients](#understanding-synthetic-gradients-and-decoupled-neural-interfaces-mar-2017)
+  - [Layerwise Optimization](#layerwise-optimization)
+    - [A Provably Correct Algorithm for Deep Learning that Actually Works](#a-provably-correct-algorithm-for-deep-learning-that-actually-works-mar-2018)
+    - [Greedy Layerwise Learning Can Scale to ImageNet](#greedy-layerwise-learning-can-scale-to-imagenet-dec-2018)
+    - [Decoupled Greedy Learning of CNNs](#decoupled-greedy-learning-of-cnns-jan-2019)
+    - [Parallel Training of Deep Networks with Local Updates](#parallel-training-of-deep-networks-with-local-updates-dec-2020)
+    - [Training Neural Networks with Local Error Signals](#training-neural-networks-with-local-error-signals-jan-2019)
+  - [Feedback Alignment](#feedback-alignment)
+    - [Feedback Alignment](#random-feedback-weights-support-learning-in-deep-neural-networks-nov-2014)
+    - [Direct Feedback Alignment](#direct-feedback-alignment-provides-learning-in-deep-neural-networks-sep-2016)
+    - [Direct Feedback Alignment Scales to Modern Deep Learning Tasks and Architectures](#direct-feedback-alignment-scales-to-modern-deep-learning-tasks-and-architectures-jun-2020)
+  - [Books](#books)
+    - [Convex Optimization](#convex-optimization)
+    - [Online Learning and Online Convex Optimization](#online-learning-and-online-convex-optimization)
+
 # Introduction
 
 Trying to figure out a way to optimize neural-networks differently, that will possibly allow parallelization over the
@@ -338,6 +368,21 @@ Take home messages:
   <img src="images/filters_comparison.png" alt="Filters Comparison" width="80%"/>
   </p>
 
+### [Training Neural Networks with Local Error Signals] (Jan 2019)
+
+Use single-layer auxiliary-networks and two different supervised loss functions to generate local error signals, 
+and show that the combination of these losses helps.
+
+<p align="center">
+<img src="images/predsim_arch.png" alt="DGL v.s. DNI" width="70%"/>
+</p>
+
+In addition to predicting the target classes' scores, they add another a 'similiarity loss' which encourages distinct classes to have distinct representations.
+They perform experiments using VGG-like networks on a lot of datasets, approaching and sometime surpassing the performance of regular back-prop. For example, in CIFAR-10 reached 95%-96% test accuracy.
+
+Take home messages:
+- Similiary loss works quite good, and somehow complementary to regular prediction loss (indeed, using combination of these losses helps).
+
 ## Feedback Alignment
 
 ### [Random feedback weights support learning in deep neural networks] (Nov 2014)
@@ -420,6 +465,8 @@ Take home messages:
 [Decoupled Greedy Learning of CNNs]: https://arxiv.org/pdf/1901.08164.pdf
 
 [Parallel Training of Deep Networks with Local Updates]: https://arxiv.org/pdf/2012.03837.pdf
+
+[Training Neural Networks with Local Error Signals]: https://arxiv.org/pdf/1901.06656.pdf
 
 [Random feedback weights support learning in deep neural networks]: https://arxiv.org/pdf/1411.0247.pdf
 
