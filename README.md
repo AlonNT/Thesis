@@ -1,3 +1,5 @@
+# Table of Contents
+
 - [Introduction](#introduction)
 - [Experiments](#experiments)
   - [1st iteration](#1st-iteration)
@@ -24,6 +26,10 @@
     - [Feedback Alignment](#random-feedback-weights-support-learning-in-deep-neural-networks-nov-2014)
     - [Direct Feedback Alignment](#direct-feedback-alignment-provides-learning-in-deep-neural-networks-sep-2016)
     - [Direct Feedback Alignment Scales to Modern Deep Learning Tasks and Architectures](#direct-feedback-alignment-scales-to-modern-deep-learning-tasks-and-architectures-jun-2020)
+  - [Target Propagation](#target-propagation)
+    - [Difference Target Propagation](#difference-target-propagation-dec-2014)
+  - [Miscellaneous](#miscellaneous)
+    - [Beyond Back-Propagation Survey](#training-deep-architectures-without-end-to-end-backpropagation-a-brief-survey-jan-2021)
   - [Books](#books)
     - [Convex Optimization](#convex-optimization)
     - [Online Learning and Online Convex Optimization](#online-learning-and-online-convex-optimization)
@@ -383,6 +389,43 @@ They perform experiments using VGG-like networks on a lot of datasets, approachi
 Take home messages:
 - Similiary loss works quite good, and somehow complementary to regular prediction loss (indeed, using combination of these losses helps).
 
+## Target Propagation
+
+### [Difference Target Propagation] (Dec 2014)
+
+TODO
+
+## Miscellaneous
+
+### [Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey] (Jan 2021)
+
+A nice survey of alternatives to back-propagation. It covers three main topics:
+- Proxy Objectives - Use some local objective for each layer. \
+  Covers:
+  - Two papers of the survey authors - encourage representations of same-class samples to be closer and different-class samples to be distinct.
+  - Belilovsky et al. (2019;2020).
+  - Nøkland et al. (2019) - basically a combination of Belilovsky et al. and the survey authors' papers.
+  - Two papers which resemble DGL but differ in their auxiliary networks - one uses a fixed random weighted fully-connected layer, and the other uses trainable two layered fully-connected network.
+- Target Propagation - Use specific target tensor for each layer. \
+  Covers:
+  - "Difference target propagation" and "How auto-encoders could provide credit assignment in deep networks via target propagation".
+  - "A theoretical framework for target propagation".
+- Synthetic Gradients \
+  Covers the original paper and the following paper giving some theoretical insights.
+
+<p align="center">
+<img src="images/beyond_back_prop_survey.png" alt="Beyond Back-Propagation Survey" width="90%"/>
+</p>
+
+Take home messages:
+- Trying to make the representations of same-class samples to be close and different-class samples to be far 
+  seems like an interesting and somewhat "popular" idea. 
+  Both the authors and Nøkland et al. (2019) found it works, but there are no good explanations. \
+  It requires "less labels" - only same/not-same class, and not the actual class.
+- The authors papers seem to have interesting theoretical claims - worth a read.
+- Target propagation seems interesting and worth a read. However it seems to work worse than proxy objectives. \
+  The new paper from 2020 shows "Direct TP" which is similar in spirit to "Direct FA".
+
 ## Feedback Alignment
 
 ### [Random feedback weights support learning in deep neural networks] (Nov 2014)
@@ -467,6 +510,10 @@ Take home messages:
 [Parallel Training of Deep Networks with Local Updates]: https://arxiv.org/pdf/2012.03837.pdf
 
 [Training Neural Networks with Local Error Signals]: https://arxiv.org/pdf/1901.06656.pdf
+
+[Difference Target Propagation]: https://arxiv.org/pdf/1412.7525.pdf
+
+[Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey]: https://arxiv.org/pdf/2101.03419.pdf
 
 [Random feedback weights support learning in deep neural networks]: https://arxiv.org/pdf/1411.0247.pdf
 
