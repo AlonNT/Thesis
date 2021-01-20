@@ -403,12 +403,12 @@ Suppose the network structure is defined by
 where h_i is the state of the i-th hidden layer (h_M is the output and h_0 is the input). 
 Define 
 <p align="center">
-<img src="images/tp_formula_2.png" alt="tp_formula_2" width="5%"/>
+<img src="images/tp_formula_2.png" alt="tp_formula_2" width="3%"/>
 </p>
 The set of parameters defining the mapping between the i-th and the j-th layer. 
 We can now write h_j as a function of h_i by
 <p align="center">
-<img src="images/tp_formula_3.png" alt="tp_formula_3" width="20%"/>
+<img src="images/tp_formula_3.png" alt="tp_formula_3" width="15%"/>
 </p>
 The loss depends on the state of the i-th layer as follows:
 <p align="center">
@@ -420,7 +420,7 @@ The basic idea of target-propagation is to assign to each h_i a nearby value \ha
 </p>
 Such a \hat{h_i} is called a **target** for the i-th layer. Now update the weights of the i-th layer to minimize the MSE loss
 <p align="center">
-<img src="images/tp_formula_6.png" alt="tp_formula_6" width="40%"/>
+<img src="images/tp_formula_6.png" alt="tp_formula_6" width="30%"/>
 </p>
 
 Now, the top layer target should be directly driven from the gradient of the global loss (e.g. \hat{h_M} = y). 
@@ -430,18 +430,18 @@ For earlier layers take advantage of an "approximate inverse". Suppose for each 
 </p>
 Then choosing 
 <p align="center">
-<img src="images/tp_formula_8.png" alt="tp_formula_8" width="30%"/>
+<img src="images/tp_formula_8.png" alt="tp_formula_8" width="15%"/>
 </p>
 would have the consequence that (under some smoothness assumptions on f and g) minimizing the distance between h_{i−1} and \hat{h_{i-1}} should also minimize the loss L_i of the i-th layer. 
 Obtaining such an inverse function is done using auto-encoder. 
 This idea is illustrated here
 <p align="center">
-<img src="images/tp_figure.png" alt="tp_figure" width="40%"/>
+<img src="images/tp_figure.png" alt="tp_figure" width="20%"/>
 </p>
 
 This paper shows that a linear correction for the imperfectness of the auto-encoders, called **difference** target propagation, is very effective to make target propagation actually work. It basically defines a different target 
 <p align="center">
-<img src="images/tp_formula_9.png" alt="tp_formula_9" width="40%"/>
+<img src="images/tp_formula_9.png" alt="tp_formula_9" width="30%"/>
 </p>
 which helps (read the paper for full details).
 
