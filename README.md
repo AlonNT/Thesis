@@ -393,7 +393,44 @@ Take home messages:
 
 ### [Difference Target Propagation] (Dec 2014)
 
-TODO
+Associate with each feedforward unit’s activation value a **target value** rather than a **loss gradient**. 
+The target value is meant to be close to the activation value while being likely to have provided a smaller loss 
+(if that value had been obtained in the feedforward phase). 
+Suppose the network structure is defined by 
+<p align="center">
+<img src="images/tp_formula_1.png" alt="tp_formula_1" width="70%"/>
+</p>
+where h_i is the state of the i-th hidden layer (h_M is the output and h_0 is the input). 
+Define 
+<img src="images/tp_formula_2.png" alt="tp_formula_2" width="70%"/>
+The set of parameters defining the mapping between the i-th and the j-th layer. 
+We can now write h_j as a function of h_i by
+<img src="images/tp_formula_3.png" alt="tp_formula_3" width="70%"/>
+The loss depends on the state of the i-th layer as follows:
+<img src="images/tp_formula_4.png" alt="tp_formula_4" width="70%"/>
+The basic idea of target-propagation is to assign to each h_i a nearby value \hat{h_i} which (hopefully) leads to a lower global loss:
+<img src="images/tp_formula_5.png" alt="tp_formula_5" width="70%"/>
+Such a \hat{h_i} is called a **target** for the i-th layer. Now update the weights of the i-th layer to minimize the MSE loss
+<img src="images/tp_formula_6.png" alt="tp_formula_6" width="70%"/>
+
+Now, the top layer target should be directly driven from the gradient of the global loss (e.g. \hat{h_M} = y). 
+For earlier layers take advantage of an "approximate inverse". Suppose for each f_i we have a function g_i such that 
+<img src="images/tp_formula_7.png" alt="tp_formula_7" width="70%"/>
+Then choosing 
+<img src="images/tp_formula_8.png" alt="tp_formula_8" width="70%"/>
+would have the consequence that (under some smoothness assumptions on f and g) minimizing the distance between h_{i−1} and \hat{h_{i-1}} should also minimize the loss L_i of the i-th layer. 
+Obtaining such an inverse function is done using auto-encoder. 
+This idea is illustrated here
+<img src="images/tp_figure.png" alt="tp_figure" width="70%"/>
+
+This paper shows that a linear correction for the imperfectness of the auto-encoders, called **difference** target propagation, is very effective to make target propagation actually work. It basically defines a different target 
+<img src="images/tp_formula_9.png" alt="tp_formula_9" width="70%"/>
+which helps (read the paper for full details).
+
+Take home messages:
+- Interesting idea. 
+- Unfortunately, seems to work worse than the alternatives (proxy objectives and synthetic gradients). \
+  Furthermore, experiments were done using only fully-connected networks (MNIST and CIFAR-10).
 
 ## Miscellaneous
 
