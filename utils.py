@@ -150,7 +150,7 @@ def get_dataloaders(batch_size: int = 32,
     dataloaders = {t: torch.utils.data.DataLoader(datasets[t],
                                                   batch_size=batch_size,
                                                   shuffle=(t == 'train'),
-                                                  num_workers=0)
+                                                  num_workers=5)
                    for t in ['train', 'test']}
 
     return dataloaders
@@ -181,7 +181,6 @@ def evaluate_model(model, criterion, dataloader, device):
             # In DGL the model forward function also return the inputs representation
             # (in addition to the classes' scores which are the prediction of the relevant auxiliary network)
             outputs = result[1] if isinstance(result, tuple) else result
-
             _, predictions = torch.max(outputs, 1)
             loss = criterion(outputs, labels)
 
@@ -210,17 +209,15 @@ def perform_train_step_dgl(model, inputs, labels, criterion, optim):
     """
     inputs_representation = inputs
     for i in range(len(model.blocks)):
-        if optim[i] is not None:
-            optim[i].zero_grad()
+        optim[i].zero_grad()
 
         inputs_representation, outputs = model(inputs_representation,
                                                first_block_index=i, last_block_index=i)
-        if outputs is not None:
-            _, predictions = torch.max(outputs, 1)
-            loss = criterion(outputs, labels)
+        _, predictions = torch.max(outputs, 1)
+        loss = criterion(outputs, labels)
 
-            loss.backward()
-            optim[i].step()
+        loss.backward()
+        optim[i].step()
 
         inputs_representation = inputs_representation.detach()
 
@@ -328,13 +325,10 @@ def get_optim(model, optimizer_params, is_dgl):
         optimizers = list()
 
         for i in range(len(model.blocks)):
-            if model.auxiliary_nets[i] is None:
-                optimizers.append(None)
-            else:
-                parameters_to_train = itertools.chain(model.blocks[i].parameters(),
-                                                      model.auxiliary_nets[i].parameters())
-                optimizer = optimizer_constuctor(parameters_to_train, **optimizer_params)
-                optimizers.append(optimizer)
+            parameters_to_train = itertools.chain(model.blocks[i].parameters(),
+                                                  model.auxiliary_nets[i].parameters())
+            optimizer = optimizer_constuctor(parameters_to_train, **optimizer_params)
+            optimizers.append(optimizer)
 
         return optimizers
     else:
