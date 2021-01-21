@@ -1,3 +1,39 @@
+# Table of Contents
+
+- [Introduction](#introduction)
+- [Experiments](#experiments)
+  - [1st iteration](#1st-iteration)
+  - [2nd iteration](#2nd-iteration)
+- [Related Work](#related-work)
+  - [Representation Learning](#representation-learning)
+    - [SimCLR](#a-simple-framework-for-contrastive-learning-of-visual-representations-feb-2020)
+    - [SimCLRv2](#big-self-supervised-models-are-strong-semi-supervised-learners-jun-2020)
+    - [CPC](#representation-learning-with-contrastive-predictive-coding-jul-2018)
+    - [Conext-Encoders](#context-encoders-feature-learning-by-inpainting-apr-2016)
+    - [Predicting What You Already Know Helps](#predicting-what-you-already-know-helps-provable-self-supervised-learning-aug-2020)
+    - [Putting An End to End-to-End](#putting-an-end-to-end-to-end-gradient-isolated-learning-of-representations-may-2019)
+    - [LoCo](#loco-local-contrastive-representation-learning-aug-2020)
+  - [Synthetic Gradients](#synthetic-gradients)
+    - [Synthetic Gradients](#decoupled-neural-interfaces-using-synthetic-gradients-aug-2016)
+    - [Understanding Synthetic Gradients](#understanding-synthetic-gradients-and-decoupled-neural-interfaces-mar-2017)
+  - [Layerwise Optimization](#layerwise-optimization)
+    - [A Provably Correct Algorithm for Deep Learning that Actually Works](#a-provably-correct-algorithm-for-deep-learning-that-actually-works-mar-2018)
+    - [Greedy Layerwise Learning Can Scale to ImageNet](#greedy-layerwise-learning-can-scale-to-imagenet-dec-2018)
+    - [Decoupled Greedy Learning of CNNs](#decoupled-greedy-learning-of-cnns-jan-2019)
+    - [Parallel Training of Deep Networks with Local Updates](#parallel-training-of-deep-networks-with-local-updates-dec-2020)
+    - [Training Neural Networks with Local Error Signals](#training-neural-networks-with-local-error-signals-jan-2019)
+  - [Feedback Alignment](#feedback-alignment)
+    - [Feedback Alignment](#random-feedback-weights-support-learning-in-deep-neural-networks-nov-2014)
+    - [Direct Feedback Alignment](#direct-feedback-alignment-provides-learning-in-deep-neural-networks-sep-2016)
+    - [Direct Feedback Alignment Scales to Modern Deep Learning Tasks and Architectures](#direct-feedback-alignment-scales-to-modern-deep-learning-tasks-and-architectures-jun-2020)
+  - [Target Propagation](#target-propagation)
+    - [Difference Target Propagation](#difference-target-propagation-dec-2014)
+  - [Miscellaneous](#miscellaneous)
+    - [Beyond Back-Propagation Survey](#training-deep-architectures-without-end-to-end-backpropagation-a-brief-survey-jan-2021)
+  - [Books](#books)
+    - [Convex Optimization](#convex-optimization)
+    - [Online Learning and Online Convex Optimization](#online-learning-and-online-convex-optimization)
+
 # Introduction
 
 Trying to figure out a way to optimize neural-networks differently, that will possibly allow parallelization over the
@@ -5,6 +41,8 @@ layers
 (inherently impossible in back-propagation).
 
 # Experiments
+
+## 1st iteration
 
 I implemented Decoupled Greedy Learning (took some inspiration from [DGL repo])
 I also use [DNI repo] which implemented "Decoupled Neural Interfaces" to incorporate synthetic gradients in my experiments.
@@ -57,6 +95,71 @@ Conclusions:
   DNI lack behind with 65.6% (later degraded to 58%-60%). \
   My hypothesis is that DGL causes some sort of "regularization" which caused it to outperform
   the regular training, even though they both reached 0 loss.
+
+## 2nd iteration
+
+In the previous iteration, the (best) models reached about 76%-77%, which is below what is normally achieved on the CIFAR-10 dataset. \
+In order to increase performance I added data-augmentations:
+- Random horizontal flip.
+- Random 32x32 crop (after padding with 4 to obtain 40x40 images).
+- Data normalization helped a little bit (about 0.5%), 
+  but there was no significant difference between normalizing to \[-1,+1\] or to a unit gaussian, 
+  so for simplicity \[-1,+1\] was chosen for future experiments.
+  
+Adding data-augmentations significantly improved performance - from 76%-77% to 85%-86%.
+Now there is even less difference between DGL and regular back-prop, and they both reached peak performance of 86.5% test accuracy. \
+One notable difference is that DGL's train-loss in decreased slower than regular training, but eventually they both reached (almost) 0 loss.
+
+<p align="center">
+<img src="images/BasicCNN_DGL_vs_noDGL_train_loss.svg" alt="Train loss" width="95%"/>
+</p>
+<p align="center">
+<img src="images/BasicCNN_DGL_vs_noDGL_test_loss.svg" alt="Test loss" width="95%"/>
+</p>
+<p align="center">
+<img src="images/BasicCNN_DGL_vs_noDGL_train_acc.svg" alt="Train Accuracy" width="95%"/>
+</p>
+<p align="center">
+<img src="images/BasicCNN_DGL_vs_noDGL_test_acc.svg" alt="Test Accuracy" width="95%"/>
+</p>
+
+Next, I implemented the VGG models (VGG11/13/16/19), in order to reproduce the performance in the literature which is above 90%. The model I use for the experiment is VGG16 which consists of the following modules: \
+(Conv(64)-BatchNorm-ReLU) x 2 \
+MaxPool \
+(Conv(128)-BatchNorm-ReLU) x 2 \
+MaxPool \
+(Conv(256)-BatchNorm-ReLU) x 3 \
+MaxPool \
+(Conv(512)-BatchNorm-ReLU) x 3 \
+MaxPool \
+(Conv(512)-BatchNorm-ReLU) x 3 \
+MaxPool \
+Linear(10)
+- Note that the VGG model was originally built for ImageNet dataset and not for CIFAR-10. \
+  For example, it contains 5 down-sampling layers which cause the last convolutional block to reach spatial size of 1x1 whereas in ImageNet it's 7x7. \
+  Additionally, the original VGG model contains additional 2 fully-connected layers with 4096 channels 
+  which I omitted (as in the CIFAR-10 implementation of VGG I found online).
+
+Comparing VGG16 to our previous BasicCNN shows increased performance (from 86.5% to 93.2%). DGL now performs worse than regular back-prop, achieving 89.5%.
+
+<p align="center">
+<img src="images/VGG16_DGL_vs_noDGL_train_loss.svg" alt="Train loss" width="95%"/>
+</p>
+<p align="center">
+<img src="images/VGG16_DGL_vs_noDGL_test_loss.svg" alt="Test loss" width="95%"/>
+</p>
+<p align="center">
+<img src="images/VGG16_DGL_vs_noDGL_train_acc.svg" alt="Train Accuracy" width="95%"/>
+</p>
+<p align="center">
+<img src="images/VGG16_DGL_vs_noDGL_test_acc.svg" alt="Test Accuracy" width="95%"/>
+</p>
+
+Conclusions:
+- DGL extends to other types of architectures like VGG, performing in the same ballpark as regular back-prop but slightly worse.
+  -  It is possible that further hyper-parameters search might bridge the gap, as during my (informal) hyper-parameters search I noticed the increasing the learning-rate helped regular back-prop and harmed DGL training.
+  - It is possible that different auxiliary networks will increase DGL performance. \
+    Currently the auxiliary network used for DGL is one hidden layer MLP with 512 channels. 
 
 # Related Work
 
@@ -122,7 +225,21 @@ Take home messages:
 
 ### [Context Encoders: Feature Learning by Inpainting] (Apr 2016)
 
-Future read.
+Present Context-Encoders - a convolutional neural network trained to generate the contents of an arbitrary image region conditioned on its surroundings. In order to succeed at this task, context encoders need to both understand the content of the entire image. Quantitatively demonstrate the effectiveness of the features for CNN pre-training on classification, detection, and segmentation tasks.
+
+<p align="center">
+<img src="images/inpainting_example.png" alt="Inpainting example" width="40%"/>
+</p>
+
+<p align="center">
+<img src="images/context_encoder_arch.png" alt="Context Encoder Architecture" width="90%"/>
+</p>
+
+Take home messages:
+- Similar in spirit to auto-encoders and denoising auto-encoders. \
+  However, in auto-encoders the representation is likely to just compress the image content without learning a semantically meaningful representation. \ 
+  Denoising auto-encoders is more similar in spirit, but here a large region is missing and not just localized and low-level corruption, 
+  so the high level semantics of the image need to be understood.
 
 ### [Predicting What You Already Know Helps: Provable Self-Supervised Learning] (Aug 2020)
 
@@ -257,6 +374,113 @@ Take home messages:
   <img src="images/filters_comparison.png" alt="Filters Comparison" width="80%"/>
   </p>
 
+### [Training Neural Networks with Local Error Signals] (Jan 2019)
+
+Use single-layer auxiliary-networks and two different supervised loss functions to generate local error signals, 
+and show that the combination of these losses helps.
+
+<p align="center">
+<img src="images/predsim_arch.png" alt="DGL v.s. DNI" width="70%"/>
+</p>
+
+In addition to predicting the target classes' scores, they add another a 'similiarity loss' which encourages distinct classes to have distinct representations.
+They perform experiments using VGG-like networks on a lot of datasets, approaching and sometime surpassing the performance of regular back-prop. For example, in CIFAR-10 reached 95%-96% test accuracy.
+
+Take home messages:
+- Similiary loss works quite good, and somehow complementary to regular prediction loss (indeed, using combination of these losses helps).
+
+## Target Propagation
+
+### [Difference Target Propagation] (Dec 2014)
+
+Associate with each feedforward unit’s activation value a **target value** rather than a **loss gradient**. 
+The target value is meant to be close to the activation value while being likely to have provided a smaller loss 
+(if that value had been obtained in the feedforward phase). 
+Suppose the network structure is defined by 
+<p align="center">
+<img src="images/tp_formula_1.png" alt="tp_formula_1" width="40%"/>
+</p>
+where h_i is the state of the i-th hidden layer (h_M is the output and h_0 is the input). 
+Define 
+<p align="center">
+<img src="images/tp_formula_2.png" alt="tp_formula_2" width="3%"/>
+</p>
+The set of parameters defining the mapping between the i-th and the j-th layer. 
+We can now write h_j as a function of h_i by
+<p align="center">
+<img src="images/tp_formula_3.png" alt="tp_formula_3" width="15%"/>
+</p>
+The loss depends on the state of the i-th layer as follows:
+<p align="center">
+<img src="images/tp_formula_4.png" alt="tp_formula_4" width="40%"/>
+</p>
+The basic idea of target-propagation is to assign to each h_i a nearby value \hat{h_i} which (hopefully) leads to a lower global loss:
+<p align="center">
+<img src="images/tp_formula_5.png" alt="tp_formula_5" width="40%"/>
+</p>
+Such a \hat{h_i} is called a **target** for the i-th layer. Now update the weights of the i-th layer to minimize the MSE loss
+<p align="center">
+<img src="images/tp_formula_6.png" alt="tp_formula_6" width="30%"/>
+</p>
+
+Now, the top layer target should be directly driven from the gradient of the global loss (e.g. \hat{h_M} = y). 
+For earlier layers take advantage of an "approximate inverse". Suppose for each f_i we have a function g_i such that 
+<p align="center">
+<img src="images/tp_formula_7.png" alt="tp_formula_7" width="40%"/>
+</p>
+Then choosing 
+<p align="center">
+<img src="images/tp_formula_8.png" alt="tp_formula_8" width="15%"/>
+</p>
+would have the consequence that (under some smoothness assumptions on f and g) minimizing the distance between h_{i−1} and \hat{h_{i-1}} should also minimize the loss L_i of the i-th layer. 
+Obtaining such an inverse function is done using auto-encoder. 
+This idea is illustrated here
+<p align="center">
+<img src="images/tp_figure.png" alt="tp_figure" width="20%"/>
+</p>
+
+This paper shows that a linear correction for the imperfectness of the auto-encoders, called **difference** target propagation, is very effective to make target propagation actually work. It basically defines a different target 
+<p align="center">
+<img src="images/tp_formula_9.png" alt="tp_formula_9" width="30%"/>
+</p>
+which helps (read the paper for full details).
+
+Take home messages:
+- Interesting idea. 
+- Unfortunately, seems to work worse than the alternatives (proxy objectives and synthetic gradients). \
+  Furthermore, experiments were done using only fully-connected networks (MNIST and CIFAR-10).
+
+## Miscellaneous
+
+### [Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey] (Jan 2021)
+
+A nice survey of alternatives to back-propagation. It covers three main topics:
+- Proxy Objectives - Use some local objective for each layer. \
+  Covers:
+  - Two papers of the survey authors - encourage representations of same-class samples to be closer and different-class samples to be distinct.
+  - Belilovsky et al. (2019;2020).
+  - Nøkland et al. (2019) - basically a combination of Belilovsky et al. and the survey authors' papers.
+  - Two papers which resemble DGL but differ in their auxiliary networks - one uses a fixed random weighted fully-connected layer, and the other uses trainable two layered fully-connected network.
+- Target Propagation - Use specific target tensor for each layer. \
+  Covers:
+  - "Difference target propagation" and "How auto-encoders could provide credit assignment in deep networks via target propagation".
+  - "A theoretical framework for target propagation".
+- Synthetic Gradients \
+  Covers the original paper and the following paper giving some theoretical insights.
+
+<p align="center">
+<img src="images/beyond_back_prop_survey.png" alt="Beyond Back-Propagation Survey" width="90%"/>
+</p>
+
+Take home messages:
+- Trying to make the representations of same-class samples to be close and different-class samples to be far 
+  seems like an interesting and somewhat "popular" idea. 
+  Both the authors and Nøkland et al. (2019) found it works, but there are no good explanations. \
+  It requires "less labels" - only same/not-same class, and not the actual class.
+- The authors papers seem to have interesting theoretical claims - worth a read.
+- Target propagation seems interesting and worth a read. However it seems to work worse than proxy objectives. \
+  The new paper from 2020 shows "Direct TP" which is similar in spirit to "Direct FA".
+
 ## Feedback Alignment
 
 ### [Random feedback weights support learning in deep neural networks] (Nov 2014)
@@ -339,6 +563,12 @@ Take home messages:
 [Decoupled Greedy Learning of CNNs]: https://arxiv.org/pdf/1901.08164.pdf
 
 [Parallel Training of Deep Networks with Local Updates]: https://arxiv.org/pdf/2012.03837.pdf
+
+[Training Neural Networks with Local Error Signals]: https://arxiv.org/pdf/1901.06656.pdf
+
+[Difference Target Propagation]: https://arxiv.org/pdf/1412.7525.pdf
+
+[Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey]: https://arxiv.org/pdf/2101.03419.pdf
 
 [Random feedback weights support learning in deep neural networks]: https://arxiv.org/pdf/1411.0247.pdf
 
