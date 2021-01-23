@@ -6,7 +6,10 @@ import torchvision
 import itertools
 import wandb
 
-from typing import List, Union, Optional
+import numpy as np
+
+from torchvision.transforms.functional import resize
+from typing import List, Union, Optional, Dict
 from loguru import logger
 
 from consts import CLASSES
@@ -193,9 +196,12 @@ def evaluate_model(model, criterion, dataloader, device):
     return loss, accuracy
 
 
-def perform_train_step_dgl(model, inputs, labels, criterion, optim):
+def perform_train_step_dgl(model, inputs, labels, criterion, optim, training_step,
+                           ssl: bool = False, ssl_criterion=None,
+                           pred_loss_weight: float = 1, ssl_loss_weight: float = 0.1,
+                           log_interval: int = 5):
     """
-    Perform a train-step for a model trained with cDNI.
+    Perform a train-step for a model trained with DGL.
     The difference between the regular train-step and this one is that the model forward pass
     is done iteratively for each block in the model, performing backward pass and optimizer step for each block
     (using its corresponding auxiliary network).
@@ -205,23 +211,47 @@ def perform_train_step_dgl(model, inputs, labels, criterion, optim):
     :param labels: The labels.
     :param criterion: The criterion.
     :param optim: The optimizer (or plural optimizers).
+    :param training_step:
+    :param ssl:
+    :param ssl_criterion:
+    :param pred_loss_weight:
+    :param ssl_loss_weight:
+    :param log_interval:
     :return: The loss of this train-step, as well as the predictions.
     """
+    n_plot_images = 4
     inputs_representation = inputs
+    loss, predictions, predictions_loss, ssl_loss = None, None, None, None
+    indices_to_plot = np.random.choice(inputs.size(0), size=n_plot_images, replace=False)
+
     for i in range(len(model.blocks)):
         optim[i].zero_grad()
 
-        inputs_representation, outputs = model(inputs_representation,
-                                               first_block_index=i, last_block_index=i)
-        _, predictions = torch.max(outputs, 1)
-        loss = criterion(outputs, labels)
+        inputs_representation, outputs, ssl_outputs = model(inputs_representation,
+                                                            first_block_index=i, last_block_index=i)
+
+        _, predictions = torch.max(outputs, dim=1)
+        predictions_loss = criterion(outputs, labels)
+        loss = pred_loss_weight * predictions_loss
+
+        if ssl:
+            ssl_outputs_size = ssl_outputs.size(-1)
+            ssl_labels = resize(inputs, size=[ssl_outputs_size]*2)
+            ssl_loss = ssl_criterion(ssl_outputs, ssl_labels)
+            loss += ssl_loss_weight * ssl_loss
+
+            if training_step % log_interval == 0:
+                images = torch.cat([ssl_labels[indices_to_plot], ssl_outputs[indices_to_plot].detach()])
+                grid = torchvision.utils.make_grid(images, nrow=n_plot_images)
+                wandb.log({f'SSL-layer#{i}': [wandb.Image(grid.numpy().transpose((1, 2, 0)))]},
+                          step=training_step)
 
         loss.backward()
         optim[i].step()
 
         inputs_representation = inputs_representation.detach()
 
-    return loss, predictions
+    return loss, predictions, predictions_loss, ssl_loss
 
 
 def perform_train_step_cdni(model, inputs, labels, criterion, optim):
@@ -277,7 +307,8 @@ def perform_train_step_regular(model, inputs, labels, criterion, optim):
     return loss, predictions
 
 
-def perform_train_step(model, inputs, labels, criterion, optim, is_dgl, is_cdni):
+def perform_train_step(model, inputs, labels, criterion, optim, training_step,
+                       is_dgl, is_cdni, ssl, ssl_criterion=None):
     """
     Perform a single train-step, which is done differently when using regular training, DGL and cDNI.
 
@@ -286,18 +317,19 @@ def perform_train_step(model, inputs, labels, criterion, optim, is_dgl, is_cdni)
     :param labels: The labels.
     :param criterion: The criterion.
     :param optim: The optimizer (or plural optimizers).
+    :param training_step:
     :param is_dgl: Whether this model is trained using DGL (affects the optimizer and the train-step functionality).
     :param is_cdni: Whether this model is trained using DNI with context or not (affects the train-step functionality).
+    :param ssl:
+    :param ssl_criterion:
     :return: The loss of this train-step, as well as the predictions.
     """
     if is_dgl:
-        loss, predictions = perform_train_step_dgl(model, inputs, labels, criterion, optim)
+        return perform_train_step_dgl(model, inputs, labels, criterion,  optim, training_step, ssl, ssl_criterion)
     elif is_cdni:
-        loss, predictions = perform_train_step_cdni(model, inputs, labels, criterion, optim)
+        return perform_train_step_cdni(model, inputs, labels, criterion, optim)
     else:
-        loss, predictions = perform_train_step_regular(model, inputs, labels, criterion, optim)
-
-    return loss, predictions
+        return perform_train_step_regular(model, inputs, labels, criterion, optim)
 
 
 def get_optim(model, optimizer_params, is_dgl):
@@ -341,24 +373,32 @@ class Accumulator:
     to calculate later mean-loss & accuracy.
     """
     def __init__(self):
-        self.loss_sum: float = 0.0
-        self.corrects_sum: int = 0
-        self.total_samples: int = 0
-        self.begin_time: float = time.time()
+        self.reset()
 
     def reset(self):
-        self.loss_sum: float = 0.0
+        self.loss_sum: float = 0
+        self.pred_loss_sum: float = 0
+        self.ssl_loss_sum: float = 0
         self.corrects_sum: int = 0
         self.total_samples: int = 0
         self.begin_time: float = time.time()
 
-    def update(self, mean_loss: float, num_corrects: int, n_samples: int):
+    def update(self, mean_loss: float, num_corrects: int, n_samples: int,
+               mean_pred_loss: float = 0, mean_ssl_loss: float = 0):
         self.loss_sum += mean_loss * n_samples
+        self.pred_loss_sum += mean_pred_loss * n_samples
+        self.ssl_loss_sum += mean_ssl_loss * n_samples
         self.corrects_sum += num_corrects
         self.total_samples += n_samples
 
     def get_mean_loss(self) -> float:
         return self.loss_sum / self.total_samples
+
+    def get_mean_pred_loss(self) -> float:
+        return self.pred_loss_sum / self.total_samples
+
+    def get_mean_ssl_loss(self) -> float:
+        return self.ssl_loss_sum / self.total_samples
 
     def get_accuracy(self) -> float:
         return 100 * (self.corrects_sum / self.total_samples)
@@ -366,9 +406,16 @@ class Accumulator:
     def get_time(self) -> float:
         return time.time() - self.begin_time
 
+    def get_dict(self, prefix='') -> Dict:
+        return {f'{prefix}_accuracy': self.get_accuracy(),
+                f'{prefix}_loss': self.get_mean_loss(),
+                f'{prefix}_pred_loss': self.get_mean_pred_loss(),
+                f'{prefix}_ssl_loss': self.get_mean_ssl_loss()}
+
 
 def train_model(model, criterion, optimizer_params, dataloaders, device,
-                num_epochs=25, log_interval=100, is_dgl=False, is_cdni=False):
+                num_epochs=25, log_interval=100, is_dgl=False, is_cdni=False,
+                is_ssl=False, ssl_criterion=None):
     """
     A general function to train a model and return the best model found.
 
@@ -381,6 +428,8 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
     :param log_interval: How many training/testing steps between each logging (to wandb).
     :param is_dgl: Whether this model is trained using DGL (affects the optimizer and the train-step functionality).
     :param is_cdni: Whether this model is trained using DNI with context or not (affects the train-step functionality).
+    :param is_ssl: Whether this model is trained using self-supervised local loss (predicting the shifted image).
+    :param ssl_criterion:
     :return: the model with the lowest test error
     """
     best_weights = copy.deepcopy(model.state_dict())
@@ -402,25 +451,28 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
             inputs = inputs.to(device)
             labels = labels.to(device)
 
-            loss, predictions = perform_train_step(model, inputs, labels, criterion, optim, is_dgl, is_cdni)
+            train_step_result = perform_train_step(model, inputs, labels, criterion, optim, training_step,
+                                                   is_dgl, is_cdni, is_ssl, ssl_criterion)
 
-            minibatch_size = inputs.size(0)  # This equals the batch-size, except in the last minibatch
-            current_loss_value = loss.item()
-            current_corrects_count = torch.sum(torch.eq(predictions, labels.data)).item()
-            epoch_accumulator.update(current_loss_value, current_corrects_count, minibatch_size)
-            interval_accumulator.update(current_loss_value, current_corrects_count, minibatch_size)
+            accumulator_kwargs = dict()
+            if is_dgl:
+                loss, predictions, predictions_loss, ssl_loss = train_step_result
+                if is_ssl:
+                    accumulator_kwargs['mean_pred_loss'] = predictions_loss.item()
+                    accumulator_kwargs['mean_ssl_loss'] = ssl_loss.item()
+            else:
+                loss, predictions = train_step_result
+
+            accumulator_kwargs['mean_loss'] = loss.item()
+            accumulator_kwargs['num_corrects'] = torch.sum(torch.eq(predictions, labels.data)).item()
+            accumulator_kwargs['n_samples'] = inputs.size(0)  # This equals the batch-size, except in the last minibatch
+
+            epoch_accumulator.update(**accumulator_kwargs)
+            interval_accumulator.update(**accumulator_kwargs)
 
             if training_step % log_interval == 0:
-                # if (training_step > 10000) and (interval_accumulator.get_mean_loss() > 0.05):
-                #     import ipdb; ipdb.set_trace()
-                wandb.log(data={'train_accuracy': interval_accumulator.get_accuracy(),
-                                'train_loss': interval_accumulator.get_mean_loss()}, step=training_step)
+                wandb.log(data=interval_accumulator.get_dict(prefix='train'), step=training_step)
                 interval_accumulator.reset()
-                # logger.debug(f'Train-step {training_step:0>8d} | '
-                #              f'loss={interval_loss:.4f} accuracy={interval_accuracy:.2f}')
-
-        epoch_train_loss = epoch_accumulator.get_mean_loss()
-        epoch_train_accuracy = epoch_accumulator.get_accuracy()
 
         epoch_test_loss, epoch_test_accuracy = evaluate_model(model, criterion, dataloaders['test'], device)
         wandb.log(data={'test_accuracy': epoch_test_accuracy, 'test_loss': epoch_test_loss}, step=training_step)
@@ -431,10 +483,14 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
             best_weights = copy.deepcopy(model.state_dict())
 
         epoch_time_elapsed = epoch_accumulator.get_time()
-        logger.info(f'Epoch {epoch+1:0>2d}/{num_epochs:0>2d} | '
+        logger.info(f'Epoch {epoch + 1:0>2d}/{num_epochs:0>2d} | '
                     f'{int(epoch_time_elapsed // 60):d}m {int(epoch_time_elapsed) % 60:0>2d}s | '
-                    f'Train loss={epoch_train_loss:.4f} accuracy={epoch_train_accuracy:.2f}% | '
-                    f'Test loss={epoch_test_loss:.4f} accuracy={epoch_test_accuracy:.2f}%')
+                    f'Train '
+                    f'loss={epoch_accumulator.get_mean_loss():.4f} '
+                    f'accuracy={epoch_accumulator.get_accuracy():.2f}% | '
+                    f'Test '
+                    f'loss={epoch_test_loss:.4f} '
+                    f'accuracy={epoch_test_accuracy:.2f}%')
 
     logger.info(f'Best test accuracy: {best_accuracy:.2f}%')
 

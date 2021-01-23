@@ -16,7 +16,7 @@ configs = {
     'VGG8b': [128, 256, 'M', 256, 512, 'M', 512, 'M', 512, 'M'],  #
     'VGG11b': [128, 128, 128, 256, 'M', 256, 512, 'M', 512, 512, 'M', 512, 'M'],
 
-    'VGG11': [64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],   
+    'VGG11': [64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
     'VGG13': [64, 64, 'M', 128, 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
     'VGG16': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'M', 512, 512, 512, 'M', 512, 512, 512, 'M'],
     'VGG19': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M', 512, 512, 512, 512, 'M', 512, 512, 512, 512, 'M'],
@@ -27,8 +27,9 @@ def get_blocks(config: List[Union[int, str]],
                aux_mlp_n_hidden_layers: int = 1,
                aux_mlp_hidden_dim: int = 1024,
                dropout_prob: float = 0):
-    blocks: List[nn.Sequential] = list()
-    auxiliary_nets: List[nn.Sequential] = list()
+    blocks: List[nn.Module] = list()
+    auxiliary_nets: List[nn.Module] = list()
+    ssl_auxiliary_nets: List[nn.Module] = list()
 
     in_channels = 3
     image_size = 32
@@ -46,20 +47,21 @@ def get_blocks(config: List[Union[int, str]],
         if dropout_prob > 0:
             block_layers.append(nn.Dropout(dropout_prob))
 
-        in_channels = out_channels
+        in_channels = out_channels  # This will be the input channels of the next convolutional layer.
         i += 1
 
         if config[i] == 'M':
             block_layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
             image_size //= 2
             i += 1
-        
+
         blocks.append(nn.Sequential(*block_layers))
 
         block_output_dimension = out_channels * (image_size ** 2)
         auxiliary_nets.append(get_mlp(input_dim=block_output_dimension, **mlp_kwargs))
+        ssl_auxiliary_nets.append(nn.Conv2d(in_channels=out_channels, out_channels=3, kernel_size=1, padding=0))
 
-    return blocks, auxiliary_nets, block_output_dimension
+    return blocks, auxiliary_nets, ssl_auxiliary_nets, block_output_dimension
 
 
 class VGG(nn.Module):
@@ -69,10 +71,10 @@ class VGG(nn.Module):
                  aux_mlp_hidden_dim: int = 1024,
                  dropout_prob: float = 0):
         super(VGG, self).__init__()
-        layers, _, features_output_dimension = get_blocks(configs[vgg_name],
-                                                          aux_mlp_n_hidden_layers,
-                                                          aux_mlp_hidden_dim,
-                                                          dropout_prob)
+        layers, _, _, features_output_dimension = get_blocks(configs[vgg_name],
+                                                             aux_mlp_n_hidden_layers,
+                                                             aux_mlp_hidden_dim,
+                                                             dropout_prob)
         self.features = nn.Sequential(*layers)
         self.classifier = get_mlp(input_dim=features_output_dimension,
                                   output_dim=len(CLASSES),
@@ -90,21 +92,28 @@ class VGGwDGL(nn.Module):
                  vgg_name,
                  aux_mlp_n_hidden_layers: int = 1,
                  aux_mlp_hidden_dim: int = 1024,
-                 dropout_prob: float = 0):
+                 dropout_prob: float = 0,
+                 use_ssl: bool = False):
         super(VGGwDGL, self).__init__()
-        blocks, auxiliary_networks, _ = get_blocks(configs[vgg_name],
-                                                   aux_mlp_n_hidden_layers,
-                                                   aux_mlp_hidden_dim,
-                                                   dropout_prob)
-        self.blocks, self.auxiliary_nets = nn.ModuleList(blocks), nn.ModuleList(auxiliary_networks)
+        blocks, auxiliary_networks, ssl_auxiliary_nets, _ = get_blocks(configs[vgg_name],
+                                                                       aux_mlp_n_hidden_layers,
+                                                                       aux_mlp_hidden_dim,
+                                                                       dropout_prob)
+        self.use_ssl = use_ssl
+        self.blocks = nn.ModuleList(blocks)
+        self.auxiliary_nets = nn.ModuleList(auxiliary_networks)
+        self.ssl_auxiliary_nets = nn.ModuleList(ssl_auxiliary_nets) if use_ssl else None
 
     def forward(self, x: torch.Tensor, first_block_index: int = 0, last_block_index: Optional[int] = None):
         if last_block_index is None:
             last_block_index = len(self.blocks) - 1
 
+        representation = x
+
         for i in range(first_block_index, last_block_index + 1):
-            x = self.blocks[i](x)
+            representation = self.blocks[i](representation)
 
-        outputs = self.auxiliary_nets[last_block_index](x)
+        outputs = self.auxiliary_nets[last_block_index](representation)
+        ssl_outputs = self.ssl_auxiliary_nets[last_block_index](representation) if self.use_ssl else None
 
-        return x, outputs
+        return representation, outputs, ssl_outputs

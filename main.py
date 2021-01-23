@@ -26,6 +26,8 @@ def get_model(args):
         kwargs = dict(vgg_name=args.model,
                       dropout_prob=args.dropout_prob)
         if args.dgl:
+            if args.ssl:
+                kwargs['use_ssl'] = True
             return VGGwDGL(**kwargs), f'{args.model} with DGL'
         else:
             return VGG(**kwargs), args.model
@@ -69,8 +71,7 @@ def main():
     model = model.to(device)
 
     criterion = torch.nn.CrossEntropyLoss().to(device)
-    optimizer_params = dict(optimizer_type=args.optimizer_type, lr=args.learning_rate,
-                            weight_decay=args.weight_decay, momentum=args.momentum)
+    ssl_criterion = torch.nn.L1Loss().to(device)
     dataloaders = get_dataloaders(args.batch_size,
                                   normalize_to_unit_gaussian=args.enable_normalization_to_unit_gaussian,
                                   normalize_to_plus_minus_one=not args.disable_normalization_to_plus_minus_one,
@@ -81,8 +82,10 @@ def main():
     wandb.init(project='thesis', config=args)
     wandb.watch(model)
 
+    optimizer_params = dict(optimizer_type=args.optimizer_type, lr=args.learning_rate,
+                            weight_decay=args.weight_decay, momentum=args.momentum)
     train_model(model, criterion, optimizer_params, dataloaders, device,
-                args.epochs, args.log_interval, args.dgl, args.cdni)
+                args.epochs, args.log_interval, args.dgl, args.cdni, args.ssl, ssl_criterion)
 
 
 def parse_args():
@@ -143,6 +146,8 @@ def parse_args():
                         help='Use decoupled neural interfaces.')
     parser.add_argument('--cdni', action='store_true',
                         help='Use decoupled neural interfaces with context.')
+    parser.add_argument('--ssl', action='store_true',
+                        help='Use self-supervised local loss (predict shifted image).')
 
     parser.add_argument('--disable_normalization_to_plus_minus_one', action='store_true',
                         help='If true, disable normalization of the values to the range [-1,1] (instead of [0,1]).')
