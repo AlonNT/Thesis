@@ -10,7 +10,7 @@
     - [SimCLRv2](#big-self-supervised-models-are-strong-semi-supervised-learners-jun-2020)
     - [CPC](#representation-learning-with-contrastive-predictive-coding-jul-2018)
     - [Conext-Encoders](#context-encoders-feature-learning-by-inpainting-apr-2016)
-    - [Colorful Image Colorization](colorful-image-colorization-mar-2016)
+    - [Colorful Image Colorization](#colorful-image-colorization-mar-2016)
     - [Predicting What You Already Know Helps](#predicting-what-you-already-know-helps-provable-self-supervised-learning-aug-2020)
     - [Putting An End to End-to-End](#putting-an-end-to-end-to-end-gradient-isolated-learning-of-representations-may-2019)
     - [LoCo](#loco-local-contrastive-representation-learning-aug-2020)
