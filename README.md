@@ -10,6 +10,7 @@
     - [SimCLRv2](#big-self-supervised-models-are-strong-semi-supervised-learners-jun-2020)
     - [CPC](#representation-learning-with-contrastive-predictive-coding-jul-2018)
     - [Conext-Encoders](#context-encoders-feature-learning-by-inpainting-apr-2016)
+    - [Colorful Image Colorization](colorful-image-colorization-mar-2016)
     - [Predicting What You Already Know Helps](#predicting-what-you-already-know-helps-provable-self-supervised-learning-aug-2020)
     - [Putting An End to End-to-End](#putting-an-end-to-end-to-end-gradient-isolated-learning-of-representations-may-2019)
     - [LoCo](#loco-local-contrastive-representation-learning-aug-2020)
@@ -240,6 +241,22 @@ Take home messages:
   However, in auto-encoders the representation is likely to just compress the image content without learning a semantically meaningful representation. \ 
   Denoising auto-encoders is more similar in spirit, but here a large region is missing and not just localized and low-level corruption, 
   so the high level semantics of the image need to be understood.
+
+### [Colorful Image Colorization] (Mar 2016)
+
+Given a grayscale image predict a plausible color version of the image. \ 
+This colorization can be a powerful pretext task for self-supervised feature learning, acting as a *cross-channel encoder*. Results in state-of-the-art performance on several feature learning benchmarks.
+
+<p align="center">
+<img src="images/colorization_arch.png" alt="colorization_arch" width="90%"/>
+</p>
+
+<p align="center">
+<img src="images/colorization_examples.png" alt="colorization_examples" width="90%"/>
+</p>
+
+Take home messages:
+- Interesting idea, because this auxiliary task of colorization indeed requires understanding of the semantics in the image.
 
 ### [Predicting What You Already Know Helps: Provable Self-Supervised Learning] (Aug 2020)
 
@@ -545,6 +562,8 @@ Take home messages:
 [Representation Learning with Contrastive Predictive Coding]: https://arxiv.org/pdf/1807.03748.pdf
 
 [Context Encoders: Feature Learning by Inpainting]: https://arxiv.org/pdf/1604.07379.pdf
+
+[Colorful Image Colorization]: https://arxiv.org/pdf/1603.08511.pdf
 
 [Predicting What You Already Know Helps: Provable Self-Supervised Learning]: https://arxiv.org/pdf/2008.01064.pdf
 
