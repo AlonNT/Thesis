@@ -244,7 +244,7 @@ Take home messages:
 
 ### [Colorful Image Colorization] (Mar 2016)
 
-Given a grayscale image predict a plausible color version of the image. \ 
+Given a grayscale image predict a plausible color version of the image. \
 This colorization can be a powerful pretext task for self-supervised feature learning, acting as a *cross-channel encoder*. Results in state-of-the-art performance on several feature learning benchmarks.
 
 <p align="center">
@@ -256,7 +256,7 @@ This colorization can be a powerful pretext task for self-supervised feature lea
 </p>
 
 Take home messages:
-- Interesting idea, because this auxiliary task of colorization indeed requires understanding of the semantics in the image.
+- Interesting auxiliary task because colorization requires understanding of the semantics of the image.
 
 ### [Predicting What You Already Know Helps: Provable Self-Supervised Learning] (Aug 2020)
 
