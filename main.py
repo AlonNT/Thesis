@@ -26,9 +26,15 @@ def get_model(args):
         kwargs = dict(vgg_name=args.model,
                       dropout_prob=args.dropout_prob)
         if args.dgl:
+            model_name = f'{args.model} with DGL'
             if args.ssl:
                 kwargs['use_ssl'] = True
-            return VGGwDGL(**kwargs), f'{args.model} with DGL'
+                model_name += ' & SSL'
+                if args.upsample:
+                    kwargs['upsample'] = True
+                    model_name += ' (upsampling)'
+
+            return VGGwDGL(**kwargs), model_name
         else:
             return VGG(**kwargs), args.model
     else:
@@ -147,6 +153,8 @@ def parse_args():
     parser.add_argument('--cdni', action='store_true',
                         help='Use decoupled neural interfaces with context.')
     parser.add_argument('--ssl', action='store_true',
+                        help='Use self-supervised local loss (predict shifted image).')
+    parser.add_argument('--upsample', action='store_true',
                         help='Use self-supervised local loss (predict shifted image).')
 
     parser.add_argument('--disable_normalization_to_plus_minus_one', action='store_true',

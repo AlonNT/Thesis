@@ -23,10 +23,34 @@ configs = {
 }
 
 
+def get_ssl_aux_net(channels: int, image_size: Optional[int] = None, target_image_size: Optional[int] = None):
+    layers = list()
+
+    assert (image_size is None) == (target_image_size is None), \
+        "image_size and target_image_size should be both None (in which case no up-sampling is done), " \
+        "or both not None (in which case upsampling is done from image_size to target_image_size)."
+
+    in_channels = channels
+    if image_size is not None:  # up-sample from image_size to target_image_size.
+        while image_size != target_image_size:
+            out_channels = in_channels // 2
+            layers.append(nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2))
+            layers.append(nn.BatchNorm2d(out_channels))
+            layers.append(nn.ReLU())
+            image_size *= 2
+            in_channels = out_channels
+
+    # Convolutional layer with 1x1 kernel to change channels to 3.
+    layers.append(nn.Conv2d(in_channels, out_channels=3, kernel_size=1, padding=0))
+
+    return nn.Sequential(*layers)
+
+
 def get_blocks(config: List[Union[int, str]],
                aux_mlp_n_hidden_layers: int = 1,
                aux_mlp_hidden_dim: int = 1024,
-               dropout_prob: float = 0):
+               dropout_prob: float = 0,
+               upsample: bool = False):
     blocks: List[nn.Module] = list()
     auxiliary_nets: List[nn.Module] = list()
     ssl_auxiliary_nets: List[nn.Module] = list()
@@ -59,7 +83,11 @@ def get_blocks(config: List[Union[int, str]],
 
         block_output_dimension = out_channels * (image_size ** 2)
         auxiliary_nets.append(get_mlp(input_dim=block_output_dimension, **mlp_kwargs))
-        ssl_auxiliary_nets.append(nn.Conv2d(in_channels=out_channels, out_channels=3, kernel_size=1, padding=0))
+
+        ssl_aux_net_kwargs = dict(channels=out_channels)
+        if upsample:
+            ssl_aux_net_kwargs.update(dict(image_size=image_size, target_image_size=32))
+        ssl_auxiliary_nets.append(get_ssl_aux_net(**ssl_aux_net_kwargs))
 
     return blocks, auxiliary_nets, ssl_auxiliary_nets, block_output_dimension
 
@@ -93,12 +121,14 @@ class VGGwDGL(nn.Module):
                  aux_mlp_n_hidden_layers: int = 1,
                  aux_mlp_hidden_dim: int = 1024,
                  dropout_prob: float = 0,
-                 use_ssl: bool = False):
+                 use_ssl: bool = False,
+                 upsample: bool = False):
         super(VGGwDGL, self).__init__()
         blocks, auxiliary_networks, ssl_auxiliary_nets, _ = get_blocks(configs[vgg_name],
                                                                        aux_mlp_n_hidden_layers,
                                                                        aux_mlp_hidden_dim,
-                                                                       dropout_prob)
+                                                                       dropout_prob,
+                                                                       upsample)
         self.use_ssl = use_ssl
         self.blocks = nn.ModuleList(blocks)
         self.auxiliary_nets = nn.ModuleList(auxiliary_networks)
