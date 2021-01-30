@@ -1,39 +1,39 @@
 # Table of Contents
 
+- [Table of Contents](#table-of-contents)
 - [Introduction](#introduction)
 - [Experiments](#experiments)
   - [1st iteration](#1st-iteration)
   - [2nd iteration](#2nd-iteration)
 - [Related Work](#related-work)
   - [Representation Learning](#representation-learning)
-    - [SimCLR](#a-simple-framework-for-contrastive-learning-of-visual-representations-feb-2020)
-    - [SimCLRv2](#big-self-supervised-models-are-strong-semi-supervised-learners-jun-2020)
-    - [CPC](#representation-learning-with-contrastive-predictive-coding-jul-2018)
-    - [Conext-Encoders](#context-encoders-feature-learning-by-inpainting-apr-2016)
-    - [Colorful Image Colorization](#colorful-image-colorization-mar-2016)
-    - [Predicting What You Already Know Helps](#predicting-what-you-already-know-helps-provable-self-supervised-learning-aug-2020)
-    - [Putting An End to End-to-End](#putting-an-end-to-end-to-end-gradient-isolated-learning-of-representations-may-2019)
-    - [LoCo](#loco-local-contrastive-representation-learning-aug-2020)
+    - [SimCLR - A Simple Framework for Contrastive Learning of Visual Representations (Feb 2020)](#simclr---a-simple-framework-for-contrastive-learning-of-visual-representations-feb-2020)
+    - [SimCLRv2 - Big Self-Supervised Models are Strong Semi-Supervised Learners (Jun 2020)](#simclrv2---big-self-supervised-models-are-strong-semi-supervised-learners-jun-2020)
+    - [CPC - Representation Learning with Contrastive Predictive Coding (Jul 2018)](#cpc---representation-learning-with-contrastive-predictive-coding-jul-2018)
+    - [CPCv2 - Data-Efficient Image Recognition with Contrastive Predictive Coding (May 2019)](#cpcv2---data-efficient-image-recognition-with-contrastive-predictive-coding-may-2019)
+    - [Context Encoders: Feature Learning by Inpainting (Apr 2016)](#context-encoders-feature-learning-by-inpainting-apr-2016)
+    - [Colorful Image Colorization (Mar 2016)](#colorful-image-colorization-mar-2016)
+    - [Predicting What You Already Know Helps: Provable Self-Supervised Learning (Aug 2020)](#predicting-what-you-already-know-helps-provable-self-supervised-learning-aug-2020)
+    - [Greedy InfoMax - Putting An End to End-to-End: Gradient-Isolated Learning of Representations (May 2019)](#greedy-infomax---putting-an-end-to-end-to-end-gradient-isolated-learning-of-representations-may-2019)
+    - [LoCo: Local Contrastive Representation Learning (Aug 2020)](#loco-local-contrastive-representation-learning-aug-2020)
   - [Synthetic Gradients](#synthetic-gradients)
-    - [Synthetic Gradients](#decoupled-neural-interfaces-using-synthetic-gradients-aug-2016)
-    - [Understanding Synthetic Gradients](#understanding-synthetic-gradients-and-decoupled-neural-interfaces-mar-2017)
+    - [Decoupled Neural Interfaces using Synthetic Gradients (Aug 2016)](#decoupled-neural-interfaces-using-synthetic-gradients-aug-2016)
+    - [Understanding Synthetic Gradients and Decoupled Neural Interfaces (Mar 2017)](#understanding-synthetic-gradients-and-decoupled-neural-interfaces-mar-2017)
   - [Layerwise Optimization](#layerwise-optimization)
-    - [A Provably Correct Algorithm for Deep Learning that Actually Works](#a-provably-correct-algorithm-for-deep-learning-that-actually-works-mar-2018)
-    - [Greedy Layerwise Learning Can Scale to ImageNet](#greedy-layerwise-learning-can-scale-to-imagenet-dec-2018)
-    - [Decoupled Greedy Learning of CNNs](#decoupled-greedy-learning-of-cnns-jan-2019)
-    - [Parallel Training of Deep Networks with Local Updates](#parallel-training-of-deep-networks-with-local-updates-dec-2020)
-    - [Training Neural Networks with Local Error Signals](#training-neural-networks-with-local-error-signals-jan-2019)
-  - [Feedback Alignment](#feedback-alignment)
-    - [Feedback Alignment](#random-feedback-weights-support-learning-in-deep-neural-networks-nov-2014)
-    - [Direct Feedback Alignment](#direct-feedback-alignment-provides-learning-in-deep-neural-networks-sep-2016)
-    - [Direct Feedback Alignment Scales to Modern Deep Learning Tasks and Architectures](#direct-feedback-alignment-scales-to-modern-deep-learning-tasks-and-architectures-jun-2020)
+    - [A Provably Correct Algorithm for Deep Learning that Actually Works (Mar 2018)](#a-provably-correct-algorithm-for-deep-learning-that-actually-works-mar-2018)
+    - [Greedy Layerwise Learning Can Scale to ImageNet (Dec 2018)](#greedy-layerwise-learning-can-scale-to-imagenet-dec-2018)
+    - [Decoupled Greedy Learning of CNNs (Jan 2019)](#decoupled-greedy-learning-of-cnns-jan-2019)
+    - [Parallel Training of Deep Networks with Local Updates (Dec 2020)](#parallel-training-of-deep-networks-with-local-updates-dec-2020)
+    - [Training Neural Networks with Local Error Signals (Jan 2019)](#training-neural-networks-with-local-error-signals-jan-2019)
   - [Target Propagation](#target-propagation)
-    - [Difference Target Propagation](#difference-target-propagation-dec-2014)
+    - [Difference Target Propagation (Dec 2014)](#difference-target-propagation-dec-2014)
   - [Miscellaneous](#miscellaneous)
-    - [Beyond Back-Propagation Survey](#training-deep-architectures-without-end-to-end-backpropagation-a-brief-survey-jan-2021)
+    - [Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey (Jan 2021)](#training-deep-architectures-without-end-to-end-backpropagation-a-brief-survey-jan-2021)
+  - [Feedback Alignment](#feedback-alignment)
+    - [Random feedback weights support learning in deep neural networks (Nov 2014)](#random-feedback-weights-support-learning-in-deep-neural-networks-nov-2014)
+    - [Direct Feedback Alignment Provides Learning in Deep Neural Networks (Sep 2016)](#direct-feedback-alignment-provides-learning-in-deep-neural-networks-sep-2016)
+    - [Direct Feedback Alignment Scales to Modern Deep Learning Tasks and Architectures (Jun 2020)](#direct-feedback-alignment-scales-to-modern-deep-learning-tasks-and-architectures-jun-2020)
   - [Books](#books)
-    - [Convex Optimization](#convex-optimization)
-    - [Online Learning and Online Convex Optimization](#online-learning-and-online-convex-optimization)
 
 # Introduction
 
@@ -166,7 +166,9 @@ Conclusions:
 
 ## Representation Learning
 
-### [A Simple Framework for Contrastive Learning of Visual Representations] (Feb 2020)
+### SimCLR - A Simple Framework for Contrastive Learning of Visual Representations (Feb 2020)
+
+- [paper](https://arxiv.org/pdf/2002.05709.pdf)
 
 This paper presents SimCLR: A simple framework for contrastive learning of visual representations. \
 The self-supervised task is to identify that different augmentations of the same image are the same.
@@ -181,7 +183,9 @@ Take home messages:
 - Adding a nonlinear transformation between the representation and the contrastive loss helps.
 - Contrastive learning benefits from larger batch sizes and more training steps compared to supervised learning.
 
-### [Big Self-Supervised Models are Strong Semi-Supervised Learners] (Jun 2020)
+### SimCLRv2 - Big Self-Supervised Models are Strong Semi-Supervised Learners (Jun 2020)
+
+- [paper](https://arxiv.org/pdf/2006.10029.pdf)
 
 This paper presents SimCLRv2: A model based on SimCLR with improvements that reached new state-of-the-art. Generally, the training phase contains three stages: self-supervised pretraining, followed by supervised fine-tuning, and finally distillation with unlabeled examples. Additionally:
 - The backbone which learns the representation in a self-supervised way is much larger than original SimCLR - ResNet-152 (3x+SK) v.s. ResNet-50 (4x).
@@ -205,7 +209,9 @@ Take home messages:
   <img src="images/SimCLRv1_head_size.png" alt="Bigger heads" width="40%"/>
   </p>
 
-### [Representation Learning with Contrastive Predictive Coding] (Jul 2018)
+### CPC - Representation Learning with Contrastive Predictive Coding (Jul 2018)
+
+- [paper](https://arxiv.org/pdf/1807.03748.pdf)
 
 Propose a universal unsupervised learning approach to extract useful representations called Contrastive Predictive Coding. Use a probabilistic contrastive
 loss which induces the latent space to capture information that is maximally useful to predict future samples. Demonstrate the approach on speech, images, text and RL.
@@ -224,7 +230,30 @@ Take home messages:
 - They show theoretically that optimizing the InfoNCE loss maximizes a lower bound on the mutual information between the future data-point representation and the context vector (summarizing the past).
 - In its time, reached state-of-the-art on unsupervised classification, but this was still quite far from supervised learning.
 
-### [Context Encoders: Feature Learning by Inpainting] (Apr 2016)
+### CPCv2 - Data-Efficient Image Recognition with Contrastive Predictive Coding (May 2019)
+
+- [paper](https://arxiv.org/pdf/1905.09272.pdf)
+
+A self-supervised learning approach that builds upon the original CPC with several improvements - model capacity, layer normalization, predicting with context from all directions rather than just from above, path-based augmentations.
+
+<p align="center">
+<img src="images/CPCv2_figure.png" alt="CPCv2 Graph" width="90%"/>
+</p>
+
+They assess CPCv2 in several contexts:
+- Linear classification on top of the learned representations.  
+  They suprass all self-supervised techniques at that time.
+- Data-efficient learning - learning with less labeled data.  
+  They surpass supervised learning with x5-x2 less labeled data, as seen in the graph.  
+  <p align="center">
+  <img src="images/CPCv2_graph.png" alt="CPCv2 Graph" width="40%"/>
+  </p>
+- Transfer learning to object detection in PASCAL dataset.   
+  They reach a new state-of-the-art, surpassing supervised transfer-learning.
+
+### Context Encoders: Feature Learning by Inpainting (Apr 2016)
+
+- [paper](https://arxiv.org/pdf/1604.07379.pdf)
 
 Present Context-Encoders - a convolutional neural network trained to generate the contents of an arbitrary image region conditioned on its surroundings. In order to succeed at this task, context encoders need to both understand the content of the entire image. Quantitatively demonstrate the effectiveness of the features for CNN pre-training on classification, detection, and segmentation tasks.
 
@@ -242,7 +271,9 @@ Take home messages:
   Denoising auto-encoders is more similar in spirit, but here a large region is missing and not just localized and low-level corruption, 
   so the high level semantics of the image need to be understood.
 
-### [Colorful Image Colorization] (Mar 2016)
+### Colorful Image Colorization (Mar 2016)
+
+- [paper](https://arxiv.org/pdf/1603.08511.pdf)
 
 Given a grayscale image predict a plausible color version of the image. \
 This colorization can be a powerful pretext task for self-supervised feature learning, acting as a *cross-channel encoder*. Results in state-of-the-art performance on several feature learning benchmarks.
@@ -258,12 +289,16 @@ This colorization can be a powerful pretext task for self-supervised feature lea
 Take home messages:
 - Interesting auxiliary task because colorization requires understanding of the semantics of the image.
 
-### [Predicting What You Already Know Helps: Provable Self-Supervised Learning] (Aug 2020)
+### Predicting What You Already Know Helps: Provable Self-Supervised Learning (Aug 2020)
+
+- [paper](https://arxiv.org/pdf/2008.01064.pdf)
 
 Propose a mechanism based on conditional independence to formalize how solving certain pretext tasks can learn 
 representations that provably decreases the sample complexity of downstream supervised tasks.
 
-### [Putting An End to End-to-End: Gradient-Isolated Learning of Representations] (May 2019)
+### Greedy InfoMax - Putting An End to End-to-End: Gradient-Isolated Learning of Representations (May 2019)
+
+- [paper](https://arxiv.org/pdf/1905.11786.pdf)
 
 Train a neural-network in a self-supervised, local manner (i.e. without labels and without end-to-end backpropagation).
 
@@ -281,7 +316,9 @@ Take home messages:
 - Interesting self-supervised task - maximize the mutual information between temporally nearby representations
   (e.g. different patches of the same image).
 
-### [LoCo: Local Contrastive Representation Learning] (Aug 2020)
+### LoCo: Local Contrastive Representation Learning (Aug 2020)
+
+- [paper](https://arxiv.org/pdf/2008.01342.pdf)
 
 Show that by overlapping local blocks stacking on top of each other, we effectively increase the decoder depth and allow
 upper blocks to implicitly send feedbacks to lower blocks.
@@ -301,7 +338,10 @@ Take home messages:
 
 ## Synthetic Gradients
 
-### [Decoupled Neural Interfaces using Synthetic Gradients] (Aug 2016)
+### Decoupled Neural Interfaces using Synthetic Gradients (Aug 2016)
+
+- [paper](https://arxiv.org/pdf/1608.05343.pdf)
+- [code](https://github.com/koz4k/dni-pytorch)
 
 Use auxiliary networks to decouple sub-graphs, enabling updating them independently and asynchronously.
 
@@ -327,7 +367,9 @@ Take home messages:
   All of them are possible (to some extent).
 - It works, but (quite) worse than regular back-propagation.
 
-### [Understanding Synthetic Gradients and Decoupled Neural Interfaces] (Mar 2017)
+### Understanding Synthetic Gradients and Decoupled Neural Interfaces (Mar 2017)
+
+- [paper](https://arxiv.org/pdf/1703.00522.pdf)
 
 Provide some theoretical explanations to synthetic gradients, for example:
 
@@ -336,7 +378,9 @@ Provide some theoretical explanations to synthetic gradients, for example:
 
 ## Layerwise Optimization
 
-### [A Provably Correct Algorithm for Deep Learning that Actually Works] (Mar 2018)
+### A Provably Correct Algorithm for Deep Learning that Actually Works (Mar 2018)
+
+- [paper](https://arxiv.org/pdf/1803.09522.pdf)
 
 Create a toy dataset containing digits that are generated hierarchically, and prove layerwise optimization works.
 
@@ -344,7 +388,9 @@ Create a toy dataset containing digits that are generated hierarchically, and pr
 <img src="images/hierarchical_digits_generation.png" alt="Hierarchical Digits Generation" width="90%"/>
 </p>
 
-### [Greedy Layerwise Learning Can Scale to ImageNet] (Dec 2018)
+### Greedy Layerwise Learning Can Scale to ImageNet (Dec 2018)
+
+- [paper](https://arxiv.org/pdf/1812.11446.pdf)
 
 Show that greedy layerwise optimization can reach competitive performance on ImageNet.
 
@@ -357,7 +403,10 @@ Take home messages:
 - layerwise training increases linear separability of the different layers' activations.
 - Using auxiliary network with more than 1 hidden layer works better.
 
-### [Decoupled Greedy Learning of CNNs] (Jan 2019)
+### Decoupled Greedy Learning of CNNs (Jan 2019)
+
+- [paper](https://arxiv.org/pdf/1901.08164.pdf)
+- [code](https://github.com/eugenium/DGL)
 
 Show that the greedy layerwise model can be trained in parallel, 
 with the possibility of adding a buffer between two adjacent layers to completely unlocking the training process.
@@ -366,7 +415,9 @@ with the possibility of adding a buffer between two adjacent layers to completel
 <img src="images/dgl_vs_dni_models.png" alt="DGL v.s. DNI" width="90%"/>
 </p>
 
-### [Parallel Training of Deep Networks with Local Updates] (Dec 2020)
+### Parallel Training of Deep Networks with Local Updates (Dec 2020)
+
+- [paper](https://arxiv.org/pdf/2012.03837.pdf)
 
 Provide the first large scale investigation into local update methods in both vision and language domains.
 
@@ -391,7 +442,9 @@ Take home messages:
   <img src="images/filters_comparison.png" alt="Filters Comparison" width="80%"/>
   </p>
 
-### [Training Neural Networks with Local Error Signals] (Jan 2019)
+### Training Neural Networks with Local Error Signals (Jan 2019)
+
+- [paper](https://arxiv.org/pdf/1901.06656.pdf)
 
 Use single-layer auxiliary-networks and two different supervised loss functions to generate local error signals, 
 and show that the combination of these losses helps.
@@ -408,7 +461,9 @@ Take home messages:
 
 ## Target Propagation
 
-### [Difference Target Propagation] (Dec 2014)
+### Difference Target Propagation (Dec 2014)
+
+- [paper](https://arxiv.org/pdf/1412.7525.pdf)
 
 Associate with each feedforward unit’s activation value a **target value** rather than a **loss gradient**. 
 The target value is meant to be close to the activation value while being likely to have provided a smaller loss 
@@ -469,7 +524,9 @@ Take home messages:
 
 ## Miscellaneous
 
-### [Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey] (Jan 2021)
+### Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey (Jan 2021)
+
+- [paper](https://arxiv.org/pdf/2101.03419.pdf)
 
 A nice survey of alternatives to back-propagation. It covers three main topics:
 - Proxy Objectives - Use some local objective for each layer. \
@@ -500,7 +557,10 @@ Take home messages:
 
 ## Feedback Alignment
 
-### [Random feedback weights support learning in deep neural networks] (Nov 2014)
+### Random feedback weights support learning in deep neural networks (Nov 2014)
+
+- [arXiv paper](https://arxiv.org/pdf/1411.0247.pdf)
+- [Nature Communications paper](https://www.nature.com/articles/ncomms13276.pdf)
 
 Instead of multiplying the back-propagated gradients with the forward weight matrix transposed,
 multiply by a random matrix. The motivation is to obtain a more biological plausible learning rule.
@@ -521,7 +581,9 @@ Take home messages:
 
   Note that there is also the "Nature communications" version: [Random synaptic feedback weights support error backpropagation for deep learning]
 
-### [Direct Feedback Alignment Provides Learning in Deep Neural Networks] (Sep 2016)
+### Direct Feedback Alignment Provides Learning in Deep Neural Networks (Sep 2016)
+
+- [paper](https://arxiv.org/pdf/1609.01596.pdf)
 
 Instead of using a random matrix to multiply with the back-propagated gradient,
 use a random matrix for multiplying the top error directly (without backward passing through the top layers).
@@ -536,7 +598,9 @@ Take home messages:
 - Performed experiments on small datasets such as MNIST and CIFAR. \
   Works okay, slightly worse performance than back-prop.
 
-### [Direct Feedback Alignment Scales to Modern Deep Learning Tasks and Architectures] (Jun 2020)
+### Direct Feedback Alignment Scales to Modern Deep Learning Tasks and Architectures (Jun 2020)
+
+- [paper](https://arxiv.org/pdf/2006.12878.pdf)
 
 Showed empirically that direct feedback alignment works on a variety of different and difficult tasks,
 such as neural view synthesis (e.g. NeRF), click-through rate prediction with recommender systems,
@@ -551,56 +615,5 @@ Take home messages:
 
 ## Books
 
-### [Convex Optimization]
-
-### [Online Learning and Online Convex Optimization]
-
-[A Simple Framework for Contrastive Learning of Visual Representations]: https://arxiv.org/pdf/2002.05709.pdf
-
-[Big Self-Supervised Models are Strong Semi-Supervised Learners]: https://arxiv.org/pdf/2006.10029.pdf
-
-[Representation Learning with Contrastive Predictive Coding]: https://arxiv.org/pdf/1807.03748.pdf
-
-[Context Encoders: Feature Learning by Inpainting]: https://arxiv.org/pdf/1604.07379.pdf
-
-[Colorful Image Colorization]: https://arxiv.org/pdf/1603.08511.pdf
-
-[Predicting What You Already Know Helps: Provable Self-Supervised Learning]: https://arxiv.org/pdf/2008.01064.pdf
-
-[Putting An End to End-to-End: Gradient-Isolated Learning of Representations]: https://arxiv.org/pdf/1905.11786.pdf
-
-[LoCo: Local Contrastive Representation Learning]: https://arxiv.org/pdf/2008.01342.pdf
-
-[Decoupled Neural Interfaces using Synthetic Gradients]: https://arxiv.org/pdf/1608.05343.pdf
-
-[Understanding Synthetic Gradients and Decoupled Neural Interfaces]: https://arxiv.org/pdf/1703.00522.pdf
-
-[A Provably Correct Algorithm for Deep Learning that Actually Works]: https://arxiv.org/pdf/1803.09522.pdf
-
-[Greedy Layerwise Learning Can Scale to ImageNet]: https://arxiv.org/pdf/1812.11446.pdf
-
-[Decoupled Greedy Learning of CNNs]: https://arxiv.org/pdf/1901.08164.pdf
-
-[Parallel Training of Deep Networks with Local Updates]: https://arxiv.org/pdf/2012.03837.pdf
-
-[Training Neural Networks with Local Error Signals]: https://arxiv.org/pdf/1901.06656.pdf
-
-[Difference Target Propagation]: https://arxiv.org/pdf/1412.7525.pdf
-
-[Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey]: https://arxiv.org/pdf/2101.03419.pdf
-
-[Random feedback weights support learning in deep neural networks]: https://arxiv.org/pdf/1411.0247.pdf
-
-[Random synaptic feedback weights support error backpropagation for deep learning]: https://www.nature.com/articles/ncomms13276.pdf
-
-[Direct Feedback Alignment Provides Learning in Deep Neural Networks]: https://arxiv.org/pdf/1609.01596.pdf
-
-[Direct Feedback Alignment Scales to Modern Deep Learning Tasks and Architectures]: https://arxiv.org/pdf/2006.12878.pdf
-
-[Convex Optimization]: https://web.stanford.edu/~boyd/cvxbook/bv_cvxbook.pdf
-
-[Online Learning and Online Convex Optimization]: https://www.cs.huji.ac.il/~shais/papers/OLsurvey.pdf
-
-[DGL repo]: https://github.com/eugenium/DGL
-
-[DNI repo]: https://github.com/koz4k/dni-pytorch
+- [Convex Optimization](https://web.stanford.edu/~boyd/cvxbook/bv_cvxbook.pdf)
+- [Online Learning and Online Convex Optimization](https://www.cs.huji.ac.il/~shais/papers/OLsurvey.pdf)
