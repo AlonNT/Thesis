@@ -24,6 +24,8 @@ def get_model(args):
             return get_cnn(), 'CNN'
     elif args.model.startswith('VGG'):
         kwargs = dict(vgg_name=args.model,
+                      aux_mlp_n_hidden_layers=args.aux_mlp_n_hidden_layers,
+                      aux_mlp_hidden_dim=args.aux_mlp_hidden_dim,
                       dropout_prob=args.dropout_prob)
         if args.dgl:
             model_name = f'{args.model} with DGL'
@@ -91,7 +93,9 @@ def main():
     optimizer_params = dict(optimizer_type=args.optimizer_type, lr=args.learning_rate,
                             weight_decay=args.weight_decay, momentum=args.momentum)
     train_model(model, criterion, optimizer_params, dataloaders, device,
-                args.epochs, args.log_interval, args.dgl, args.cdni, args.ssl, ssl_criterion)
+                args.epochs, args.log_interval, args.dgl, args.cdni,
+                args.ssl, ssl_criterion, args.pred_loss_weight, args.ssl_loss_weight,
+                args.first_trainable_block)
 
 
 def parse_args():
@@ -111,6 +115,11 @@ def parse_args():
     default_momentum = 0.9
     default_dropout_prob = 0
     default_log_interval = 100
+    default_aux_mlp_n_hidden_layers = 1
+    default_aux_mlp_hidden_dim = 1024
+    default_pred_loss_weight = 1
+    default_ssl_loss_weight = 0.1
+    default_first_trainable_block = 0
 
     parser.add_argument('--model', type=str, default=default_model,
                         help=f'The model name for the network architecture. '
@@ -138,14 +147,20 @@ def parse_args():
                         help=f'Weight decay. '
                              f'Default is {default_weight_decay}.')
     parser.add_argument('--momentum', type=float, default=default_momentum,
-                        help=f'Momentum (will be used only if optimizer-type is SGD).'
+                        help=f'Momentum (will be used only if optimizer-type is SGD). '
                              f'Default is {default_momentum}.')
     parser.add_argument('--dropout_prob', type=float, default=default_dropout_prob,
-                        help=f'Dropout probability (will be added after each non linearity).'
+                        help=f'Dropout probability (will be added after each non linearity). '
                              f'Default is {default_dropout_prob}.')
     parser.add_argument('--log_interval', type=int, default=default_log_interval,
                         help=f'How many iterations between each training log. '
                              f'Default is {default_log_interval}.')
+    parser.add_argument('--aux_mlp_n_hidden_layers', type=int, default=default_aux_mlp_n_hidden_layers,
+                        help=f'How many hidden layers in each auxiliary network (which is a MLP). '
+                             f'Default is {default_aux_mlp_n_hidden_layers}.')
+    parser.add_argument('--aux_mlp_hidden_dim', type=int, default=default_aux_mlp_hidden_dim,
+                        help=f'Dimension of each hidden layer in each auxiliary network (which is a MLP). '
+                             f'Default is {default_aux_mlp_hidden_dim}.')
     parser.add_argument('--dgl', action='store_true',
                         help='Use decoupled greedy learning.')
     parser.add_argument('--dni', action='store_true',
@@ -155,7 +170,16 @@ def parse_args():
     parser.add_argument('--ssl', action='store_true',
                         help='Use self-supervised local loss (predict shifted image).')
     parser.add_argument('--upsample', action='store_true',
-                        help='Use self-supervised local loss (predict shifted image).')
+                        help='Whether to upsample SSL predictions or leave them downsampled.')
+    parser.add_argument('--pred_loss_weight', type=float, default=default_pred_loss_weight,
+                        help=f'Weight of the prediction loss when using both prediction-loss and SSL-loss.'
+                             f'Default is {default_pred_loss_weight}.')
+    parser.add_argument('--ssl_loss_weight', type=float, default=default_ssl_loss_weight,
+                        help=f'Weight of the SSL loss when using both prediction-loss and SSL-loss.'
+                             f'Default is {default_ssl_loss_weight}.')
+    parser.add_argument('--first_trainable_block', type=int, default=default_first_trainable_block,
+                        help=f'The first trainable block index, can be used to fix first few blocks initial weights.'
+                             f'Default is {default_first_trainable_block}.')
 
     parser.add_argument('--disable_normalization_to_plus_minus_one', action='store_true',
                         help='If true, disable normalization of the values to the range [-1,1] (instead of [0,1]).')

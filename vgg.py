@@ -12,6 +12,19 @@ from utils import get_mlp
 # Configurations for the VGG models family.
 # A number indicates number of channels in a convolution block, and M denotes a MaxPool layer.
 configs = {
+    # This is an architecture which reaches final dimensions of 4x4.
+    'VGG6': [64, 128, 'M', 128, 256, 'M', 256, 512, 'M'],
+
+    # 's' for shallow, 'w' for wide, 'x' for extra.
+    'VGGs': [8, 'M', 16, 'M', 32, 'M'],
+    'VGGsw': [64, 'M', 128, 'M', 256, 'M'],
+    'VGGsxw': [128, 'M', 256, 'M', 512, 'M'],
+
+    # These are versions similar to the original VGG models, but with less down-sampling
+    # (because it's CIFAR-10 32x32 and not ImageNet 224x224)
+    'VGG11c': [64, 128, 'M', 256, 256, 'M', 512, 512, 512, 512, 'M'],
+    'VGG13c': [64, 64, 128, 128, 'M', 256, 256, 'M', 512, 512, 512, 512, 'M'],
+
     # https://github.com/anokland/local-loss/blob/master/train.py#L1276
     'VGG8b': [128, 256, 'M', 256, 512, 'M', 512, 'M', 512, 'M'],  #
     'VGG11b': [128, 128, 128, 256, 'M', 256, 512, 'M', 512, 512, 'M', 512, 'M'],
@@ -40,7 +53,7 @@ def get_ssl_aux_net(channels: int, image_size: Optional[int] = None, target_imag
             image_size *= 2
             in_channels = out_channels
 
-    # Convolutional layer with 1x1 kernel to change channels to 3.
+    # Convolution layer with 1x1 kernel to change channels to 3.
     layers.append(nn.Conv2d(in_channels, out_channels=3, kernel_size=1, padding=0))
 
     return nn.Sequential(*layers)
@@ -106,8 +119,8 @@ class VGG(nn.Module):
         self.features = nn.Sequential(*layers)
         self.classifier = get_mlp(input_dim=features_output_dimension,
                                   output_dim=len(CLASSES),
-                                  n_hidden_layers=1,
-                                  hidden_dim=1024)
+                                  n_hidden_layers=aux_mlp_n_hidden_layers,
+                                  hidden_dim=aux_mlp_hidden_dim)
 
     def forward(self, x):
         features = self.features(x)

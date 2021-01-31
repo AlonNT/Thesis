@@ -196,10 +196,12 @@ def evaluate_model(model, criterion, dataloader, device):
     return loss, accuracy
 
 
-def perform_train_step_dgl(model, inputs, labels, criterion, optim, training_step,
+def perform_train_step_dgl(model, inputs, labels, criterion, optim,
+                           training_step,
                            ssl: bool = False, ssl_criterion=None,
                            pred_loss_weight: float = 1, ssl_loss_weight: float = 0.1,
-                           log_interval: int = 5):
+                           first_trainable_block: int = 0,
+                           images_log_interval: int = 1000):
     """
     Perform a train-step for a model trained with DGL.
     The difference between the regular train-step and this one is that the model forward pass
@@ -216,13 +218,19 @@ def perform_train_step_dgl(model, inputs, labels, criterion, optim, training_ste
     :param ssl_criterion:
     :param pred_loss_weight:
     :param ssl_loss_weight:
-    :param log_interval:
+    :param images_log_interval:
+    :param first_trainable_block:
     :return: The loss of this train-step, as well as the predictions.
     """
     n_plot_images = 4
+    inputs_size = inputs.size(-1)
     inputs_representation = inputs
     loss, predictions, predictions_loss, ssl_loss = None, None, None, None
     indices_to_plot = np.random.choice(inputs.size(0), size=n_plot_images, replace=False)
+
+    if first_trainable_block < 0:
+        first_trainable_block = len(model.blocks) + first_trainable_block
+    assert 0 <= first_trainable_block < len(model.blocks), f"Invalid first_trainable_block ({first_trainable_block})."
 
     for i in range(len(model.blocks)):
         optim[i].zero_grad()
@@ -230,26 +238,36 @@ def perform_train_step_dgl(model, inputs, labels, criterion, optim, training_ste
         inputs_representation, outputs, ssl_outputs = model(inputs_representation,
                                                             first_block_index=i, last_block_index=i)
 
+        if i < first_trainable_block:
+            continue
+
         _, predictions = torch.max(outputs, dim=1)
-        predictions_loss = criterion(outputs, labels)
-        loss = pred_loss_weight * predictions_loss
 
-        if ssl:
+        # If not training with SSL, predict the final classes' scores.
+        # Note that in the last block we always want to predict the classes' scores and ignore SSL.
+        if (not ssl) or (i == len(model.blocks) - 1):
+            loss = criterion(outputs, labels)
+        else:  # Training with SSL and it's not the last block.
             ssl_outputs_size = ssl_outputs.size(-1)
-            ssl_labels = resize(inputs, size=[ssl_outputs_size]*2)
+            ssl_labels = inputs if ssl_outputs_size == inputs_size else resize(inputs, size=[ssl_outputs_size] * 2)
             ssl_loss = ssl_criterion(ssl_outputs, ssl_labels)
-            loss += ssl_loss_weight * ssl_loss
 
-            if training_step % log_interval == 0:
+            if pred_loss_weight > 0:
+                predictions_loss = criterion(outputs, labels)
+                loss = pred_loss_weight * predictions_loss + ssl_loss_weight * ssl_loss
+            else:
+                loss = ssl_loss
+
+            if training_step % images_log_interval == 0:
                 images = torch.cat([ssl_labels[indices_to_plot], ssl_outputs[indices_to_plot].detach()])
                 grid = torchvision.utils.make_grid(images, nrow=n_plot_images)
-                wandb.log({f'SSL-layer#{i}': [wandb.Image(grid.numpy().transpose((1, 2, 0)))]},
-                          step=training_step)
+                wandb_image = wandb.Image(grid.cpu().numpy().transpose((1, 2, 0)))
+                wandb.log({f'SSL-layer#{i}': [wandb_image]}, step=training_step)
 
         loss.backward()
         optim[i].step()
 
-        inputs_representation = inputs_representation.detach()
+        inputs_representation = inputs_representation.detach()  # Prepare the input tensor for the next block.
 
     return loss, predictions, predictions_loss, ssl_loss
 
@@ -307,8 +325,9 @@ def perform_train_step_regular(model, inputs, labels, criterion, optim):
     return loss, predictions
 
 
-def perform_train_step(model, inputs, labels, criterion, optim, training_step,
-                       is_dgl, is_cdni, ssl, ssl_criterion=None):
+def perform_train_step(model, inputs, labels, criterion, optim,
+                       train_step, is_dgl, is_cdni, ssl, ssl_criterion,
+                       pred_loss_weight, ssl_loss_weight, first_trainable_block):
     """
     Perform a single train-step, which is done differently when using regular training, DGL and cDNI.
 
@@ -317,19 +336,25 @@ def perform_train_step(model, inputs, labels, criterion, optim, training_step,
     :param labels: The labels.
     :param criterion: The criterion.
     :param optim: The optimizer (or plural optimizers).
-    :param training_step:
+    :param train_step:
     :param is_dgl: Whether this model is trained using DGL (affects the optimizer and the train-step functionality).
     :param is_cdni: Whether this model is trained using DNI with context or not (affects the train-step functionality).
     :param ssl:
     :param ssl_criterion:
+    :param pred_loss_weight:
+    :param ssl_loss_weight:
+    :param first_trainable_block:
     :return: The loss of this train-step, as well as the predictions.
     """
+    mutual_args = (model, inputs, labels, criterion, optim)
+
     if is_dgl:
-        return perform_train_step_dgl(model, inputs, labels, criterion,  optim, training_step, ssl, ssl_criterion)
+        return perform_train_step_dgl(*mutual_args, train_step, ssl, ssl_criterion, pred_loss_weight, ssl_loss_weight,
+                                      first_trainable_block)
     elif is_cdni:
-        return perform_train_step_cdni(model, inputs, labels, criterion, optim)
+        return perform_train_step_cdni(*mutual_args)
     else:
-        return perform_train_step_regular(model, inputs, labels, criterion, optim)
+        return perform_train_step_regular(*mutual_args)
 
 
 def get_optim(model, optimizer_params, is_dgl):
@@ -359,6 +384,10 @@ def get_optim(model, optimizer_params, is_dgl):
         for i in range(len(model.blocks)):
             parameters_to_train = itertools.chain(model.blocks[i].parameters(),
                                                   model.auxiliary_nets[i].parameters())
+            if model.ssl_auxiliary_nets is not None:
+                parameters_to_train = itertools.chain(parameters_to_train,
+                                                      model.ssl_auxiliary_nets[i].parameters())
+
             optimizer = optimizer_constuctor(parameters_to_train, **optimizer_params)
             optimizers.append(optimizer)
 
@@ -372,6 +401,7 @@ class Accumulator:
     Accumulate loss and correct predictions of an interval,
     to calculate later mean-loss & accuracy.
     """
+
     def __init__(self):
         self.reset()
 
@@ -415,7 +445,8 @@ class Accumulator:
 
 def train_model(model, criterion, optimizer_params, dataloaders, device,
                 num_epochs=25, log_interval=100, is_dgl=False, is_cdni=False,
-                is_ssl=False, ssl_criterion=None):
+                is_ssl=False, ssl_criterion=None, pred_loss_weight=1, ssl_loss_weight=0.1,
+                first_trainable_block=0):
     """
     A general function to train a model and return the best model found.
 
@@ -430,6 +461,9 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
     :param is_cdni: Whether this model is trained using DNI with context or not (affects the train-step functionality).
     :param is_ssl: Whether this model is trained using self-supervised local loss (predicting the shifted image).
     :param ssl_criterion:
+    :param pred_loss_weight:
+    :param ssl_loss_weight:
+    :param first_trainable_block:
     :return: the model with the lowest test error
     """
     best_weights = copy.deepcopy(model.state_dict())
@@ -442,6 +476,7 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
     epoch_accumulator = Accumulator()
 
     for epoch in range(num_epochs):
+        model_state = copy.deepcopy(model.state_dict())
         model.train()
         epoch_accumulator.reset()
 
@@ -452,14 +487,15 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
             labels = labels.to(device)
 
             train_step_result = perform_train_step(model, inputs, labels, criterion, optim, training_step,
-                                                   is_dgl, is_cdni, is_ssl, ssl_criterion)
+                                                   is_dgl, is_cdni,
+                                                   is_ssl, ssl_criterion, pred_loss_weight, ssl_loss_weight,
+                                                   first_trainable_block)
 
             accumulator_kwargs = dict()
             if is_dgl:
                 loss, predictions, predictions_loss, ssl_loss = train_step_result
-                if is_ssl:
-                    accumulator_kwargs['mean_pred_loss'] = predictions_loss.item()
-                    accumulator_kwargs['mean_ssl_loss'] = ssl_loss.item()
+                accumulator_kwargs['mean_pred_loss'] = predictions_loss.item() if predictions_loss is not None else 0
+                accumulator_kwargs['mean_ssl_loss'] = ssl_loss.item() if ssl_loss is not None else 0
             else:
                 loss, predictions = train_step_result
 
@@ -491,6 +527,17 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
                     f'Test '
                     f'loss={epoch_test_loss:.4f} '
                     f'accuracy={epoch_test_accuracy:.2f}%')
+
+        # For debugging purposes - verify that the weights of the model changed.
+        # new_model_state = copy.deepcopy(model.state_dict())
+        # for weight_name in new_model_state.keys():
+        #     old_weight = model_state[weight_name]
+        #     new_weight = new_model_state[weight_name]
+        #     if torch.allclose(old_weight, new_weight):
+        #         logger.warning(f'Weight \'{weight_name}\' of shape {list(new_weight.size())} did not change.')
+        #     else:
+        #         logger.debug(f'Weight \'{weight_name}\' of shape {list(new_weight.size())} changed.')
+        # model_state = copy.deepcopy(new_model_state)
 
     logger.info(f'Best test accuracy: {best_accuracy:.2f}%')
 
