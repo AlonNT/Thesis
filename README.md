@@ -11,6 +11,7 @@
     - [SimCLRv2 - Big Self-Supervised Models are Strong Semi-Supervised Learners (Jun 2020)](#simclrv2---big-self-supervised-models-are-strong-semi-supervised-learners-jun-2020)
     - [CPC - Representation Learning with Contrastive Predictive Coding (Jul 2018)](#cpc---representation-learning-with-contrastive-predictive-coding-jul-2018)
     - [CPCv2 - Data-Efficient Image Recognition with Contrastive Predictive Coding (May 2019)](#cpcv2---data-efficient-image-recognition-with-contrastive-predictive-coding-may-2019)
+    - [CMC - Contrastive Multiview Coding (Jun 2019)](#cmc---contrastive-multiview-coding-jun-2019)
     - [Context Encoders: Feature Learning by Inpainting (Apr 2016)](#context-encoders-feature-learning-by-inpainting-apr-2016)
     - [Colorful Image Colorization (Mar 2016)](#colorful-image-colorization-mar-2016)
     - [Predicting What You Already Know Helps: Provable Self-Supervised Learning (Aug 2020)](#predicting-what-you-already-know-helps-provable-self-supervised-learning-aug-2020)
@@ -243,13 +244,38 @@ A self-supervised learning approach that builds upon the original CPC with sever
 They assess CPCv2 in several contexts:
 - Linear classification on top of the learned representations.  
   They suprass all self-supervised techniques at that time.
+- Transfer learning to object detection in PASCAL dataset.   
+  They reach a new state-of-the-art, surpassing supervised transfer-learning.
 - Data-efficient learning - learning with less labeled data.  
   They surpass supervised learning with x5-x2 less labeled data, as seen in the graph.  
   <p align="center">
   <img src="images/CPCv2_graph.png" alt="CPCv2 Graph" width="40%"/>
   </p>
-- Transfer learning to object detection in PASCAL dataset.   
-  They reach a new state-of-the-art, surpassing supervised transfer-learning.
+
+Take-home messages:
+- Self-supervised representations seem to be more "data-efficient", as seen both here and in SimCLRv2.
+
+### CMC - Contrastive Multiview Coding (Jun 2019)
+
+- [paper](https://arxiv.org/pdf/1906.05849.pdf)
+
+Learn a representation in a similar manner as CPC, but instead of maximize mutual information between different patches in an image, it maximizes mutual information between different views of the same image. Note that it scales to any number of views.  
+
+<p align="center">
+<img src="images/cmc.png" alt="Contrastive Multiview Coding" width="70%"/>
+</p>
+
+Show empirical results on:
+- ImageNet classification when the different views are luminance and chrominance in color images. 
+- Video - views are images v.s. optival flow.
+- Luminance, chrominance, depth, surface normal and semantic labels on NYU-Depth dataset.
+
+Take-home messages:
+- As shown in their experiments, it seems that contrastive loss outperform predictive loss. 
+  E.g., it's better to predict that a pair of views is similar rather than predicting one view from the other.
+  <p align="center">
+  <img src="images/predictive_vs_contrastive.png" alt="Predictive v.s. Contrastive" width="50%"/>
+  </p>
 
 ### Context Encoders: Feature Learning by Inpainting (Apr 2016)
 
