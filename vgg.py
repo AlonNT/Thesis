@@ -15,13 +15,13 @@ configs = {
     # This is an architecture which reaches final dimensions of 4x4.
     'VGG6': [64, 128, 'M', 128, 256, 'M', 256, 512, 'M'],
 
-    # 's' for shallow, 'w' for wide, 'x' for extra.
-    'VGGs': [8, 'M', 16, 'M', 32, 'M'],
-    'VGGsw': [64, 'M', 128, 'M', 256, 'M'],
-    'VGGsxw': [128, 'M', 256, 'M', 512, 'M'],
+    'VGGs': [8, 'M', 16, 'M', 32, 'M'],  # 's' for shallow.
+    'VGGsw': [64, 'M', 128, 'M', 256, 'M'],  # 'w' for wide.
+    'VGGsxw': [128, 'M', 256, 'M', 512, 'M'],  # 'x' for extra.
 
     # These are versions similar to the original VGG models, but with less down-sampling
     # (because it's CIFAR-10 32x32 and not ImageNet 224x224)
+    'VGG8c': [64, 128, 'M', 256, 256, 'M', 512, 512, 'M'],
     'VGG11c': [64, 128, 'M', 256, 256, 'M', 512, 512, 512, 512, 'M'],
     'VGG13c': [64, 64, 128, 128, 'M', 256, 256, 'M', 512, 512, 512, 512, 'M'],
 
@@ -54,7 +54,7 @@ def get_ssl_aux_net(channels: int, image_size: Optional[int] = None, target_imag
             in_channels = out_channels
 
     # Convolution layer with 1x1 kernel to change channels to 3.
-    layers.append(nn.Conv2d(in_channels, out_channels=3, kernel_size=1, padding=0))
+    layers.append(nn.Conv2d(in_channels, out_channels=3, kernel_size=1))
 
     return nn.Sequential(*layers)
 
@@ -63,6 +63,7 @@ def get_blocks(config: List[Union[int, str]],
                aux_mlp_n_hidden_layers: int = 1,
                aux_mlp_hidden_dim: int = 1024,
                dropout_prob: float = 0,
+               padding_mode: str = 'zeros',
                upsample: bool = False):
     blocks: List[nn.Module] = list()
     auxiliary_nets: List[nn.Module] = list()
@@ -77,7 +78,7 @@ def get_blocks(config: List[Union[int, str]],
     while i < len(config):
         out_channels = config[i]
 
-        block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+        block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode=padding_mode),
                         nn.BatchNorm2d(out_channels),
                         nn.ReLU()]
 
@@ -110,12 +111,14 @@ class VGG(nn.Module):
                  vgg_name,
                  aux_mlp_n_hidden_layers: int = 1,
                  aux_mlp_hidden_dim: int = 1024,
-                 dropout_prob: float = 0):
+                 dropout_prob: float = 0,
+                 padding_mode: str = 'zeros'):
         super(VGG, self).__init__()
         layers, _, _, features_output_dimension = get_blocks(configs[vgg_name],
                                                              aux_mlp_n_hidden_layers,
                                                              aux_mlp_hidden_dim,
-                                                             dropout_prob)
+                                                             dropout_prob,
+                                                             padding_mode)
         self.features = nn.Sequential(*layers)
         self.classifier = get_mlp(input_dim=features_output_dimension,
                                   output_dim=len(CLASSES),
@@ -134,6 +137,7 @@ class VGGwDGL(nn.Module):
                  aux_mlp_n_hidden_layers: int = 1,
                  aux_mlp_hidden_dim: int = 1024,
                  dropout_prob: float = 0,
+                 padding_mode: str = 'zeros',
                  use_ssl: bool = False,
                  upsample: bool = False):
         super(VGGwDGL, self).__init__()
@@ -141,6 +145,7 @@ class VGGwDGL(nn.Module):
                                                                        aux_mlp_n_hidden_layers,
                                                                        aux_mlp_hidden_dim,
                                                                        dropout_prob,
+                                                                       padding_mode,
                                                                        upsample)
         self.use_ssl = use_ssl
         self.blocks = nn.ModuleList(blocks)

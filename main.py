@@ -26,7 +26,8 @@ def get_model(args):
         kwargs = dict(vgg_name=args.model,
                       aux_mlp_n_hidden_layers=args.aux_mlp_n_hidden_layers,
                       aux_mlp_hidden_dim=args.aux_mlp_hidden_dim,
-                      dropout_prob=args.dropout_prob)
+                      dropout_prob=args.dropout_prob,
+                      padding_mode='circular' if args.shift_ssl_labels else 'zeros')
         if args.dgl:
             model_name = f'{args.model} with DGL'
             if args.ssl:
@@ -71,9 +72,7 @@ def main():
                 f'optimizer-type={args.optimizer_type}, '
                 f'batch-size={args.batch_size}, '
                 f'learning-rate={args.learning_rate}, '
-                f'weight-decay={args.weight_decay}, '
-                f'momentum={args.momentum}',
-                f'log-interval={args.log_interval}')
+                f'weight-decay={args.weight_decay}')
 
     device = torch.device(args.device)
     model = model.to(device)
@@ -95,7 +94,7 @@ def main():
     train_model(model, criterion, optimizer_params, dataloaders, device,
                 args.epochs, args.log_interval, args.dgl, args.cdni,
                 args.ssl, ssl_criterion, args.pred_loss_weight, args.ssl_loss_weight,
-                args.first_trainable_block)
+                args.first_trainable_block, args.shift_ssl_labels)
 
 
 def parse_args():
@@ -104,14 +103,14 @@ def parse_args():
                     'This enables running the different experiments while logging to a log-file and to wandb.'
     )
 
-    default_model = 'VGG16'
+    default_model = 'VGG11c'
     default_path = 'experiments'
     default_device = 'cpu'
     default_epochs = 1500
     default_optimizer = 'SGD'
     default_batch_size = 64
-    default_learning_rate = 0.001
-    default_weight_decay = 0
+    default_learning_rate = 0.003
+    default_weight_decay = 0.00001
     default_momentum = 0.9
     default_dropout_prob = 0
     default_log_interval = 100
@@ -168,7 +167,9 @@ def parse_args():
     parser.add_argument('--cdni', action='store_true',
                         help='Use decoupled neural interfaces with context.')
     parser.add_argument('--ssl', action='store_true',
-                        help='Use self-supervised local loss (predict shifted image).')
+                        help='Use self-supervised local loss (predict the image).')
+    parser.add_argument('--shift_ssl_labels', action='store_true',
+                        help='Shift the target images to be produced by the SSL auxiliary networks.')
     parser.add_argument('--upsample', action='store_true',
                         help='Whether to upsample SSL predictions or leave them downsampled.')
     parser.add_argument('--pred_loss_weight', type=float, default=default_pred_loss_weight,

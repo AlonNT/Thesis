@@ -201,6 +201,7 @@ def perform_train_step_dgl(model, inputs, labels, criterion, optim,
                            ssl: bool = False, ssl_criterion=None,
                            pred_loss_weight: float = 1, ssl_loss_weight: float = 0.1,
                            first_trainable_block: int = 0,
+                           shift_ssl_labels: bool = False,
                            images_log_interval: int = 1000):
     """
     Perform a train-step for a model trained with DGL.
@@ -218,19 +219,22 @@ def perform_train_step_dgl(model, inputs, labels, criterion, optim,
     :param ssl_criterion:
     :param pred_loss_weight:
     :param ssl_loss_weight:
-    :param images_log_interval:
     :param first_trainable_block:
+    :param shift_ssl_labels:
+    :param images_log_interval:
     :return: The loss of this train-step, as well as the predictions.
     """
     n_plot_images = 4
     inputs_size = inputs.size(-1)
-    inputs_representation = inputs
+    inputs_representation = torch.clone(inputs)
     loss, predictions, predictions_loss, ssl_loss = None, None, None, None
     indices_to_plot = np.random.choice(inputs.size(0), size=n_plot_images, replace=False)
 
     if first_trainable_block < 0:
         first_trainable_block = len(model.blocks) + first_trainable_block
     assert 0 <= first_trainable_block < len(model.blocks), f"Invalid first_trainable_block ({first_trainable_block})."
+
+    shifts = tuple(np.linspace(start=5, stop=16, num=len(model.blocks), dtype=int))
 
     for i in range(len(model.blocks)):
         optim[i].zero_grad()
@@ -250,6 +254,8 @@ def perform_train_step_dgl(model, inputs, labels, criterion, optim,
         else:  # Training with SSL and it's not the last block.
             ssl_outputs_size = ssl_outputs.size(-1)
             ssl_labels = inputs if ssl_outputs_size == inputs_size else resize(inputs, size=[ssl_outputs_size] * 2)
+            if shift_ssl_labels:
+                ssl_labels = torch.roll(ssl_labels, shifts=(shifts[i], shifts[i]), dims=(2, 3))
             ssl_loss = ssl_criterion(ssl_outputs, ssl_labels)
 
             if pred_loss_weight > 0:
@@ -327,7 +333,7 @@ def perform_train_step_regular(model, inputs, labels, criterion, optim):
 
 def perform_train_step(model, inputs, labels, criterion, optim,
                        train_step, is_dgl, is_cdni, ssl, ssl_criterion,
-                       pred_loss_weight, ssl_loss_weight, first_trainable_block):
+                       pred_loss_weight, ssl_loss_weight, first_trainable_block, shift_ssl_labels):
     """
     Perform a single train-step, which is done differently when using regular training, DGL and cDNI.
 
@@ -344,13 +350,14 @@ def perform_train_step(model, inputs, labels, criterion, optim,
     :param pred_loss_weight:
     :param ssl_loss_weight:
     :param first_trainable_block:
+    :param shift_ssl_labels:
     :return: The loss of this train-step, as well as the predictions.
     """
     mutual_args = (model, inputs, labels, criterion, optim)
 
     if is_dgl:
         return perform_train_step_dgl(*mutual_args, train_step, ssl, ssl_criterion, pred_loss_weight, ssl_loss_weight,
-                                      first_trainable_block)
+                                      first_trainable_block, shift_ssl_labels)
     elif is_cdni:
         return perform_train_step_cdni(*mutual_args)
     else:
@@ -446,7 +453,7 @@ class Accumulator:
 def train_model(model, criterion, optimizer_params, dataloaders, device,
                 num_epochs=25, log_interval=100, is_dgl=False, is_cdni=False,
                 is_ssl=False, ssl_criterion=None, pred_loss_weight=1, ssl_loss_weight=0.1,
-                first_trainable_block=0):
+                first_trainable_block=0, shift_ssl_labels=False):
     """
     A general function to train a model and return the best model found.
 
@@ -464,6 +471,7 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
     :param pred_loss_weight:
     :param ssl_loss_weight:
     :param first_trainable_block:
+    :param shift_ssl_labels:
     :return: the model with the lowest test error
     """
     best_weights = copy.deepcopy(model.state_dict())
@@ -476,7 +484,7 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
     epoch_accumulator = Accumulator()
 
     for epoch in range(num_epochs):
-        model_state = copy.deepcopy(model.state_dict())
+        # model_state = copy.deepcopy(model.state_dict())  # For debugging purposes later - verify weights change.
         model.train()
         epoch_accumulator.reset()
 
@@ -489,7 +497,7 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
             train_step_result = perform_train_step(model, inputs, labels, criterion, optim, training_step,
                                                    is_dgl, is_cdni,
                                                    is_ssl, ssl_criterion, pred_loss_weight, ssl_loss_weight,
-                                                   first_trainable_block)
+                                                   first_trainable_block, shift_ssl_labels)
 
             accumulator_kwargs = dict()
             if is_dgl:
@@ -528,7 +536,7 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
                     f'loss={epoch_test_loss:.4f} '
                     f'accuracy={epoch_test_accuracy:.2f}%')
 
-        # For debugging purposes - verify that the weights of the model changed.
+        # # For debugging purposes - verify that the weights of the model changed.
         # new_model_state = copy.deepcopy(model.state_dict())
         # for weight_name in new_model_state.keys():
         #     old_weight = model_state[weight_name]
