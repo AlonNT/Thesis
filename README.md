@@ -26,6 +26,7 @@
     - [Decoupled Greedy Learning of CNNs (Jan 2019)](#decoupled-greedy-learning-of-cnns-jan-2019)
     - [Parallel Training of Deep Networks with Local Updates (Dec 2020)](#parallel-training-of-deep-networks-with-local-updates-dec-2020)
     - [Training Neural Networks with Local Error Signals (Jan 2019)](#training-neural-networks-with-local-error-signals-jan-2019)
+    - [Revisiting Locally Supervised Learning: an Alternative to End-to-end Training (Sep 2020)](#revisiting-locally-supervised-learning-an-alternative-to-end-to-end-training-sep-2020)
   - [Target Propagation](#target-propagation)
     - [Difference Target Propagation (Dec 2014)](#difference-target-propagation-dec-2014)
   - [Miscellaneous](#miscellaneous)
@@ -128,7 +129,7 @@ One notable difference is that DGL's train-loss in decreased slower than regular
 Next, I implemented the VGG models (VGG11/13/16/19), in order to reproduce the performance in the literature which is above 90%. The model I use for the experiment is VGG16 which consists of the following modules: \
 (Conv(64)-BatchNorm-ReLU) x 2 \
 MaxPool \
-(Conv(128)-BatchNorm-ReLU) x 2 \
+(Conv(128)-BatchNorm-ReLU) x 2 \־
 MaxPool \
 (Conv(256)-BatchNorm-ReLU) x 3 \
 MaxPool \
@@ -169,7 +170,11 @@ Conclusions:
 
 ### SimCLR - A Simple Framework for Contrastive Learning of Visual Representations (Feb 2020)
 
+- Ting Chen, Simon Kornblith, Mohammad Norouzi, Geoffrey Hinton.  
+  Google Research, Brain Team.
+- Accepted to ICML 2020.
 - [paper](https://arxiv.org/pdf/2002.05709.pdf)
+- [code](https://github.com/google-research/simclr)
 
 This paper presents SimCLR: A simple framework for contrastive learning of visual representations. \
 The self-supervised task is to identify that different augmentations of the same image are the same.
@@ -186,7 +191,11 @@ Take home messages:
 
 ### SimCLRv2 - Big Self-Supervised Models are Strong Semi-Supervised Learners (Jun 2020)
 
+- Ting Chen, Simon Kornblith, Kevin Swersky, Mohammad Norouzi, Geoffrey Hinton.  
+  Google Research, Brain Team.
+- Accepted to NeurIPS 2020.
 - [paper](https://arxiv.org/pdf/2006.10029.pdf)
+- [code](https://github.com/google-research/simclr)
 
 This paper presents SimCLRv2: A model based on SimCLR with improvements that reached new state-of-the-art. Generally, the training phase contains three stages: self-supervised pretraining, followed by supervised fine-tuning, and finally distillation with unlabeled examples. Additionally:
 - The backbone which learns the representation in a self-supervised way is much larger than original SimCLR - ResNet-152 (3x+SK) v.s. ResNet-50 (4x).
@@ -212,6 +221,8 @@ Take home messages:
 
 ### CPC - Representation Learning with Contrastive Predictive Coding (Jul 2018)
 
+- Aaron van den Oord, Yazhe Li, Oriol Vinyals.  
+  DeepMind, London, UK.
 - [paper](https://arxiv.org/pdf/1807.03748.pdf)
 
 Propose a universal unsupervised learning approach to extract useful representations called Contrastive Predictive Coding. Use a probabilistic contrastive
@@ -233,6 +244,9 @@ Take home messages:
 
 ### CPCv2 - Data-Efficient Image Recognition with Contrastive Predictive Coding (May 2019)
 
+- Olivier J. Henaff. Aravind Srinivas, Jeffrey De Fauw, Ali Razavi, Carl Doersch, S. M. Ali Eslami, Aaron van den Oord.  
+  DeepMind, London, UK.  
+  University of California, Berkeley.
 - [paper](https://arxiv.org/pdf/1905.09272.pdf)
 
 A self-supervised learning approach that builds upon the original CPC with several improvements - model capacity, layer normalization, predicting with context from all directions rather than just from above, path-based augmentations.
@@ -257,7 +271,11 @@ Take-home messages:
 
 ### CMC - Contrastive Multiview Coding (Jun 2019)
 
+- Yonglong Tian, Dilip Krishnan, Phillip Isola.  
+  MIT CSAIL.  
+  Google Research.
 - [paper](https://arxiv.org/pdf/1906.05849.pdf)
+- [code](https://github.com/HobbitLong/CMC/)
 
 Learn a representation in a similar manner as CPC, but instead of maximize mutual information between different patches in an image, it maximizes mutual information between different views of the same image. Note that it scales to any number of views.  
 
@@ -279,7 +297,11 @@ Take-home messages:
 
 ### Context Encoders: Feature Learning by Inpainting (Apr 2016)
 
+- Deepak Pathak, Philipp Krahenbuhl, Jeff Donahue, Trevor Darrell, Alexei A. Efros.  
+  University of California, Berkeley.
+- Accepted to CVPR 2016.
 - [paper](https://arxiv.org/pdf/1604.07379.pdf)
+- [code](https://github.com/pathak22/context-encoder)
 
 Present Context-Encoders - a convolutional neural network trained to generate the contents of an arbitrary image region conditioned on its surroundings. In order to succeed at this task, context encoders need to both understand the content of the entire image. Quantitatively demonstrate the effectiveness of the features for CNN pre-training on classification, detection, and segmentation tasks.
 
@@ -299,7 +321,11 @@ Take home messages:
 
 ### Colorful Image Colorization (Mar 2016)
 
+- Richard Zhang, Phillip Isola, Alexei A. Efros.  
+  University of California, Berkeley.
+- Accepted to ECCV 2016.
 - [paper](https://arxiv.org/pdf/1603.08511.pdf)
+- [code](https://github.com/richzhang/colorization)
 
 Given a grayscale image predict a plausible color version of the image. \
 This colorization can be a powerful pretext task for self-supervised feature learning, acting as a *cross-channel encoder*. Results in state-of-the-art performance on several feature learning benchmarks.
@@ -317,6 +343,9 @@ Take home messages:
 
 ### Predicting What You Already Know Helps: Provable Self-Supervised Learning (Aug 2020)
 
+- Jason D. Lee, Qi Lei, Nikunj Saunshi, Jiacheng Zhuo.  
+  Princeton University.  
+  University of Texas at Austin.
 - [paper](https://arxiv.org/pdf/2008.01064.pdf)
 
 Propose a mechanism based on conditional independence to formalize how solving certain pretext tasks can learn 
@@ -324,7 +353,11 @@ representations that provably decreases the sample complexity of downstream supe
 
 ### Greedy InfoMax - Putting An End to End-to-End: Gradient-Isolated Learning of Representations (May 2019)
 
+- Sindy Löwe, Peter O`Connor, Bastiaan S. Veeling.  
+  AMLab; University of Amsterdam.
+- Accepted to NeurIPS 2019 (Honorable Mention Outstanding New Directions Paper Award).
 - [paper](https://arxiv.org/pdf/1905.11786.pdf)
+- [code](https://github.com/loeweX/Greedy_InfoMax)
 
 Train a neural-network in a self-supervised, local manner (i.e. without labels and without end-to-end backpropagation).
 
@@ -344,6 +377,10 @@ Take home messages:
 
 ### LoCo: Local Contrastive Representation Learning (Aug 2020)
 
+- Yuwen Xiong, Mengye Ren, Raquel Urtasun.  
+  Uber ATG.  
+  University of Toronto.
+- Accepted to NeurIPS 2020.
 - [paper](https://arxiv.org/pdf/2008.01342.pdf)
 
 Show that by overlapping local blocks stacking on top of each other, we effectively increase the decoder depth and allow
@@ -366,6 +403,9 @@ Take home messages:
 
 ### Decoupled Neural Interfaces using Synthetic Gradients (Aug 2016)
 
+- Max Jaderberg, Wojciech Marian Czarnecki, Simon Osindero, Oriol Vinyals, Alex Graves, David Silver, Koray Kavukcuoglu.  
+  DeepMind, London, UK.
+- Accepted to ICML 2017.
 - [paper](https://arxiv.org/pdf/1608.05343.pdf)
 - [code](https://github.com/koz4k/dni-pytorch)
 
@@ -395,6 +435,10 @@ Take home messages:
 
 ### Understanding Synthetic Gradients and Decoupled Neural Interfaces (Mar 2017)
 
+- Wojciech Marian Czarnecki, Grzegorz Swirszcz, Max Jaderberg, Simon Osindero, Oriol Vinyals,
+Koray Kavukcuoglu.  
+  DeepMind, London, UK.
+- Accepted to ICML 2017.
 - [paper](https://arxiv.org/pdf/1703.00522.pdf)
 
 Provide some theoretical explanations to synthetic gradients, for example:
@@ -406,6 +450,8 @@ Provide some theoretical explanations to synthetic gradients, for example:
 
 ### A Provably Correct Algorithm for Deep Learning that Actually Works (Mar 2018)
 
+- Eran Malach, Shai Shalev-Shwartz.  
+  The Hebrew University, Israel.
 - [paper](https://arxiv.org/pdf/1803.09522.pdf)
 
 Create a toy dataset containing digits that are generated hierarchically, and prove layerwise optimization works.
@@ -416,6 +462,11 @@ Create a toy dataset containing digits that are generated hierarchically, and pr
 
 ### Greedy Layerwise Learning Can Scale to ImageNet (Dec 2018)
 
+- Eugene Belilovsky, Michael Eickenberg, Edouard Oyallon.  
+  Mila, University of Montreal.  
+  University of California, Berkeley.  
+  CentraleSupelec, University of Paris-Saclay.
+- Accepted to ICML 2019.
 - [paper](https://arxiv.org/pdf/1812.11446.pdf)
 
 Show that greedy layerwise optimization can reach competitive performance on ImageNet.
@@ -431,6 +482,11 @@ Take home messages:
 
 ### Decoupled Greedy Learning of CNNs (Jan 2019)
 
+- Eugene Belilovsky, Michael Eickenberg, Edouard Oyallon.  
+  Mila, University of Montreal.  
+  University of California, Berkeley.  
+  CentraleSupelec, University of Paris-Saclay.
+- Accepted to ICML 2020.
 - [paper](https://arxiv.org/pdf/1901.08164.pdf)
 - [code](https://github.com/eugenium/DGL)
 
@@ -443,6 +499,10 @@ with the possibility of adding a buffer between two adjacent layers to completel
 
 ### Parallel Training of Deep Networks with Local Updates (Dec 2020)
 
+- Michael Laskin, Luke Metz, Seth Nabarro, Mark Saroufim, Badreddine Noune, Carlo Luschi, Jascha Sohl-Dickstein, Pieter Abbeel.  
+  University of Berkeley.  
+  Google Research, Brain Team.  
+  Graphcore.
 - [paper](https://arxiv.org/pdf/2012.03837.pdf)
 
 Provide the first large scale investigation into local update methods in both vision and language domains.
@@ -470,7 +530,11 @@ Take home messages:
 
 ### Training Neural Networks with Local Error Signals (Jan 2019)
 
+- Arild Nøkland, Lars H. Eidnes.  
+  Kongsberg Seatex, Trondheim, Norway.
+- Accepted to ICML 2019.
 - [paper](https://arxiv.org/pdf/1901.06656.pdf)
+- [code](https://github.com/anokland/local-loss)
 
 Use single-layer auxiliary-networks and two different supervised loss functions to generate local error signals, 
 and show that the combination of these losses helps.
@@ -485,10 +549,48 @@ They perform experiments using VGG-like networks on a lot of datasets, approachi
 Take home messages:
 - Similiary loss works quite good, and somehow complementary to regular prediction loss (indeed, using combination of these losses helps).
 
+### Revisiting Locally Supervised Learning: an Alternative to End-to-end Training (Sep 2020)
+
+- Yulin Wang, Zanlin Ni, Shiji Song, Le Yang & Gao Huang.  
+  Department of Automation, BNRist, Tsinghua University, Beijing, China.
+- Accepted to ICLR 2021.
+- [paper](https://arxiv.org/pdf/2101.10832.pdf)
+- [code](https://github.com/blackfeather-wang/InfoPro-Pytorch)
+
+Experimentally show that simply training local modules with E2E loss tends to collapse task-relevant information at early layers, and hence hurts the performance of the full model.  
+To avoid this issue, propose an information propagation (InfoPro) loss, which encourages local modules to preserve as much useful information as possible, while progressively discard task-irrelevant information. The proposed method boils down to minimizing the combination of a reconstruction loss and a normal cross-entropy/contrastive term.
+
+The intuitive idea is presented in the following figure:
+<p align="center">
+<img src="images/information_collapse_in_local_learning.png" alt="Information Collapse in Local Learning" width="70%"/>
+</p>
+and these graphs show that greedy SL contributes to dramatically more discriminative features with the first few local modules, whereas E2E learned network progressively boosts the linear separability of features throughout the whole network with even more significant effects in the later layers, surpassing greedy SL eventually.  
+<p align="center">
+<img src="images/information_graphs_in_local_learning.png" alt="Information Graphs in Local Learning" width="95%"/>
+</p>
+This raises an interesting question: *why does the full network achieve inferior performance in greedy SL compared to the E2E counterpart, even though the former is based on more discriminative earlier features*?  
+
+The conjecture is that the answer to the above question might lie in the differences of features
+apart from merely separability - in E2E learned networks, I(h, y) remains unchanged when the features pass through all the layers, while I(h, x) reduces gradually, revealing that the models progressively discard task-irrelevant information. However, greedily trained networks collapse both I(h, x) and I(h, y) in their first few modules. 
+
+The InfoPro loss is defined as:
+<p align="center">
+<img src="images/info_pro_loss.png" alt="InfoPro Loss" width="95%"/>
+</p>
+where r* capture as much task-irrelevant information in h as possible.   
+Upper for the intractable InfoPro loss is:
+<p align="center">
+<img src="images/info_pro_surrogate_loss.png" alt="InfoPro Surrogate Loss" width="50%"/>
+</p>
+estimating I(h,x) by training a decoder to obtain the minimal reconstruction loss, and estimating I(h,y) by a regular classification fashion (with the cross-entropy loss) or by using contrastive representation loss (making representations of same-class similar and different-class different)..
+
+
 ## Target Propagation
 
 ### Difference Target Propagation (Dec 2014)
 
+- Dong-Hyun Lee, Saizheng Zhang, Asja Fischer, Yoshua Bengio.  
+  Universite de Montreal, Quebec, Canada.
 - [paper](https://arxiv.org/pdf/1412.7525.pdf)
 
 Associate with each feedforward unit’s activation value a **target value** rather than a **loss gradient**. 
@@ -552,6 +654,8 @@ Take home messages:
 
 ### Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey (Jan 2021)
 
+- Shiyu Duan, Jose C. Prıncipe.  
+  University of Florida.
 - [paper](https://arxiv.org/pdf/2101.03419.pdf)
 
 A nice survey of alternatives to back-propagation. It covers three main topics:
@@ -585,8 +689,13 @@ Take home messages:
 
 ### Random feedback weights support learning in deep neural networks (Nov 2014)
 
+- Timothy P. Lillicrap, Daniel Cownden, Douglas B. Tweed, Colin J. Akerman.  
+  University of Oxford.  
+  Stockholm University.  
+  University of Toronto.  
+  York University, Toronto.
+- Accepted to Nature Communications 2016 ([pdf](https://www.nature.com/articles/ncomms13276.pdf)).
 - [arXiv paper](https://arxiv.org/pdf/1411.0247.pdf)
-- [Nature Communications paper](https://www.nature.com/articles/ncomms13276.pdf)
 
 Instead of multiplying the back-propagated gradients with the forward weight matrix transposed,
 multiply by a random matrix. The motivation is to obtain a more biological plausible learning rule.
@@ -609,6 +718,9 @@ Take home messages:
 
 ### Direct Feedback Alignment Provides Learning in Deep Neural Networks (Sep 2016)
 
+- Arild Nøkland.  
+  Trondheim, Norway.
+- Accepted to NIPS 2016.
 - [paper](https://arxiv.org/pdf/1609.01596.pdf)
 
 Instead of using a random matrix to multiply with the back-propagated gradient,
@@ -626,7 +738,13 @@ Take home messages:
 
 ### Direct Feedback Alignment Scales to Modern Deep Learning Tasks and Architectures (Jun 2020)
 
+- Julien Launay, Iacopo Poli, François Boniface, Florent Krzakala.  
+  LightOn.  
+  LPENS, École Normale Supérieure.  
+  IdePhics, EPFL.
+- Accepted to NeurIPS 2020.
 - [paper](https://arxiv.org/pdf/2006.12878.pdf)
+- [code](https://github.com/lightonai/dfa-scales-to-modern-deep-learning)
 
 Showed empirically that direct feedback alignment works on a variety of different and difficult tasks,
 such as neural view synthesis (e.g. NeRF), click-through rate prediction with recommender systems,
