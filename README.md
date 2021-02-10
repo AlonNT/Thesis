@@ -27,6 +27,7 @@
     - [Parallel Training of Deep Networks with Local Updates (Dec 2020)](#parallel-training-of-deep-networks-with-local-updates-dec-2020)
     - [Training Neural Networks with Local Error Signals (Jan 2019)](#training-neural-networks-with-local-error-signals-jan-2019)
     - [Revisiting Locally Supervised Learning: an Alternative to End-to-end Training (Sep 2020)](#revisiting-locally-supervised-learning-an-alternative-to-end-to-end-training-sep-2020)
+    - [Local Critic Training for Model-Parallel Learning of Deep Neural Networks (Feb 2021)](#local-critic-training-for-model-parallel-learning-of-deep-neural-networks-feb-2021)
   - [Target Propagation](#target-propagation)
     - [Difference Target Propagation (Dec 2014)](#difference-target-propagation-dec-2014)
   - [Miscellaneous](#miscellaneous)
@@ -582,8 +583,52 @@ Upper for the intractable InfoPro loss is:
 <p align="center">
 <img src="images/info_pro_surrogate_loss.png" alt="InfoPro Surrogate Loss" width="50%"/>
 </p>
-estimating I(h,x) by training a decoder to obtain the minimal reconstruction loss, and estimating I(h,y) by a regular classification fashion (with the cross-entropy loss) or by using contrastive representation loss (making representations of same-class similar and different-class different)..
+estimating I(h,x) by training a decoder to obtain the minimal reconstruction loss, and estimating I(h,y) by a regular classification fashion (with the cross-entropy loss) or by using contrastive representation loss (making representations of same-class similar and different-class different).
 
+### Local Critic Training for Model-Parallel Learning of Deep Neural Networks (Feb 2021)
+
+- Hojung Lee, Cho-Jui Hsieh, Jong-Seok Lee.  
+  Yonsei University, Incheon, Korea.  
+  University of California at Los Angeles (UCLA), CA, USA.
+- [paper](https://arxiv.org/pdf/2102.01963.pdf)
+- [code](https://github.com/hjdw2/Local-critic-training)
+
+Very similar concept to DGL, except that the auxiliary networks are trained by minimizing the differences of adjacent losses (instead of the gradients of the losses temselves). 
+
+The main network is divided into several modules f_i by the local critic networks c_i and each local critic network delivers an estimated error gradient to the module. 
+<p align="center">
+<img src="images/local_critic_cnn.png" alt="Local Critic Method" width="50%"/>
+</p>
+The error gradient for training f_i is obtained by differentiating L_i = l(Z_i,y) with respect to h_i, obtaining 
+<p align="center">
+<img src="images/local_critic_formula_1.png" alt="Local Critic formula 2" width="10%"/>
+</p>
+and now performing gradient-descent step
+<p align="center">
+<img src="images/local_critic_formula_2.png" alt="Local Critic formula 3" width="40%"/>
+</p>
+L_i has to approximate the final output of the main network L_N = l(h_N,y) so that 
+<p align="center">
+<img src="images/local_critic_formula_3.png" alt="Local Critic formula 4" width="11%"/>
+</p>
+The objective can be to train c_i as l(L_i,L_N) which enforces L_i \approx L_N. However, this prevents c_i from being updated until L_N is obtained, so a cascaded training approach is taken by setting the loss for c_i as 
+<p align="center">
+<img src="images/local_critic_formula_4.png" alt="Local Critic formula 4" width="20%"/>
+</p>
+Thus, each local critic network can be also updated to optimize the loss function once the approximated loss by the subsequent layer, L_{i+1}, is available.
+
+- Perform experiments to both CNNs and RNNs, reaching slightly worse performance than back-prop but way better than synthetic gradients. 
+- Perform theoretical analysis very similar to DGL (convergences to a critical points, under the same assumptions as in DGL). 
+- Show that the method naturally perorms structural optimization - can form multiple networks having different levels of complexity, among which one can choose a compact one showing good performance.
+  <p align="center">
+  <img src="images/local_critic_cnn_structured_optimization.png" alt="Local Critic Structured Optimization" width="80%"/>
+  </p>
+
+Takehome messages:
+
+- Seems like the authors were not familiar with other works (mentioned here). 
+- It's an interesting idea to enforce similarity between the auxiliary losses (also enables forward-unlocking).
+- The concept of structued optimization is interesting, might worth investigating.
 
 ## Target Propagation
 
