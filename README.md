@@ -5,6 +5,7 @@
 - [Experiments](#experiments)
   - [1st iteration](#1st-iteration)
   - [2nd iteration](#2nd-iteration)
+  - [3rd iteration](#3rd-iteration)
 - [Related Work](#related-work)
   - [Representation Learning](#representation-learning)
     - [SimCLR - A Simple Framework for Contrastive Learning of Visual Representations (Feb 2020)](#simclr---a-simple-framework-for-contrastive-learning-of-visual-representations-feb-2020)
@@ -29,12 +30,16 @@
     - [Revisiting Locally Supervised Learning: an Alternative to End-to-end Training (Sep 2020)](#revisiting-locally-supervised-learning-an-alternative-to-end-to-end-training-sep-2020)
   - [Target Propagation](#target-propagation)
     - [Difference Target Propagation (Dec 2014)](#difference-target-propagation-dec-2014)
-  - [Miscellaneous](#miscellaneous)
-    - [Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey (Jan 2021)](#training-deep-architectures-without-end-to-end-backpropagation-a-brief-survey-jan-2021)
   - [Feedback Alignment](#feedback-alignment)
     - [Random feedback weights support learning in deep neural networks (Nov 2014)](#random-feedback-weights-support-learning-in-deep-neural-networks-nov-2014)
     - [Direct Feedback Alignment Provides Learning in Deep Neural Networks (Sep 2016)](#direct-feedback-alignment-provides-learning-in-deep-neural-networks-sep-2016)
     - [Direct Feedback Alignment Scales to Modern Deep Learning Tasks and Architectures (Jun 2020)](#direct-feedback-alignment-scales-to-modern-deep-learning-tasks-and-architectures-jun-2020)
+  - [Miscellaneous](#miscellaneous)
+    - [Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey (Jan 2021)](#training-deep-architectures-without-end-to-end-backpropagation-a-brief-survey-jan-2021)
+    - [A guide to convolution arithmetic for deep learning (Mar 2016)](#a-guide-to-convolution-arithmetic-for-deep-learning-mar-2016)
+    - [A guide to receptive field arithmetic for Convolutional Neural Networks (Apr 2017)](#a-guide-to-receptive-field-arithmetic-for-convolutional-neural-networks-apr-2017)
+    - [Computing Receptive Fields of Convolutional Neural Networks (Nov 2019)](#computing-receptive-fields-of-convolutional-neural-networks-nov-2019)
+    - [Receptive Field Calculator (May 2019)](#receptive-field-calculator-may-2019)
   - [Books](#books)
 
 # Introduction
@@ -163,6 +168,101 @@ Conclusions:
   -  It is possible that further hyper-parameters search might bridge the gap, as during my (informal) hyper-parameters search I noticed the increasing the learning-rate helped regular back-prop and harmed DGL training.
   - It is possible that different auxiliary networks will increase DGL performance. \
     Currently the auxiliary network used for DGL is one hidden layer MLP with 512 channels. 
+
+## 3rd iteration
+
+After our meeting in 14.01.2021 we thought about new directions for experiments. Basically, play with the local objectives in the training process, trying to bridge the gap between DGL and BP.  
+The intuitive idea was to incorporate self-supervised tasks in the layers' objectives, in an ascending complexity. The concrete idea was to try and predict the shifted image, meaning performing pixel-labeling where each pixel is trying to guess what the value of a pixel nearby, slightly exceeding its receptive field.  
+
+About a week later, inspiration was taken from [Nøkland & Eidnes, 2019](#training-neural-networks-with-local-error-signals-jan-2019), where each layer's objective is mixed between predictive loss (same as DGL) and supervised-contrastive-loss. So we thought to mix the precition loss with some other form of loss, in a similar fashion.
+
+As a "gentle start", I started with predicting the original input images (without any shift). Basically it's like each layer's output is the representation of an auto-encoder. The predictions are successful - in the following figure the prediction (bottom row) are shown in additions to the labels (top row) of first/middle/last layer. The differences between the predictions and the labels are almost not visible, they become a bit blurry with increasing depth (take a look at the cat's fact in the last layer).
+
+<p align="center">
+<img src="images/auto_encoder_predictions_1st_layer.png" alt="auto_encoder_predictions_1st_layer" width="33%"/>
+<img src="images/auto_encoder_predictions_2nd_layer.png" alt="auto_encoder_predictions_2nd_layer" width="33%"/>
+<img src="images/auto_encoder_predictions_3rd_layer.png" alt="auto_encoder_predictions_3rd_layer" width="33%"/>
+</p>
+
+Then, I tried to use a shifted image as a target in an "ascending complexity" so each layer's target image is more shifted. Practically, I used linear ascending shifts from 5 to 16 (half of the total image size). Note that I used circular padding here (instead of zero-padding), it seemed more reasonable. The predictions here are "less successful" but its quite different across layers:
+
+<p align="center">
+<img src="images/shifted_encoder_predictions_1st_layer.png" alt="shifted_encoder_predictions_1st_layer" width="33%"/>
+<img src="images/shifted_encoder_predictions_2nd_layer.png" alt="shifted_encoder_predictions_2nd_layer" width="33%"/>
+<img src="images/shifted_encoder_predictions_3rd_layer.png" alt="shifted_encoder_predictions_3rd_layer" width="33%"/>
+</p>
+
+Technical experimental details:
+
+- I used a basic sequential architecture and named it *VGG11c*.  
+  It contains the same layers as the original VGG11 which was built for ImageNet,
+  but I reduced the number of pooling layers from 5 to 3 
+  (to get 4x4 instead of 1x1 in the last conv output).  
+  [Here](https://wandb.ai/alonnt/thesis/runs/qcsmy2w3) you can find graphs, model's textual description and hyper-parameters. 
+  The original (back-prop) version reached **93.89%** test accuracy.
+- I experimented with several aspects:
+  - Different architectures (shallow v.s. deep, wide v.s. narrow).
+  - Weights of the DGL v.s. SSL losses.
+  - Hyper-parameters (learning-rate, batch-size, weight-decay, dropout, etc).
+  
+  However, the conclusions I put here were seen all over the place.
+- For the SSL-aux-net predictions, their labels were first down-sampled 
+  (to the same spatial size of the block's output tensor). However, soon it looks pretty bad (4x4 or 8x8 images from 32x32) so and up-sampling layers were added in the form of transposed convolutions.   
+  It would be interesting to try and use simple bilinear interpolation as up-sampling, instead of learned one.
+- For predicting the shifted image, at first I tried to calculate the receptive field of each layer, 
+  in order to ask each pixel to predict the pixel just after its receptive field.  
+  - I followed this [guide](#a-guide-to-convolution-arithmetic-for-deep-learning-mar-2016) and this [guide](#computing-receptive-fields-of-convolutional-neural-networks-nov-2019) as well, both are pretty good (but a bit overwhelming and too heavy for a simple feed-forward network).  
+    Evetually found [receptive field calculator](#receptive-field-calculator-may-2019) which enable calculating on a simple feed-forward networks.
+  - After calculating the receptive field, since CIFAR-10 images are quite small (32x32) 
+    it quickly grows to be the whole image.  
+    Anyway, I thought that calculating the exact receptive field is not important as pixels next to each other are similar, and the general idea was to make auxiliary tasks ascend in their complexity, which happens anyway.  
+    This led to using linear ascending shifts from 5 to 16 (half of the total image size).
+- At first, the pred-aux-net and ssl-aux-net both got the block's output tensor which 
+  was possibly after pooling operation. After further thought, it seems more reasonable for pred-aux-net to get the tensor after pool (to decrease dimensionality and therefore parameters count), and ssl-aux-net before pool (to perform less up-sampling to the 32x32).
+
+Experiment results:
+
+- Here are the graphs of the regular model v.s. DGL 
+  v.s. DGL+SSL (original/shifted) each weighted 0.5.
+  <p align="center">
+  <img src="images/bp_dgl_ssl_test_acc.svg" alt="bp_dgl_ssl_test_acc" width="45%"/>
+  <img src="images/bp_dgl_ssl_test_loss.svg" alt="bp_dgl_ssl_test_loss" width="45%"/>
+  </p>
+  It seems that predicting original images (solid red) did not change much DGL (green),
+  whereas predicting the shifted image (brown) causes a degradation.
+
+In order to check if the SSL loss is worthless I performed the following experiment:
+
+1. I disabled the DGL loss so every layer in the network does not get a signal
+   from the supervised loss - only from the SSL loss.
+2. For references - as an "upper bound" I used the regular back-prop training and the DGL one,
+   and as a "lower bound" I trained a model with fixed random layers except from the last block
+   and its auxiliary network.
+3. Here are the results:
+   <p align="center">
+   <img src="images/bp_dgl_ssl-only_last-block_test_acc.svg" alt="bp_dgl_ssl-only_last-block_test_acc" width="45%"/>
+   <img src="images/bp_dgl_ssl-only_last-block_test_loss.svg" alt="bp_dgl_ssl-only_last-block_test_loss" width="45%"/>
+   </p>
+   It seems that treating each layer as an auto-encoder indeed learns meaningful features for upstream layers.
+   Learning the shifted images also beats random initialization, but performs slightly worse than the former.
+4. Note that in this setting a larger learning-rate was useful (0.015 v.s. 0.003), 
+   even though all other hyper-parameters were the same as BP.
+
+Conclusions and future work:
+
+- Predicting the original input images certainly extracted better-than-random features.  
+  However, as pointed out by [Wang et al.](#revisiting-locally-supervised-learning-an-alternative-to-end-to-end-training-sep-2020), intuitively neural-networks should preserve information regarding the input, but **discard task irrelevant information**.  
+  Using reconstruction loss alone only preserves information regarding the input, it does not relate to the task in hand.
+  - Can we incorporate some sort of task-irrelevant information disposal?  
+    Does it have to take the labels into account?
+  - Other self-supervised methods (e.g. SimCLR) also does not involve the task in their features extraction, how does it match the observations in [Wang et al.](#revisiting-locally-supervised-learning-an-alternative-to-end-to-end-training-sep-2020)?
+
+- Further techinal work on the models might give different insights.  
+  For example:
+  - Currently the pred-aux-net is 1 hidden layer MLP.  
+    As shown in several previous works it's better to use an auxiliary network containing a conv layer as well.
+  - Use a simple upsampling function instead of a learned one (with transposed convolutions).  
+    Maybe it'll help with the poor results for shifted image predictions.
 
 # Related Work
 
@@ -650,41 +750,6 @@ Take home messages:
 - Unfortunately, seems to work worse than the alternatives (proxy objectives and synthetic gradients). \
   Furthermore, experiments were done using only fully-connected networks (MNIST and CIFAR-10).
 
-## Miscellaneous
-
-### Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey (Jan 2021)
-
-- Shiyu Duan, Jose C. Prıncipe.  
-  University of Florida.
-- [paper](https://arxiv.org/pdf/2101.03419.pdf)
-
-A nice survey of alternatives to back-propagation. It covers three main topics:
-- Proxy Objectives - Use some local objective for each layer. \
-  Covers:
-  - Two papers of the survey authors - encourage representations of same-class samples to be closer and different-class samples to be distinct.
-  - Belilovsky et al. (2019;2020).
-  - Nøkland et al. (2019) - basically a combination of Belilovsky et al. and the survey authors' papers.
-  - Two papers which resemble DGL but differ in their auxiliary networks - one uses a fixed random weighted fully-connected layer, and the other uses trainable two layered fully-connected network.
-- Target Propagation - Use specific target tensor for each layer. \
-  Covers:
-  - "Difference target propagation" and "How auto-encoders could provide credit assignment in deep networks via target propagation".
-  - "A theoretical framework for target propagation".
-- Synthetic Gradients \
-  Covers the original paper and the following paper giving some theoretical insights.
-
-<p align="center">
-<img src="images/beyond_back_prop_survey.png" alt="Beyond Back-Propagation Survey" width="90%"/>
-</p>
-
-Take home messages:
-- Trying to make the representations of same-class samples to be close and different-class samples to be far 
-  seems like an interesting and somewhat "popular" idea. 
-  Both the authors and Nøkland et al. (2019) found it works, but there are no good explanations. \
-  It requires "less labels" - only same/not-same class, and not the actual class.
-- The authors papers seem to have interesting theoretical claims - worth a read.
-- Target propagation seems interesting and worth a read. However it seems to work worse than proxy objectives. \
-  The new paper from 2020 shows "Direct TP" which is similar in spirit to "Direct FA".
-
 ## Feedback Alignment
 
 ### Random feedback weights support learning in deep neural networks (Nov 2014)
@@ -756,6 +821,66 @@ geometric learning with graph-convolutional networks and NLP with transformers.
 
 Take home messages:
 - Seems to work okay but not as good as back-prop.
+
+
+## Miscellaneous
+
+### Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey (Jan 2021)
+
+- Shiyu Duan, Jose C. Prıncipe.  
+  University of Florida.
+- [paper](https://arxiv.org/pdf/2101.03419.pdf)
+
+A nice survey of alternatives to back-propagation. It covers three main topics:
+- Proxy Objectives - Use some local objective for each layer. \
+  Covers:
+  - Two papers of the survey authors - encourage representations of same-class samples to be closer and different-class samples to be distinct.
+  - Belilovsky et al. (2019;2020).
+  - Nøkland et al. (2019) - basically a combination of Belilovsky et al. and the survey authors' papers.
+  - Two papers which resemble DGL but differ in their auxiliary networks - one uses a fixed random weighted fully-connected layer, and the other uses trainable two layered fully-connected network.
+- Target Propagation - Use specific target tensor for each layer. \
+  Covers:
+  - "Difference target propagation" and "How auto-encoders could provide credit assignment in deep networks via target propagation".
+  - "A theoretical framework for target propagation".
+- Synthetic Gradients \
+  Covers the original paper and the following paper giving some theoretical insights.
+
+<p align="center">
+<img src="images/beyond_back_prop_survey.png" alt="Beyond Back-Propagation Survey" width="90%"/>
+</p>
+
+Take home messages:
+- Trying to make the representations of same-class samples to be close and different-class samples to be far 
+  seems like an interesting and somewhat "popular" idea. 
+  Both the authors and Nøkland et al. (2019) found it works, but there are no good explanations. \
+  It requires "less labels" - only same/not-same class, and not the actual class.
+- The authors papers seem to have interesting theoretical claims - worth a read.
+- Target propagation seems interesting and worth a read. However it seems to work worse than proxy objectives. \
+  The new paper from 2020 shows "Direct TP" which is similar in spirit to "Direct FA".
+
+### A guide to convolution arithmetic for deep learning (Mar 2016)
+
+- Vincent Dumoulin, Francesco Visin.  
+  FMILA, Université de Montréal;  
+  AIRLab, Politecnico di Milano
+- [paper](https://arxiv.org/pdf/1603.07285.pdf)
+- [code](https://github.com/vdumoulin/conv_arithmetic) (with informative GIFs)
+
+### A guide to receptive field arithmetic for Convolutional Neural Networks (Apr 2017)
+
+- Dang Ha The Hien. 
+- [Medium post](https://medium.com/mlreview/a-guide-to-receptive-field-arithmetic-for-convolutional-neural-networks-e0f514068807)
+
+### Computing Receptive Fields of Convolutional Neural Networks (Nov 2019)
+
+- André Araujo, Wade Norris, Jack Sim.  
+  Google Research; Perception Labs.
+- [Distill post](https://distill.pub/2019/computing-receptive-fields/)
+
+### Receptive Field Calculator (May 2019)
+
+- Fomoro AI.
+- [Link](https://fomoro.com/research/article/receptive-field-calculator)
 
 ## Books
 
