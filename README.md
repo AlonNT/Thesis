@@ -249,14 +249,19 @@ In order to check if the SSL loss is worthless I performed the following experim
 4. Note that in this setting a larger learning-rate was useful (0.015 v.s. 0.003), 
    even though all other hyper-parameters were the same as BP.
 
-Conclusions and future work:
+Food for thoughts:
 
 - Predicting the original input images certainly extracted better-than-random features.  
-  However, as pointed out by [Wang et al.](#revisiting-locally-supervised-learning-an-alternative-to-end-to-end-training-sep-2020), intuitively neural-networks should preserve information regarding the input, but **discard task irrelevant information**.  
-  Using reconstruction loss alone only preserves information regarding the input, it does not relate to the task in hand.
+  However, as pointed out by [Wang et al.], intuitively neural-networks should preserve
+  information regarding the input, but **discard task irrelevant information**.  
+  Using reconstruction loss alone only preserves information regarding the input,
+  it does not relate to the task in hand.
   - Can we incorporate some sort of task-irrelevant information disposal?  
     Does it have to take the labels into account?
-  - Other self-supervised methods (e.g. SimCLR) also does not involve the task in their features extraction, how does it match the observations in [Wang et al.](#revisiting-locally-supervised-learning-an-alternative-to-end-to-end-training-sep-2020)?
+  - Other self-supervised methods (e.g. SimCLR) also does not involve the task in their features extraction, 
+    how does it match the observations in [Wang et al.]?  
+    Possible answer - self-supervised tasks indeed relate to the final task in hand, even though they are not the same task. 
+    Task relevant information for them is also relevant for the final task, etc.
 
 - Further techinal work on the models might give different insights.  
   For example:
@@ -264,6 +269,29 @@ Conclusions and future work:
     As shown in several previous works it's better to use an auxiliary network containing a conv layer as well.
   - Use a simple upsampling function instead of a learned one (with transposed convolutions).  
     Maybe it'll help with the poor results for shifted image predictions.
+
+Meeting Conclusions (11/02/2021):
+
+- As another "lower-bound" reference for SSL-alone we can use a model which consists only the last block
+  (without random scrambling the image with several randomly initialized layers).
+- Reaching good performance only with SSL is cool. We're not there yet but maybe we can improve it.
+- Find other tasks - similar to SimCLR or other tasks. Maybe use rotations somehow?
+- In earlier layers make easier tasks. For example, separate between only 2 classes instead of 10.
+- Techinal improvements:
+  - Maybe the data augmentation that is currently being used (4x4 zero-padding followed by randon 32x32 crop) 
+    is not suitable for predicting the nearby pixel, because how could we know if it's black or not.
+    Try to use random crop followed by scaling back to 32x32, to avoid these black regions.
+  - Split to blocks and not make the training process totally local (same as [Wang et al.]).
+- All of the above is local, meaning that earilier layers do not "prepare" their output to suit the next layers.  
+  How to incorporate the final network's prediction to the learning process?  
+  For example, direct feedback alignment does it.  
+  We want the layer's objective to not be totally-greedy, but also improve the performance of the whole network.
+  Maybe combine it with.
+- How can we use "Gradient descent without a dradient".  
+  Note that high dimensionality is a problem here. 
+  We are in a highly high dimensional space and we choose some direction in random. 
+  The chances that this direction will worth something is negligble. 
+  Maybe we can somehow sample a better in this huge space. Suppose that the input is in some linear sub-space. 
 
 # Related Work
 
@@ -931,3 +959,5 @@ Take home messages:
 
 - [Convex Optimization](https://web.stanford.edu/~boyd/cvxbook/bv_cvxbook.pdf)
 - [Online Learning and Online Convex Optimization](https://www.cs.huji.ac.il/~shais/papers/OLsurvey.pdf)
+
+[Wang et al.]: #revisiting-locally-supervised-learning-an-alternative-to-end-to-end-training-sep-2020
