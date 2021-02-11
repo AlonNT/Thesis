@@ -109,7 +109,7 @@ def parse_args():
     default_epochs = 1500
     default_optimizer = 'SGD'
     default_batch_size = 64
-    default_learning_rate = 0.003
+    default_learning_rate = 0.005
     default_weight_decay = 0.00001
     default_momentum = 0.9
     default_dropout_prob = 0

@@ -196,13 +196,13 @@ def evaluate_model(model, criterion, dataloader, device):
     return loss, accuracy
 
 
-def perform_train_step_dgl(model, inputs, labels, criterion, optim,
-                           training_step,
-                           ssl: bool = False, ssl_criterion=None,
-                           pred_loss_weight: float = 1, ssl_loss_weight: float = 0.1,
-                           first_trainable_block: int = 0,
-                           shift_ssl_labels: bool = False,
-                           images_log_interval: int = 1000):
+def perform_train_step_local(model, inputs, labels, criterion, optim,
+                             training_step,
+                             ssl: bool = False, ssl_criterion=None,
+                             pred_loss_weight: float = 1, ssl_loss_weight: float = 0.1,
+                             first_trainable_block: int = 0,
+                             shift_ssl_labels: bool = False,
+                             images_log_interval: int = 1000):
     """
     Perform a train-step for a model trained with DGL.
     The difference between the regular train-step and this one is that the model forward pass
@@ -227,7 +227,7 @@ def perform_train_step_dgl(model, inputs, labels, criterion, optim,
     n_plot_images = 4
     inputs_size = inputs.size(-1)
     inputs_representation = torch.clone(inputs)
-    loss, predictions, predictions_loss, ssl_loss = None, None, None, None
+    loss, scores, predictions_loss, ssl_loss = None, None, None, None
     indices_to_plot = np.random.choice(inputs.size(0), size=n_plot_images, replace=False)
 
     if first_trainable_block < 0:
@@ -237,44 +237,48 @@ def perform_train_step_dgl(model, inputs, labels, criterion, optim,
     shifts = tuple(np.linspace(start=5, stop=16, num=len(model.blocks), dtype=int))
 
     for i in range(len(model.blocks)):
-        optim[i].zero_grad()
-
         inputs_representation, outputs, ssl_outputs = model(inputs_representation,
                                                             first_block_index=i, last_block_index=i)
+        if outputs is not None:
+            scores = outputs
 
         if i < first_trainable_block:
             continue
 
-        _, predictions = torch.max(outputs, dim=1)
+        if optim[i] is not None:  # This means the current block has trainable parameters to optimize.
+            optim[i].zero_grad()
 
-        # If not training with SSL, predict the final classes' scores.
-        # Note that in the last block we always want to predict the classes' scores and ignore SSL.
-        if (not ssl) or (i == len(model.blocks) - 1):
-            loss = criterion(outputs, labels)
-        else:  # Training with SSL and it's not the last block.
-            ssl_outputs_size = ssl_outputs.size(-1)
-            ssl_labels = inputs if ssl_outputs_size == inputs_size else resize(inputs, size=[ssl_outputs_size] * 2)
-            if shift_ssl_labels:
-                ssl_labels = torch.roll(ssl_labels, shifts=(shifts[i], shifts[i]), dims=(2, 3))
-            ssl_loss = ssl_criterion(ssl_outputs, ssl_labels)
+            # If not training with SSL, punish according to the predicted classes' scores.
+            # Note that in the last block we always want to do that, and ignore SSL.
+            # Since the block in all of the models is simply MaxPool layer,
+            # by 'last block' we mean one before the last.
+            if (not ssl) or (i+2 == len(model.blocks)):
+                loss = criterion(scores, labels)
+            else:  # Training with SSL and it's not the last block.
+                ssl_outputs_size = ssl_outputs.size(-1)
+                ssl_labels = inputs if ssl_outputs_size == inputs_size else resize(inputs, size=[ssl_outputs_size] * 2)
+                if shift_ssl_labels:
+                    ssl_labels = torch.roll(ssl_labels, shifts=(shifts[i], shifts[i]), dims=(2, 3))
+                ssl_loss = ssl_criterion(ssl_outputs, ssl_labels)
 
-            if pred_loss_weight > 0:
-                predictions_loss = criterion(outputs, labels)
-                loss = pred_loss_weight * predictions_loss + ssl_loss_weight * ssl_loss
-            else:
-                loss = ssl_loss
+                if pred_loss_weight > 0:
+                    predictions_loss = criterion(scores, labels)
+                    loss = pred_loss_weight * predictions_loss + ssl_loss_weight * ssl_loss
+                else:
+                    loss = ssl_loss
 
-            if training_step % images_log_interval == 0:
-                images = torch.cat([ssl_labels[indices_to_plot], ssl_outputs[indices_to_plot].detach()])
-                grid = torchvision.utils.make_grid(images, nrow=n_plot_images)
-                wandb_image = wandb.Image(grid.cpu().numpy().transpose((1, 2, 0)))
-                wandb.log({f'SSL-layer#{i}': [wandb_image]}, step=training_step)
+                if training_step % images_log_interval == 0:
+                    images = torch.cat([ssl_labels[indices_to_plot], ssl_outputs[indices_to_plot].detach()])
+                    grid = torchvision.utils.make_grid(images, nrow=n_plot_images)
+                    wandb_image = wandb.Image(grid.cpu().numpy().transpose((1, 2, 0)))
+                    wandb.log({f'SSL-layer#{i}': [wandb_image]}, step=training_step)
 
-        loss.backward()
-        optim[i].step()
+            loss.backward()
+            optim[i].step()
 
         inputs_representation = inputs_representation.detach()  # Prepare the input tensor for the next block.
 
+    _, predictions = torch.max(scores, dim=1)
     return loss, predictions, predictions_loss, ssl_loss
 
 
@@ -356,8 +360,8 @@ def perform_train_step(model, inputs, labels, criterion, optim,
     mutual_args = (model, inputs, labels, criterion, optim)
 
     if is_dgl:
-        return perform_train_step_dgl(*mutual_args, train_step, ssl, ssl_criterion, pred_loss_weight, ssl_loss_weight,
-                                      first_trainable_block, shift_ssl_labels)
+        return perform_train_step_local(*mutual_args, train_step, ssl, ssl_criterion, pred_loss_weight, ssl_loss_weight,
+                                        first_trainable_block, shift_ssl_labels)
     elif is_cdni:
         return perform_train_step_cdni(*mutual_args)
     else:
@@ -389,14 +393,17 @@ def get_optim(model, optimizer_params, is_dgl):
         optimizers = list()
 
         for i in range(len(model.blocks)):
-            parameters_to_train = itertools.chain(model.blocks[i].parameters(),
-                                                  model.auxiliary_nets[i].parameters())
-            if model.ssl_auxiliary_nets is not None:
-                parameters_to_train = itertools.chain(parameters_to_train,
-                                                      model.ssl_auxiliary_nets[i].parameters())
+            if len(list(model.blocks[i].parameters())) == 0:
+                optimizers.append(None)
+            else:
+                parameters_to_train = itertools.chain(
+                    model.blocks[i].parameters(),
+                    model.auxiliary_nets[i].parameters(),
+                    model.ssl_auxiliary_nets[i].parameters() if model.ssl_auxiliary_nets is not None else list()
+                )
 
-            optimizer = optimizer_constuctor(parameters_to_train, **optimizer_params)
-            optimizers.append(optimizer)
+                optimizer = optimizer_constuctor(parameters_to_train, **optimizer_params)
+                optimizers.append(optimizer)
 
         return optimizers
     else:
