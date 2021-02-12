@@ -107,7 +107,9 @@ def get_blocks(config: List[Union[int, str]],
             ssl_auxiliary_nets.append(None)
         else:
             out_channels = config[i]
-            block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode=padding_mode),
+
+            # TODO There is a bug in circular padding on PyTorch 1.1.0. Using zero-padding for now.
+            block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode='zeros'),
                             nn.BatchNorm2d(out_channels),
                             nn.ReLU()]
             in_channels = out_channels  # The input channels of the next convolution layer.
@@ -161,6 +163,9 @@ class VGG(nn.Module):
 
     def forward(self, x: torch.Tensor):
         features = self.features(x)
+        if len(features.size()) > 2:
+            # PyTorch version 1.1.0 (compatible with CUDA 9.0) does not have torch.nn.Flatten layer.
+            features = torch.flatten(input=features, start_dim=1, end_dim=-1)
         outputs = self.classifier(features)
         return outputs
 
@@ -225,10 +230,14 @@ class VGGwDGL(nn.Module):
                         isinstance(self.blocks[last_block_index+1], nn.MaxPool2d))
         scores_aux_net_input = self.blocks[last_block_index+1](representation) if next_is_pool else representation
 
+        if len(scores_aux_net_input.size()) > 2:
+            # PyTorch version 1.1.0 (compatible with CUDA 9.0) does not have torch.nn.Flatten layer.
+            scores_aux_net_input = torch.flatten(input=scores_aux_net_input, start_dim=1, end_dim=-1)
+
         scores_aux_net = self.auxiliary_nets[last_block_index]
         ssl_aux_net = self.ssl_auxiliary_nets[last_block_index] if (self.ssl_auxiliary_nets is not None) else None
 
         scores_outputs = scores_aux_net(scores_aux_net_input) if scores_aux_net is not None else None
-        ssl_outputs = ssl_aux_net(representation) if scores_aux_net is not None else None
+        ssl_outputs = ssl_aux_net(representation) if ssl_aux_net is not None else None
 
         return representation, scores_outputs, ssl_outputs

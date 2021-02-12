@@ -84,7 +84,8 @@ def main():
                                   normalize_to_plus_minus_one=not args.disable_normalization_to_plus_minus_one,
                                   random_crop=not args.disable_random_crop,
                                   random_horizontal_flip=not args.disable_random_horizontal_flip,
-                                  random_erasing=args.enable_random_erasing)
+                                  random_erasing=args.enable_random_erasing,
+                                  random_resized_crop=args.enable_random_resized_crop)
 
     wandb.init(project='thesis', config=args)
     wandb.watch(model)
@@ -186,6 +187,8 @@ def parse_args():
                         help='If true, disable normalization of the values to the range [-1,1] (instead of [0,1]).')
     parser.add_argument('--disable_random_crop', action='store_true',
                         help='If true, disable random cropping which is padding of 4 followed by random crop.')
+    parser.add_argument('--enable_random_resized_crop', action='store_true',
+                        help='If true, enable random resized cropping.')
     parser.add_argument('--disable_random_horizontal_flip', action='store_true',
                         help='If true, disable random horizontal flip.')
     parser.add_argument('--enable_normalization_to_unit_gaussian', action='store_true',

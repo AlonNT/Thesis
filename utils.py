@@ -26,7 +26,10 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_di
     :return: A sequential model which is the constructed MLP.
     """
     # Begins with a flatten layer. It's useful when the input is 4D from a conv layer, and harmless otherwise..
-    layers: List[torch.nn.Module] = [torch.nn.Flatten()]
+    # layers: List[torch.nn.Module] = [torch.nn.Flatten()]
+    
+    # PyTorch version 1.1.0 (compatible with CUDA 9.0) does not have torch.nn.Flatten layer.
+    layers: List[torch.nn.Module] = []
 
     for i in range(n_hidden_layers):
         layers.append(torch.nn.Linear(in_features=input_dim if i == 0 else hidden_dim,
@@ -107,12 +110,13 @@ def one_hot(indices: torch.Tensor, device: torch.device):
     return torch.autograd.Variable(result)
 
 
-def get_dataloaders(batch_size: int = 32,
+def get_dataloaders(batch_size: int = 64,
                     normalize_to_unit_gaussian: bool = False,
                     normalize_to_plus_minus_one: bool = False,
                     random_crop: bool = False,
                     random_horizontal_flip: bool = False,
-                    random_erasing: bool = False):
+                    random_erasing: bool = False,
+                    random_resized_crop: bool = False):
     """
     Get dataloaders for the CIFAR10 dataset.
     :param batch_size: The size of the mini-batches to initialize the dataloaders.
@@ -122,13 +126,19 @@ def get_dataloaders(batch_size: int = 32,
     :param random_horizontal_flip: If true, performs random horizontal flip.
     :param random_erasing: If true, performs erase a random rectangle in the image.
                            See https://arxiv.org/pdf/1708.04896.pdf.
+    :param random_resized_crop: If true, performs random resized crop.
     :return: A dictionary mapping "train"/"test" to its dataloader.
     """
+    if random_crop and random_resized_crop:
+        raise ValueError('Illegal arguments - can not have both \'random_crop\' and \'random_resized_crop\'.')
+
     transforms = {'train': list(), 'test': list()}
     if random_horizontal_flip:
         transforms['train'].append(torchvision.transforms.RandomHorizontalFlip())
     if random_crop:
         transforms['train'].append(torchvision.transforms.RandomCrop(size=32, padding=4))
+    if random_resized_crop:
+        transforms['train'].append(torchvision.transforms.RandomResizedCrop(size=32, scale=(0.75, 1), ratio=(1, 1)))
     for t in ['train', 'test']:
         transforms[t].append(torchvision.transforms.ToTensor())
     if normalize_to_plus_minus_one or normalize_to_unit_gaussian:
