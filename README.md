@@ -37,6 +37,7 @@
     - [Direct Feedback Alignment Scales to Modern Deep Learning Tasks and Architectures (Jun 2020)](#direct-feedback-alignment-scales-to-modern-deep-learning-tasks-and-architectures-jun-2020)
   - [Miscellaneous](#miscellaneous)
     - [Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey (Jan 2021)](#training-deep-architectures-without-end-to-end-backpropagation-a-brief-survey-jan-2021)
+    - [The Right Tool for the Job: Matching Model and Instance Complexities (Apr 2020)](#the-right-tool-for-the-job-matching-model-and-instance-complexities-apr-2020)
     - [A guide to convolution arithmetic for deep learning (Mar 2016)](#a-guide-to-convolution-arithmetic-for-deep-learning-mar-2016)
     - [A guide to receptive field arithmetic for Convolutional Neural Networks (Apr 2017)](#a-guide-to-receptive-field-arithmetic-for-convolutional-neural-networks-apr-2017)
     - [Computing Receptive Fields of Convolutional Neural Networks (Nov 2019)](#computing-receptive-fields-of-convolutional-neural-networks-nov-2019)
@@ -931,6 +932,44 @@ Take home messages:
 - Target propagation seems interesting and worth a read. However it seems to work worse than proxy objectives. \
   The new paper from 2020 shows "Direct TP" which is similar in spirit to "Direct FA".
 
+### The Right Tool for the Job: Matching Model and Instance Complexities (Apr 2020)
+
+- Roy Schwartz, Gabriel Stanovsky, Swabha Swayamdipta, Jesse Dodge, Noah A. Smith.  
+  Allen Institute for Artificial Intelligence.  
+  University of Washington.  
+  Carnegie Mellon University.
+- Accepted to ACL 2020.
+- [paper](https://arxiv.org/pdf/2004.07453.pdf)
+- [code](https://github.com/allenai/sledgehammer)
+
+Add classifiers to different layers of BERT and use their calibrated confidence scores to make early exit decisions. This Allow early (and fast) “exit” from neural network calculations for simple instances, and late (and accurate) exit for hard instances. Allow users to control the inference speed/accuracy tradeoff using a single trained model, by setting a single variable at inference time.  
+This method presents a favorable speed/accuracy tradeoff in almost all cases, producing models which are up to five times faster than the state of the art, while preserving their accuracy.  
+
+<p align="center">
+<img src="images/right_tool_for_the_job_method.png" alt="right_tool_for_the_job_method" width="60%"/>
+</p>
+
+As for the confidence, since classifiers’ confidence scores are not always reliable, they use calibration techinque which was shown to work well, specifically for BERT.  
+This method learns a single parameter, denoted temperature or T, 
+and divides each of the logits {z_i} by T before applying the softmax function:
+<p align="center">
+<img src="images/right_tool_for_the_job_temperature_formula.png" alt="right_tool_for_the_job_temperature_formula" width="40%"/>
+</p>
+Then select T to maximize the log-likelihood of the validation dataset.
+
+Take home messages:
+
+- Local training can give this early-exit option free of charge.  
+  Need to incorporate some mechanism (e.g. confidence) to decide when to exit.
+- The calibrated confidence scores is an interesting idea (they didn't invent it).
+- They analyze specific training-samples - when they are difficult. 
+  It might be interesting to do something similar. 
+  For example, they use:
+  - Consistency - samples where once the model has predicted correctly, 
+    it never predicts incorrectly for the remainder of training iterations.  
+    We might use something similar in local learning - samples which all local
+    modults predict correctly / at least agree on the prediction (even if it's wrong).
+  
 ### A guide to convolution arithmetic for deep learning (Mar 2016)
 
 - Vincent Dumoulin, Francesco Visin.  
