@@ -38,6 +38,7 @@
   - [Miscellaneous](#miscellaneous)
     - [Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey (Jan 2021)](#training-deep-architectures-without-end-to-end-backpropagation-a-brief-survey-jan-2021)
     - [The Right Tool for the Job: Matching Model and Instance Complexities (Apr 2020)](#the-right-tool-for-the-job-matching-model-and-instance-complexities-apr-2020)
+    - [Supervised Contrastive Learning (Apr 2020)](#supervised-contrastive-learning-apr-2020)
     - [A guide to convolution arithmetic for deep learning (Mar 2016)](#a-guide-to-convolution-arithmetic-for-deep-learning-mar-2016)
     - [A guide to receptive field arithmetic for Convolutional Neural Networks (Apr 2017)](#a-guide-to-receptive-field-arithmetic-for-convolutional-neural-networks-apr-2017)
     - [Computing Receptive Fields of Convolutional Neural Networks (Nov 2019)](#computing-receptive-fields-of-convolutional-neural-networks-nov-2019)
@@ -969,7 +970,30 @@ Take home messages:
     it never predicts incorrectly for the remainder of training iterations.  
     We might use something similar in local learning - samples which all local
     modults predict correctly / at least agree on the prediction (even if it's wrong).
-  
+
+### Supervised Contrastive Learning (Apr 2020)
+
+- Prannay Khosla, Piotr Teterwak, Chen Wang, Aaron Sarna, Yonglong Tian, Phillip Isola, Aaron Maschinot, Ce Liu, Dilip Krishnan.  
+  Google Research.  
+  MIT.  
+  Boston University.
+- Accepted to NeurIPS 2020.
+- [paper](https://arxiv.org/pdf/2004.11362.pdf)
+- [PyTorch code](https://github.com/HobbitLong/SupContrast)
+- [TensorFlow code](https://github.com/google-research/google-research/tree/master/supcon)
+
+Extend the self-supervised batch contrastive approach to the fully-supervised setting. Clusters of points belonging to the same class are pulled together in embedding space, while simultaneously pushing apart clusters of samples from different classes.  
+Show consistent outperformance over cross-entropy on other datasets and two ResNet variants.
+
+<p align="center">
+<img src="images/supervised_contrastive_learning.png" alt="supervised_contrastive_learning" width="80%"/>
+</p>
+
+Take home messages:
+
+- Might be interesting to incorporate try this in local learning framework.  
+  Maybe enforce distance between embeddings of multiple layers outputs. 
+
 ### A guide to convolution arithmetic for deep learning (Mar 2016)
 
 - Vincent Dumoulin, Francesco Visin.  
