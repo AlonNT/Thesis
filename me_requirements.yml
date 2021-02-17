@@ -1,7 +1,0 @@
-dependencies:
-  - python=3.8
-  - pytorch
-  - cudatoolkit=10.0
-  - torchvision
-  - wandb
-  - loguru
