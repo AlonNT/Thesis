@@ -27,9 +27,10 @@ def get_model(args):
                       aux_mlp_n_hidden_layers=args.aux_mlp_n_hidden_layers,
                       aux_mlp_hidden_dim=args.aux_mlp_hidden_dim,
                       dropout_prob=args.dropout_prob,
-                      padding_mode='circular' if args.shift_ssl_labels else 'zeros')
+                      padding_mode=args.padding_mode)
         if args.dgl:
             model_name = f'{args.model} with DGL'
+            kwargs['pred_aux_type'] = args.pred_aux_type
             if args.ssl:
                 kwargs['use_ssl'] = True
                 model_name += ' & SSL'
@@ -44,11 +45,22 @@ def get_model(args):
         raise ValueError(f'Illegal \'model\': {args.model}.')
 
 
-def main():
-    args = parse_args()
+def validate_args(args):
+    if (int(torch.__version__.split('.')[1]) < 7) and (args.padding_mode == 'circular'):
+        raise ValueError("There is a bug in earlier versions of PyTorch in circular padding. "
+                         "Please use PyTorch version >= 1.7 or switch to padding_mode=\'zeros\'. ")
 
     if args.device.startswith('cuda:') and not torch.cuda.is_available():
         raise ValueError("CUDA is not available, yet \'device\' was given as \'cuda:i\'.")
+
+    if args.shift_ssl_labels and (args.padding_mode != 'circular'):
+        logger.warning("When using shifted images predictions, "
+                       "it's better to use circular-padding and not zero-padding. ")
+
+
+def main():
+    args = parse_args()
+    validate_args(args)
 
     logger_format = '<magenta>{time:YYYY-MM-DD HH:mm:ss}</magenta> | <level>{message}</level>'
 
@@ -68,11 +80,11 @@ def main():
 
     logger.info(f'Starting to train {model_name} '
                 f'for {args.epochs} epochs '
-                f'(using device {args.device}) | '
-                f'optimizer-type={args.optimizer_type}, '
-                f'batch-size={args.batch_size}, '
-                f'learning-rate={args.learning_rate}, '
-                f'weight-decay={args.weight_decay}')
+                f'(using {args.device}) | '
+                f'optimizer={args.optimizer_type}, '
+                f'bs={args.batch_size}, '
+                f'lr={args.learning_rate}, '
+                f'wd={args.weight_decay}')
 
     device = torch.device(args.device)
     model = model.to(device)
@@ -109,6 +121,7 @@ def parse_args():
     default_device = 'cpu'
     default_epochs = 1500
     default_optimizer = 'SGD'
+    default_padding_mode = 'zeros'
     default_batch_size = 64
     default_learning_rate = 0.005
     default_weight_decay = 0.00001
@@ -117,6 +130,7 @@ def parse_args():
     default_log_interval = 100
     default_aux_mlp_n_hidden_layers = 1
     default_aux_mlp_hidden_dim = 1024
+    default_pred_aux_type = 'mlp'
     default_pred_loss_weight = 1
     default_ssl_loss_weight = 0.1
     default_first_trainable_block = 0
@@ -134,9 +148,12 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=default_epochs,
                         help=f'Number of epochs. '
                              f'Default is {default_epochs}).')
-    parser.add_argument('--optimizer_type', type=str, default=default_optimizer,
-                        help=f'Optimizer type - SGD or Adam. '
+    parser.add_argument('--optimizer_type', type=str, default=default_optimizer, choices=['Adam', 'SGD'],
+                        help=f'Optimizer type. '
                              f'Default is {default_optimizer}.')
+    parser.add_argument('--padding_mode', type=str, default=default_padding_mode, choices=['zeros', 'circular'],
+                        help=f'Padding mode for the convolution layers. '
+                             f'Default is {default_padding_mode}.')
     parser.add_argument('--batch_size', type=int, default=default_batch_size,
                         help=f'Batch size. '
                              f'Default is {default_batch_size}.')
@@ -163,6 +180,9 @@ def parse_args():
                              f'Default is {default_aux_mlp_hidden_dim}.')
     parser.add_argument('--dgl', action='store_true',
                         help='Use decoupled greedy learning.')
+    parser.add_argument('--pred_aux_type', type=str, default=default_pred_aux_type, choices=['mlp', 'cnn'],
+                        help=f'Type of the auxiliary networks predicting the classes scores. '
+                             f'Default is {default_pred_aux_type}.')
     parser.add_argument('--dni', action='store_true',
                         help='Use decoupled neural interfaces.')
     parser.add_argument('--cdni', action='store_true',

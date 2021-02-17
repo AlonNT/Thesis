@@ -42,41 +42,32 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_di
     return torch.nn.Sequential(*layers)
 
 
-def get_cnn(conv_layers_channels: Optional[List[int]] = None,
+def get_cnn(image_size: int = 32,
+            in_channels: int = 3,
+            conv_layers_channels: Optional[List[int]] = None,
             affine_layers_channels: Optional[List[int]] = None) -> torch.nn.Sequential:
     """
     This function builds a CNN and return it as a PyTorch's sequential model.
 
+    :param image_size: Will be used to infer input dimension for the first affine layer.
+    :param in_channels: Number of channels in the input tensor.
     :param conv_layers_channels: A list of integers containing the channels of each convolution block.
                                  Each block will contain Conv - BatchNorm - MaxPool - ReLU.
-                                 Defaults to 128, 128, 128.
     :param affine_layers_channels: A list of integers containing the channels of each linear layer.
-                                 Defaults to 256, 10.
     :return: A sequential model which is the constructed CNN.
     """
-    if conv_layers_channels is None:
-        conv_layers_channels = [128, 128, 128]
-    if affine_layers_channels is None:
-        affine_layers_channels = [256, len(CLASSES)]
-
-    conv_kernel_size = 5
-    padding = 2
-    pool_kernel_size = 2
-    image_size = 32
-
     layers: List[torch.nn.Module] = list()
 
-    in_channels = 3  # 3 channels corresponding to RGB channels in the original images.
-    for conv_layer_channels in conv_layers_channels:
-        out_channels = conv_layer_channels
+    for n_channels in conv_layers_channels:
+        out_channels = n_channels
 
         layers.append(torch.nn.Conv2d(in_channels=in_channels,
                                       out_channels=out_channels,
-                                      kernel_size=conv_kernel_size,
-                                      padding=padding))
+                                      kernel_size=3,
+                                      padding=1))
         layers.append(torch.nn.BatchNorm2d(out_channels))
         layers.append(torch.nn.ReLU())
-        layers.append(torch.nn.MaxPool2d(kernel_size=pool_kernel_size))
+        layers.append(torch.nn.MaxPool2d(kernel_size=2, stride=2))
 
         in_channels = out_channels
 
@@ -85,12 +76,13 @@ def get_cnn(conv_layers_channels: Optional[List[int]] = None,
     down_sample_factor = 2 ** len(conv_layers_channels)
     spatial_size = image_size // down_sample_factor
     in_features = conv_layers_channels[-1] * (spatial_size ** 2)
-    for i, affine_layer_channels in enumerate(affine_layers_channels):
-        layers.append(torch.nn.Linear(in_features=in_features, out_features=affine_layer_channels))
+    for i, n_channels in enumerate(affine_layers_channels):
+        out_features = n_channels
+        layers.append(torch.nn.Linear(in_features, out_features))
         if i < len(affine_layers_channels) - 1:  # Do not append ReLU in the last affine layer.
             layers.append(torch.nn.ReLU())
 
-        in_features = affine_layer_channels
+        in_features = out_features
 
     return torch.nn.Sequential(*layers)
 
@@ -138,7 +130,7 @@ def get_dataloaders(batch_size: int = 64,
     if random_crop:
         transforms['train'].append(torchvision.transforms.RandomCrop(size=32, padding=4))
     if random_resized_crop:
-        transforms['train'].append(torchvision.transforms.RandomResizedCrop(size=32, scale=(0.75, 1), ratio=(1, 1)))
+        transforms['train'].append(torchvision.transforms.RandomResizedCrop(size=32, scale=(0.75, 1.), ratio=(1., 1.)))
     for t in ['train', 'test']:
         transforms[t].append(torchvision.transforms.ToTensor())
     if normalize_to_plus_minus_one or normalize_to_unit_gaussian:

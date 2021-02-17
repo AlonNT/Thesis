@@ -4,7 +4,7 @@ import torch.nn as nn
 from typing import List, Optional, Union, Tuple
 
 from consts import CLASSES
-from utils import get_mlp
+from utils import get_mlp, get_cnn
 
 # Inspiration was taken from
 # https://github.com/kuangliu/pytorch-cifar/blob/master/models/vgg.py
@@ -72,11 +72,12 @@ def get_ssl_aux_net(channels: int, image_size: Optional[int] = None, target_imag
 
 
 def get_blocks(config: List[Union[int, str]],
-               aux_mlp_n_hidden_layers: int = 1,
-               aux_mlp_hidden_dim: int = 1024,
                dropout_prob: float = 0,
                padding_mode: str = 'zeros',
-               upsample: bool = False) -> Tuple[List[nn.Module], List[nn.Module], List[nn.Module], int]:
+               aux_mlp_n_hidden_layers: int = 1,
+               aux_mlp_hidden_dim: int = 1024,
+               upsample: bool = False,
+               pred_aux_type: str = 'mlp') -> Tuple[List[nn.Module], List[nn.Module], List[nn.Module], int]:
     """
     Return a list of `blocks` which constitute the whole network,
     as well as lists of the auxiliary networks (both for prediction and for SSL).
@@ -88,11 +89,12 @@ def get_blocks(config: List[Union[int, str]],
     :param dropout_prob: When positive, add dropout after each non-linearity.
     :param padding_mode: Should be 'zeros' or 'circular' indicating the padding mode of each Conv layer.
     :param upsample: If true, upsample each SSL auxiliary network output to 32 x 32.
+    :param pred_aux_type: 'mlp' for multi-layer-perceptron, 'cnn' for a single conv layer followed by mlp.
     :return: The blocks, the prediction auxiliary networks, the prediction auxiliary networks,
              and the dimension of the last layer (will be useful when feeding into a liner layer later).
     """
     blocks: List[nn.Module] = list()
-    auxiliary_nets: List[Optional[nn.Module]] = list()
+    pred_auxiliary_nets: List[Optional[nn.Module]] = list()
     ssl_auxiliary_nets: List[Optional[nn.Module]] = list()
 
     in_channels = 3
@@ -103,13 +105,12 @@ def get_blocks(config: List[Union[int, str]],
     for i in range(len(config)):
         if config[i] == 'M':
             blocks.append(nn.MaxPool2d(kernel_size=2, stride=2))
-            auxiliary_nets.append(None)
+            pred_auxiliary_nets.append(None)
             ssl_auxiliary_nets.append(None)
         else:
             out_channels = config[i]
 
-            # TODO There is a bug in circular padding on PyTorch 1.1.0. Using zero-padding for now.
-            block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode='zeros'),
+            block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode=padding_mode),
                             nn.BatchNorm2d(out_channels),
                             nn.ReLU()]
             in_channels = out_channels  # The input channels of the next convolution layer.
@@ -124,12 +125,21 @@ def get_blocks(config: List[Union[int, str]],
                 image_size //= 2  # The auxiliary network will get the pooled output, to increase efficiency.
 
             block_output_dimension = out_channels * (image_size ** 2)
-            auxiliary_nets.append(get_mlp(input_dim=block_output_dimension, **mlp_kwargs))
+
+            # In the last layer use MLP anyway (one before last because the actual last one is pool).
+            if pred_aux_type == 'mlp' or (i == len(config) - 2):
+                pred_aux_net = get_mlp(input_dim=block_output_dimension, **mlp_kwargs)
+            else:  # pred_aux_type == 'cnn'
+                pred_aux_net = get_cnn(image_size=image_size,
+                                       in_channels=out_channels,
+                                       conv_layers_channels=[out_channels],
+                                       affine_layers_channels=[aux_mlp_hidden_dim] * aux_mlp_n_hidden_layers)
+            pred_auxiliary_nets.append(pred_aux_net)
 
             upsampling_kwargs = dict(image_size=ssl_input_image_size, target_image_size=32) if upsample else dict()
             ssl_auxiliary_nets.append(get_ssl_aux_net(channels=out_channels, **upsampling_kwargs))
 
-    return blocks, auxiliary_nets, ssl_auxiliary_nets, block_output_dimension
+    return blocks, pred_auxiliary_nets, ssl_auxiliary_nets, block_output_dimension
 
 
 class VGG(nn.Module):
@@ -150,11 +160,7 @@ class VGG(nn.Module):
         :param padding_mode: Should be 'zeros' or 'circular' indicating the padding mode of each Conv layer.
         """
         super(VGG, self).__init__()
-        layers, _, _, features_output_dimension = get_blocks(configs[vgg_name],
-                                                             aux_mlp_n_hidden_layers,
-                                                             aux_mlp_hidden_dim,
-                                                             dropout_prob,
-                                                             padding_mode)
+        layers, _, _, features_output_dimension = get_blocks(configs[vgg_name], dropout_prob, padding_mode)
         self.features = nn.Sequential(*layers)
         self.classifier = get_mlp(input_dim=features_output_dimension,
                                   output_dim=len(CLASSES),
@@ -178,7 +184,8 @@ class VGGwDGL(nn.Module):
                  dropout_prob: float = 0,
                  padding_mode: str = 'zeros',
                  use_ssl: bool = False,
-                 upsample: bool = False):
+                 upsample: bool = False,
+                 pred_aux_type: str = 'mlp'):
         """
         Constructs a new VGG model, that is trained in a local fashion (local predictions loss and possible SSL loss).
 
@@ -195,11 +202,12 @@ class VGGwDGL(nn.Module):
         """
         super(VGGwDGL, self).__init__()
         blocks, auxiliary_networks, ssl_auxiliary_nets, _ = get_blocks(configs[vgg_name],
-                                                                       aux_mlp_n_hidden_layers,
-                                                                       aux_mlp_hidden_dim,
                                                                        dropout_prob,
                                                                        padding_mode,
-                                                                       upsample)
+                                                                       aux_mlp_n_hidden_layers,
+                                                                       aux_mlp_hidden_dim,
+                                                                       upsample,
+                                                                       pred_aux_type)
         self.use_ssl = use_ssl
         self.blocks = nn.ModuleList(blocks)
         self.auxiliary_nets = nn.ModuleList(auxiliary_networks)
@@ -230,12 +238,13 @@ class VGGwDGL(nn.Module):
                         isinstance(self.blocks[last_block_index+1], nn.MaxPool2d))
         scores_aux_net_input = self.blocks[last_block_index+1](representation) if next_is_pool else representation
 
-        if len(scores_aux_net_input.size()) > 2:
-            # PyTorch version 1.1.0 (compatible with CUDA 9.0) does not have torch.nn.Flatten layer.
-            scores_aux_net_input = torch.flatten(input=scores_aux_net_input, start_dim=1, end_dim=-1)
-
         scores_aux_net = self.auxiliary_nets[last_block_index]
         ssl_aux_net = self.ssl_auxiliary_nets[last_block_index] if (self.ssl_auxiliary_nets is not None) else None
+
+        if ((len(scores_aux_net_input.size()) > 2) and
+                (scores_aux_net is not None) and isinstance(scores_aux_net[0], nn.Linear)):
+            # PyTorch version 1.1.0 (compatible with CUDA 9.0) does not have torch.nn.Flatten layer.
+            scores_aux_net_input = torch.flatten(input=scores_aux_net_input, start_dim=1, end_dim=-1)
 
         scores_outputs = scores_aux_net(scores_aux_net_input) if scores_aux_net is not None else None
         ssl_outputs = ssl_aux_net(representation) if ssl_aux_net is not None else None
