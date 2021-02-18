@@ -2,6 +2,7 @@ import copy
 import time
 
 import torch
+import torch.nn as nn
 import torchvision
 import itertools
 import wandb
@@ -15,6 +16,37 @@ from loguru import logger
 from consts import CLASSES
 
 
+# PyTorch 1.1.0 (compatible with CUDA 9.0) does not have a Flatten layer, so it's copied here to use.
+class Flatten(nn.Module):
+    r"""
+    Flattens a contiguous range of dims into a tensor. For use with :class:`~nn.Sequential`.
+
+    Shape:
+        - Input: :math:`(N, *dims)`
+        - Output: :math:`(N, \prod *dims)` (for the default case).
+
+    Args:
+        start_dim: first dim to flatten (default = 1).
+        end_dim: last dim to flatten (default = -1).
+    """
+    __constants__ = ['start_dim', 'end_dim']
+    start_dim: int
+    end_dim: int
+
+    def __init__(self, start_dim: int = 1, end_dim: int = -1) -> None:
+        super(Flatten, self).__init__()
+        self.start_dim = start_dim
+        self.end_dim = end_dim
+
+    def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        return input_tensor.flatten(self.start_dim, self.end_dim)
+
+    def extra_repr(self) -> str:
+        return 'start_dim={}, end_dim={}'.format(
+            self.start_dim, self.end_dim
+        )
+
+
 def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_dim: int = 0) -> torch.nn.Sequential:
     """
     This function builds a MLP (i.e. Multi-Layer-Perceptron) and return it as a PyTorch's sequential model.
@@ -26,10 +58,7 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_di
     :return: A sequential model which is the constructed MLP.
     """
     # Begins with a flatten layer. It's useful when the input is 4D from a conv layer, and harmless otherwise..
-    # layers: List[torch.nn.Module] = [torch.nn.Flatten()]
-    
-    # PyTorch version 1.1.0 (compatible with CUDA 9.0) does not have torch.nn.Flatten layer.
-    layers: List[torch.nn.Module] = []
+    layers: List[torch.nn.Module] = [Flatten()]
 
     for i in range(n_hidden_layers):
         layers.append(torch.nn.Linear(in_features=input_dim if i == 0 else hidden_dim,
@@ -71,7 +100,7 @@ def get_cnn(image_size: int = 32,
 
         in_channels = out_channels
 
-    layers.append(torch.nn.Flatten())
+    layers.append(Flatten())
 
     down_sample_factor = 2 ** len(conv_layers_channels)
     spatial_size = image_size // down_sample_factor

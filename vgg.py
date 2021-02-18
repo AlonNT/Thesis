@@ -6,29 +6,28 @@ from typing import List, Optional, Union, Tuple
 from consts import CLASSES
 from utils import get_mlp, get_cnn
 
-# Inspiration was taken from
-# https://github.com/kuangliu/pytorch-cifar/blob/master/models/vgg.py
-
 # Configurations for the VGG models family.
 # A number indicates number of channels in a convolution block, and M denotes a MaxPool layer.
 configs = {
-    # This is an architecture which reaches final dimensions of 4x4.
-    'VGG6': [64, 128, 'M', 128, 256, 'M', 256, 512, 'M'],
-
     'VGGs': [8, 'M', 16, 'M', 32, 'M'],  # 's' for shallow.
     'VGGsw': [64, 'M', 128, 'M', 256, 'M'],  # 'w' for wide.
     'VGGsxw': [128, 'M', 256, 'M', 512, 'M'],  # 'x' for extra.
 
-    # These are versions similar to the original VGG models, but with less down-sampling
-    # (because it's CIFAR-10 32x32 and not ImageNet 224x224)
     'VGG8c': [64, 128, 'M', 256, 256, 'M', 512, 512, 'M'],
-    'VGG11c': [64, 128, 'M', 256, 256, 'M', 512, 512, 512, 512, 'M'],
-    'VGG13c': [64, 64, 128, 128, 'M', 256, 256, 'M', 512, 512, 512, 512, 'M'],
 
+    # Models taken from the paper "Training Neural Networks with Local Error Signals"
     # https://github.com/anokland/local-loss/blob/master/train.py#L1276
     'VGG8b': [128, 256, 'M', 256, 512, 'M', 512, 'M', 512, 'M'],  #
     'VGG11b': [128, 128, 128, 256, 'M', 256, 512, 'M', 512, 512, 'M', 512, 'M'],
 
+    # These are versions similar to the original VGG models but with less down-sampling,
+    # reaching final spatial size of 4x4 instead of 1x1 in the original VGG architectures.
+    'VGG11c': [64, 128, 'M', 256, 256, 'M', 512, 512, 512, 512, 'M'],
+    'VGG13c': [64, 64, 128, 128, 'M', 256, 256, 'M', 512, 512, 512, 512, 'M'],
+    'VGG16c': [64, 64, 128, 128, 'M', 256, 256, 256, 'M', 512, 512, 512, 512, 512, 512, 'M'],
+    'VGG19c': [64, 64, 128, 128, 'M', 256, 256, 256, 256, 'M', 512, 512, 512, 512, 512, 512, 512, 512, 'M'],
+
+    # Original VGG architectures (built for ImageNet images of size 224x224)
     'VGG11': [64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
     'VGG13': [64, 64, 'M', 128, 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
     'VGG16': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'M', 512, 512, 512, 'M', 512, 512, 512, 'M'],
@@ -36,8 +35,9 @@ configs = {
 }
 
 
-def get_ssl_aux_net(channels: int, image_size: Optional[int] = None, target_image_size: Optional[int] = None) -> \
-        nn.Sequential:
+def get_ssl_aux_net(channels: int,
+                    image_size: Optional[int] = None,
+                    target_image_size: Optional[int] = None) -> nn.Sequential:
     """
     Build an auxiliary network suited for self-supervised learning.
     This means a network which predicts an image (a tensor of shape H x W x 3).
@@ -76,8 +76,13 @@ def get_blocks(config: List[Union[int, str]],
                padding_mode: str = 'zeros',
                aux_mlp_n_hidden_layers: int = 1,
                aux_mlp_hidden_dim: int = 1024,
+               final_mlp_n_hidden_layers: int = 1,
+               final_mlp_hidden_dim: int = 1024,
                upsample: bool = False,
-               pred_aux_type: str = 'mlp') -> Tuple[List[nn.Module], List[nn.Module], List[nn.Module], int]:
+               pred_aux_type: str = 'mlp') -> Tuple[List[nn.Module],
+                                                    List[Optional[nn.Module]],
+                                                    List[Optional[nn.Module]],
+                                                    int]:
     """
     Return a list of `blocks` which constitute the whole network,
     as well as lists of the auxiliary networks (both for prediction and for SSL).
@@ -86,6 +91,8 @@ def get_blocks(config: List[Union[int, str]],
     :param config: A list of integers / 'M' describing the architecture (see examples in the top of the file).
     :param aux_mlp_n_hidden_layers: Number of hidden layers in each prediction auxiliary network.
     :param aux_mlp_hidden_dim: The dimension of each hidden layer in each prediction auxiliary network.
+    :param final_mlp_n_hidden_layers: Number of hidden layers in the final MLP sub-network (predicting the scores).
+    :param final_mlp_hidden_dim: The dimension of each hidden layer in the final MLP sub-network.
     :param dropout_prob: When positive, add dropout after each non-linearity.
     :param padding_mode: Should be 'zeros' or 'circular' indicating the padding mode of each Conv layer.
     :param upsample: If true, upsample each SSL auxiliary network output to 32 x 32.
@@ -101,7 +108,12 @@ def get_blocks(config: List[Union[int, str]],
     image_size = 32
     block_output_dimension = 0
 
-    mlp_kwargs = dict(output_dim=len(CLASSES), n_hidden_layers=aux_mlp_n_hidden_layers, hidden_dim=aux_mlp_hidden_dim)
+    aux_mlp_kwargs = dict(output_dim=len(CLASSES),
+                          n_hidden_layers=aux_mlp_n_hidden_layers,
+                          hidden_dim=aux_mlp_hidden_dim)
+    final_mlp_kwargs = dict(output_dim=len(CLASSES),
+                            n_hidden_layers=final_mlp_n_hidden_layers,
+                            hidden_dim=final_mlp_hidden_dim)
     for i in range(len(config)):
         if config[i] == 'M':
             blocks.append(nn.MaxPool2d(kernel_size=2, stride=2))
@@ -127,8 +139,10 @@ def get_blocks(config: List[Union[int, str]],
             block_output_dimension = out_channels * (image_size ** 2)
 
             # In the last layer use MLP anyway (one before last because the actual last one is pool).
-            if pred_aux_type == 'mlp' or (i == len(config) - 2):
-                pred_aux_net = get_mlp(input_dim=block_output_dimension, **mlp_kwargs)
+            if i == len(config) - 2:
+                pred_aux_net = get_mlp(input_dim=block_output_dimension, **final_mlp_kwargs)
+            elif pred_aux_type == 'mlp':
+                pred_aux_net = get_mlp(input_dim=block_output_dimension, **aux_mlp_kwargs)
             else:  # pred_aux_type == 'cnn'
                 pred_aux_net = get_cnn(image_size=image_size,
                                        in_channels=out_channels,
@@ -145,8 +159,8 @@ def get_blocks(config: List[Union[int, str]],
 class VGG(nn.Module):
     def __init__(self,
                  vgg_name: str,
-                 aux_mlp_n_hidden_layers: int = 1,
-                 aux_mlp_hidden_dim: int = 1024,
+                 final_mlp_n_hidden_layers: int = 1,
+                 final_mlp_hidden_dim: int = 1024,
                  dropout_prob: float = 0,
                  padding_mode: str = 'zeros'):
         """
@@ -154,38 +168,37 @@ class VGG(nn.Module):
 
         :param vgg_name: Should be a key in the `configs` in the head of this file.
                          This describes the architecture of the desired model.
-        :param aux_mlp_n_hidden_layers: Number of hidden layers in the final MLP sub-network (predicting the scores).
-        :param aux_mlp_hidden_dim: The dimension of each hidden layer in the final MLP sub-network.
+        :param final_mlp_n_hidden_layers: Number of hidden layers in the final MLP sub-network (predicting the scores).
+        :param final_mlp_hidden_dim: The dimension of each hidden layer in the final MLP sub-network.
         :param dropout_prob: When positive, add dropout after each non-linearity.
         :param padding_mode: Should be 'zeros' or 'circular' indicating the padding mode of each Conv layer.
         """
         super(VGG, self).__init__()
         layers, _, _, features_output_dimension = get_blocks(configs[vgg_name], dropout_prob, padding_mode)
         self.features = nn.Sequential(*layers)
-        self.classifier = get_mlp(input_dim=features_output_dimension,
-                                  output_dim=len(CLASSES),
-                                  n_hidden_layers=aux_mlp_n_hidden_layers,
-                                  hidden_dim=aux_mlp_hidden_dim)
+        self.mlp = get_mlp(input_dim=features_output_dimension,
+                           output_dim=len(CLASSES),
+                           n_hidden_layers=final_mlp_n_hidden_layers,
+                           hidden_dim=final_mlp_hidden_dim)
 
     def forward(self, x: torch.Tensor):
         features = self.features(x)
-        if len(features.size()) > 2:
-            # PyTorch version 1.1.0 (compatible with CUDA 9.0) does not have torch.nn.Flatten layer.
-            features = torch.flatten(input=features, start_dim=1, end_dim=-1)
-        outputs = self.classifier(features)
+        outputs = self.mlp(features)
         return outputs
 
 
 class VGGwDGL(nn.Module):
     def __init__(self,
-                 vgg_name,
-                 aux_mlp_n_hidden_layers: int = 1,
-                 aux_mlp_hidden_dim: int = 1024,
+                 vgg_name: str,
+                 final_mlp_n_hidden_layers: int = 1,
+                 final_mlp_hidden_dim: int = 1024,
                  dropout_prob: float = 0,
                  padding_mode: str = 'zeros',
+                 pred_aux_type: str = 'mlp',
+                 aux_mlp_n_hidden_layers: int = 1,
+                 aux_mlp_hidden_dim: int = 1024,
                  use_ssl: bool = False,
-                 upsample: bool = False,
-                 pred_aux_type: str = 'mlp'):
+                 upsample: bool = False):
         """
         Constructs a new VGG model, that is trained in a local fashion (local predictions loss and possible SSL loss).
 
@@ -206,6 +219,8 @@ class VGGwDGL(nn.Module):
                                                                        padding_mode,
                                                                        aux_mlp_n_hidden_layers,
                                                                        aux_mlp_hidden_dim,
+                                                                       final_mlp_n_hidden_layers,
+                                                                       final_mlp_hidden_dim,
                                                                        upsample,
                                                                        pred_aux_type)
         self.use_ssl = use_ssl
@@ -241,12 +256,7 @@ class VGGwDGL(nn.Module):
         scores_aux_net = self.auxiliary_nets[last_block_index]
         ssl_aux_net = self.ssl_auxiliary_nets[last_block_index] if (self.ssl_auxiliary_nets is not None) else None
 
-        if ((len(scores_aux_net_input.size()) > 2) and
-                (scores_aux_net is not None) and isinstance(scores_aux_net[0], nn.Linear)):
-            # PyTorch version 1.1.0 (compatible with CUDA 9.0) does not have torch.nn.Flatten layer.
-            scores_aux_net_input = torch.flatten(input=scores_aux_net_input, start_dim=1, end_dim=-1)
-
-        scores_outputs = scores_aux_net(scores_aux_net_input) if scores_aux_net is not None else None
-        ssl_outputs = ssl_aux_net(representation) if ssl_aux_net is not None else None
+        scores_outputs = scores_aux_net(scores_aux_net_input) if (scores_aux_net is not None) else None
+        ssl_outputs = ssl_aux_net(representation) if (ssl_aux_net is not None) else None
 
         return representation, scores_outputs, ssl_outputs
