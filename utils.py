@@ -12,11 +12,87 @@ import numpy as np
 from torchvision.transforms.functional import resize
 from typing import List, Union, Optional, Dict
 from loguru import logger
+from datetime import timedelta
 
 from consts import CLASSES
 
 
-# PyTorch 1.1.0 (compatible with CUDA 9.0) does not have a Flatten layer, so it's copied here to use.
+class Accumulator:
+    """
+    Accumulate loss and correct predictions of an interval,
+    to calculate later mean-loss & accuracy.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.loss_sum: float = 0
+        self.pred_loss_sum: float = 0
+        self.ssl_loss_sum: float = 0
+        self.corrects_sum: int = 0
+        self.total_samples: int = 0
+        self.begin_time: float = time.time()
+
+    def update(self, mean_loss: float, num_corrects: int, n_samples: int,
+               mean_pred_loss: float = 0, mean_ssl_loss: float = 0):
+        self.loss_sum += mean_loss * n_samples
+        self.pred_loss_sum += mean_pred_loss * n_samples
+        self.ssl_loss_sum += mean_ssl_loss * n_samples
+        self.corrects_sum += num_corrects
+        self.total_samples += n_samples
+
+    def get_mean_loss(self) -> float:
+        return self.loss_sum / self.total_samples
+
+    def get_mean_pred_loss(self) -> float:
+        return self.pred_loss_sum / self.total_samples
+
+    def get_mean_ssl_loss(self) -> float:
+        return self.ssl_loss_sum / self.total_samples
+
+    def get_accuracy(self) -> float:
+        return 100 * (self.corrects_sum / self.total_samples)
+
+    def get_time(self) -> float:
+        return time.time() - self.begin_time
+
+    def get_dict(self, prefix='') -> Dict[str, float]:
+        d = {f'{prefix}_accuracy': self.get_accuracy(),
+             f'{prefix}_loss': self.get_mean_loss()}
+
+        if self.get_mean_pred_loss() > 0:
+            d[f'{prefix}_pred_loss'] = self.get_mean_pred_loss()
+        if self.get_mean_ssl_loss() > 0:
+            d[f'{prefix}_ssl_loss'] = self.get_mean_ssl_loss()
+
+        return d
+
+
+def cross_entropy_gradient(logits, labels):
+    """
+    Calculate the gradient of the cross-entropy loss with respect to the input logits.
+    Note the cross-entropy loss in PyTorch basically calculates log-softmax followed by negative log-likelihood loss.
+    Therefore, the gradient is the softmax output of the logits, where in the labels indices a 1 is subtracted.
+
+    Inspiration from http://machinelearningmechanic.com/deep_learning/2019/09/04/cross-entropy-loss-derivative.html
+
+    :param logits: The raw scores which are the input to the cross-entropy-loss.
+    :param labels: The labels (for each i the index of the true class of this training-sample).
+    :return: The gradient of the cross-entropy loss.
+    """
+    # This is the probabilities vector obtained using the softmax function on the raw scores.
+    p = torch.nn.functional.softmax(logits, dim=1)
+
+    # Subtract 1 from the labels indices, which gives the final gradient of the cross-entropy loss.
+    p.scatter_add_(dim=1, index=labels.unsqueeze(dim=-1), src=torch.full_like(p, fill_value=-1))
+
+    # TODO For some reason this differ from the gradient computed by torch.nn.CrossEntropyLoss (checked with hooks).
+
+    return p
+
+
+# PyTorch 1.1.0 (compatible with CUDA 9.0) does not have a Flatten layer, so it's copied here.
 class Flatten(nn.Module):
     r"""
     Flattens a contiguous range of dims into a tensor. For use with :class:`~nn.Sequential`.
@@ -71,18 +147,16 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_di
     return torch.nn.Sequential(*layers)
 
 
-def get_cnn(image_size: int = 32,
-            in_channels: int = 3,
-            conv_layers_channels: Optional[List[int]] = None,
-            affine_layers_channels: Optional[List[int]] = None) -> torch.nn.Sequential:
+def get_cnn(conv_layers_channels: List[int], affine_hidden_layers_channels: List[int],
+            image_size: int = 32, in_channels: int = 3) -> torch.nn.Sequential:
     """
     This function builds a CNN and return it as a PyTorch's sequential model.
 
-    :param image_size: Will be used to infer input dimension for the first affine layer.
-    :param in_channels: Number of channels in the input tensor.
     :param conv_layers_channels: A list of integers containing the channels of each convolution block.
                                  Each block will contain Conv - BatchNorm - MaxPool - ReLU.
-    :param affine_layers_channels: A list of integers containing the channels of each linear layer.
+    :param affine_hidden_layers_channels: A list of integers containing the channels of each linear hidden layer.
+    :param image_size: Will be used to infer input dimension for the first affine layer.
+    :param in_channels: Number of channels in the input tensor.
     :return: A sequential model which is the constructed CNN.
     """
     layers: List[torch.nn.Module] = list()
@@ -105,30 +179,15 @@ def get_cnn(image_size: int = 32,
     down_sample_factor = 2 ** len(conv_layers_channels)
     spatial_size = image_size // down_sample_factor
     in_features = conv_layers_channels[-1] * (spatial_size ** 2)
-    for i, n_channels in enumerate(affine_layers_channels):
+    for i, n_channels in enumerate(affine_hidden_layers_channels):
         out_features = n_channels
         layers.append(torch.nn.Linear(in_features, out_features))
-        if i < len(affine_layers_channels) - 1:  # Do not append ReLU in the last affine layer.
-            layers.append(torch.nn.ReLU())
-
+        layers.append(torch.nn.ReLU())
         in_features = out_features
 
+    layers.append(torch.nn.Linear(in_features, len(CLASSES)))
+
     return torch.nn.Sequential(*layers)
-
-
-def one_hot(indices: torch.Tensor, device: torch.device):
-    """
-    Convert a tensor containing indices to tensor containing one-hot vectors (corresponding to the indices).
-
-    :param indices: A tensor containing indices.
-    :param device: The device to work on.
-    :return: A variable containing the one-hot vectors.
-    """
-    result = torch.FloatTensor(indices.size() + (len(CLASSES),)).to(device)
-    result.zero_()
-    indices_rank = len(indices.size())
-    result.scatter_(dim=indices_rank, index=indices.data.unsqueeze(dim=indices_rank), value=1)
-    return torch.autograd.Variable(result)
 
 
 def get_dataloaders(batch_size: int = 64,
@@ -139,10 +198,11 @@ def get_dataloaders(batch_size: int = 64,
                     random_erasing: bool = False,
                     random_resized_crop: bool = False):
     """
-    Get dataloaders for the CIFAR10 dataset.
+    Get dataloaders for the CIFAR10 dataset, including data augmentations as requested by the arguments.
+
     :param batch_size: The size of the mini-batches to initialize the dataloaders.
-    :param normalize_to_unit_gaussian: If true, normalize the values to be in the range [-1,1] (instead of [0,1]).
-    :param normalize_to_plus_minus_one: If true, normalize the values to be a unit gaussian.
+    :param normalize_to_unit_gaussian: If true, normalize the values to be a unit gaussian.
+    :param normalize_to_plus_minus_one: If true, normalize the values to be in the range [-1,1] (instead of [0,1]).
     :param random_crop: If true, performs padding of 4 followed by random crop.
     :param random_horizontal_flip: If true, performs random horizontal flip.
     :param random_erasing: If true, performs erase a random rectangle in the image.
@@ -150,10 +210,8 @@ def get_dataloaders(batch_size: int = 64,
     :param random_resized_crop: If true, performs random resized crop.
     :return: A dictionary mapping "train"/"test" to its dataloader.
     """
-    if random_crop and random_resized_crop:
-        raise ValueError('Illegal arguments - can not have both \'random_crop\' and \'random_resized_crop\'.')
-
     transforms = {'train': list(), 'test': list()}
+
     if random_horizontal_flip:
         transforms['train'].append(torchvision.transforms.RandomHorizontalFlip())
     if random_crop:
@@ -162,8 +220,9 @@ def get_dataloaders(batch_size: int = 64,
         transforms['train'].append(torchvision.transforms.RandomResizedCrop(size=32, scale=(0.75, 1.), ratio=(1., 1.)))
     for t in ['train', 'test']:
         transforms[t].append(torchvision.transforms.ToTensor())
+    if random_erasing:
+        transforms['train'].append(torchvision.transforms.RandomErasing())
     if normalize_to_plus_minus_one or normalize_to_unit_gaussian:
-        assert not (normalize_to_plus_minus_one and normalize_to_unit_gaussian)
         # For the different normalization values see:
         # https://discuss.pytorch.org/t/normalization-in-the-mnist-example/457/7
         if normalize_to_unit_gaussian:
@@ -172,8 +231,6 @@ def get_dataloaders(batch_size: int = 64,
             normalization_values = [(0.5, 0.5, 0.5), (0.5, 0.5, 0.5)]
         for t in ['train', 'test']:
             transforms[t].append(torchvision.transforms.Normalize(*normalization_values))
-    if random_erasing:
-        transforms['train'].append(torchvision.transforms.RandomErasing())
 
     datasets = {t: torchvision.datasets.CIFAR10(root='./data',
                                                 train=(t == 'train'),
@@ -184,10 +241,57 @@ def get_dataloaders(batch_size: int = 64,
     dataloaders = {t: torch.utils.data.DataLoader(datasets[t],
                                                   batch_size=batch_size,
                                                   shuffle=(t == 'train'),
-                                                  num_workers=5)
+                                                  num_workers=6)
                    for t in ['train', 'test']}
 
     return dataloaders
+
+
+def evaluate_local_model(model, criterion, dataloader, device, training_step=None, log_to_wandb: bool = True):
+    """
+    Evaluate the given model on the test set.
+    In addition to returning the final test loss & accuracy,
+    this function evaluate each one of the model local modules (by logging to wandb).
+
+    :param model: The model
+    :param criterion: The criterion.
+    :param dataloader: The test set data-loader.
+    :param device: The device to use.
+    :param training_step: The training-step (integer), important to wandb logging.
+    :param log_to_wandb: Whether to log to wandb or not.
+    :return: The test set loss and accuracy.
+    """
+    model.eval()
+    n_modules = len(model.blocks)
+
+    modules_accumulators = [Accumulator() if (aux_net is not None) else None for aux_net in model.auxiliary_nets]
+
+    for inputs, labels in dataloader:
+        inputs = inputs.to(device)
+        labels = labels.to(device)
+
+        with torch.no_grad():
+            inputs_representation = inputs
+            for i in range(n_modules):
+                result = model(inputs_representation, first_block_index=i, last_block_index=i)
+                inputs_representation, outputs = result[0], result[1]
+                if outputs is not None:
+                    loss = criterion(outputs, labels)
+
+                    modules_accumulators[i].update(
+                        mean_loss=loss.item(),
+                        num_corrects=torch.sum(torch.eq(torch.max(outputs, dim=1)[1], labels.data)).item(),
+                        n_samples=inputs.size(0)
+                    )
+
+    if log_to_wandb:
+        assert training_step is not None
+        for i, modules_accumulator in enumerate(modules_accumulators):
+            if modules_accumulator is not None:
+                wandb.log(data=modules_accumulator.get_dict(prefix=f'module#{i}_test'), step=training_step)
+
+    final_accumulator = modules_accumulators[-2]  # Last one is None because last block is MaxPool with no aux-net.
+    return final_accumulator.get_mean_loss(), final_accumulator.get_accuracy()
 
 
 def evaluate_model(model, criterion, dataloader, device):
@@ -227,13 +331,9 @@ def evaluate_model(model, criterion, dataloader, device):
     return loss, accuracy
 
 
-def perform_train_step_local(model, inputs, labels, criterion, optim,
-                             training_step,
-                             ssl: bool = False, ssl_criterion=None,
-                             pred_loss_weight: float = 1, ssl_loss_weight: float = 0.1,
-                             first_trainable_block: int = 0,
-                             shift_ssl_labels: bool = False,
-                             images_log_interval: int = 1000):
+def perform_train_step_dgl(model, inputs, labels, criterion, optimizers, training_step,
+                           modules_accumulators: List[Optional[Accumulator]],
+                           log_interval: int = 100):
     """
     Perform a train-step for a model trained with DGL.
     The difference between the regular train-step and this one is that the model forward pass
@@ -244,57 +344,107 @@ def perform_train_step_local(model, inputs, labels, criterion, optim,
     :param inputs: The inputs.
     :param labels: The labels.
     :param criterion: The criterion.
-    :param optim: The optimizer (or plural optimizers).
-    :param training_step:
-    :param ssl:
-    :param ssl_criterion:
-    :param pred_loss_weight:
-    :param ssl_loss_weight:
-    :param first_trainable_block:
-    :param shift_ssl_labels:
-    :param images_log_interval:
+    :param optimizers: The optimizers (one for each local module in the whole model).
+    :param training_step: The training-step (integer), important to wandb logging.
+    :param modules_accumulators: Accumulators for each local module.
+    :param log_interval: How many training/testing steps between each logging (to wandb).
     :return: The loss of this train-step, as well as the predictions.
     """
-    n_plot_images = 4
+    inputs_representation = torch.clone(inputs)
+    loss, predictions = None, None
+
+    for i in range(len(model.blocks)):
+        inputs_representation, outputs = model(inputs_representation, first_block_index=i, last_block_index=i)
+        if outputs is not None:
+            assert optimizers[i] is not None, "If the module has outputs it means it has an auxiliary-network " \
+                                              "attached so it should has trainable parameters to optimize."
+            predictions = torch.max(outputs, dim=1)[1]  # Save to return the predictions (argmax) later.
+            optimizers[i].zero_grad()
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizers[i].step()
+
+            modules_accumulators[i].update(
+                mean_loss=loss.item(),
+                num_corrects=torch.sum(torch.eq(predictions, labels.data)).item(),
+                n_samples=inputs.size(0)
+            )
+
+        inputs_representation = inputs_representation.detach()  # Prepare the input tensor for the next block.
+
+    if training_step % log_interval == 0:
+        for i, modules_accumulator in enumerate(modules_accumulators):
+            if modules_accumulator is not None:
+                wandb.log(data=modules_accumulator.get_dict(prefix=f'module#{i}_train'), step=training_step)
+                modules_accumulator.reset()
+
+    return loss.item(), predictions
+
+
+def perform_train_step_ssl(model, inputs, labels, scores_criterion, optimizers, training_step,
+                           ssl_criterion=None,
+                           pred_loss_weight: float = 1, ssl_loss_weight: float = 0.1,
+                           first_trainable_block: int = 0,
+                           shift_ssl_labels: bool = False,
+                           images_log_interval: int = 1000):
+    """
+    Perform a train-step for a model trained with local self-supervised loss, possibly in combination with DGL.
+
+    :param model: The model.
+    :param inputs: The inputs.
+    :param labels: The labels.
+    :param scores_criterion: The criterion.
+    :param optimizers: The optimizers.
+    :param training_step: The training-step (integer), important to wandb logging.
+    :param ssl_criterion: The loss for the SSL outputs (regression, e.g. L1 or L2).
+    :param pred_loss_weight: When combining with DGL, the weight for the scores' prediction loss.
+    :param ssl_loss_weight: When combining with DGL, the weight for the SSL prediction loss.
+    :param first_trainable_block: Can be used to freeze a few layers in their initial weights.
+    :param shift_ssl_labels: Whether to shift the SSL labels or keep them the original images.
+    :param images_log_interval: Frequency of logging images to wandb
+                                (less frequent then regular logging because it's quite heavy).
+    :return: The loss of this train-step, as well as the predictions.
+    """
     inputs_size = inputs.size(-1)
     inputs_representation = torch.clone(inputs)
-    loss, scores, predictions_loss, ssl_loss = None, None, None, None
+    loss, predictions, scores_loss, ssl_loss = None, None, None, None
+    n_plot_images = 4
     indices_to_plot = np.random.choice(inputs.size(0), size=n_plot_images, replace=False)
+    shifts = tuple(np.linspace(start=5, stop=16, num=len(model.blocks), dtype=int))
 
     if first_trainable_block < 0:
         first_trainable_block = len(model.blocks) + first_trainable_block
     assert 0 <= first_trainable_block < len(model.blocks), f"Invalid first_trainable_block ({first_trainable_block})."
 
-    shifts = tuple(np.linspace(start=5, stop=16, num=len(model.blocks), dtype=int))
-
     for i in range(len(model.blocks)):
-        inputs_representation, outputs, ssl_outputs = model(inputs_representation,
-                                                            first_block_index=i, last_block_index=i)
-        if outputs is not None:
-            scores = outputs
-
+        inputs_representation, scores, ssl_outputs = model(inputs_representation,
+                                                           first_block_index=i, last_block_index=i)
         if i < first_trainable_block:
             continue
 
-        if optim[i] is not None:  # This means the current block has trainable parameters to optimize.
-            optim[i].zero_grad()
+        if scores is not None:
+            assert ssl_outputs is not None
+            assert optimizers[i] is not None, "If the module has outputs it means it has an auxiliary-network " \
+                                              "attached so it should has trainable parameters to optimize."
+            predictions = torch.max(scores, dim=1)[1]
+            optimizers[i].zero_grad()
 
-            # If not training with SSL, punish according to the predicted classes' scores.
-            # Note that in the last block we always want to do that, and ignore SSL.
-            # Since the block in all of the models is simply MaxPool layer,
+            # Note that in the last block we always want to punish according to the predicted classes' scores,
+            # nd ignore SSL. Since the block in all of the models is simply MaxPool layer,
             # by 'last block' we mean one before the last.
-            if (not ssl) or (i+2 == len(model.blocks)):
-                loss = criterion(scores, labels)
-            else:  # Training with SSL and it's not the last block.
+            if i == len(model.blocks) - 2:
+                loss = scores_criterion(scores, labels)
+            else:
                 ssl_outputs_size = ssl_outputs.size(-1)
                 ssl_labels = inputs if ssl_outputs_size == inputs_size else resize(inputs, size=[ssl_outputs_size] * 2)
                 if shift_ssl_labels:
                     ssl_labels = torch.roll(ssl_labels, shifts=(shifts[i], shifts[i]), dims=(2, 3))
+
                 ssl_loss = ssl_criterion(ssl_outputs, ssl_labels)
 
                 if pred_loss_weight > 0:
-                    predictions_loss = criterion(scores, labels)
-                    loss = pred_loss_weight * predictions_loss + ssl_loss_weight * ssl_loss
+                    scores_loss = scores_criterion(scores, labels)
+                    loss = pred_loss_weight * scores_loss + ssl_loss_weight * ssl_loss
                 else:
                     loss = ssl_loss
 
@@ -305,12 +455,94 @@ def perform_train_step_local(model, inputs, labels, criterion, optim,
                     wandb.log({f'SSL-layer#{i}': [wandb_image]}, step=training_step)
 
             loss.backward()
-            optim[i].step()
+            optimizers[i].step()
+        else:
+            assert ssl_outputs is None
 
         inputs_representation = inputs_representation.detach()  # Prepare the input tensor for the next block.
 
-    _, predictions = torch.max(scores, dim=1)
-    return loss, predictions, predictions_loss, ssl_loss
+    return loss.item(), predictions, scores_loss, ssl_loss
+
+
+def perform_train_step_direct_global(model, inputs, labels, criterion, optimizers,
+                                     training_step, modules_accumulators, last_gradient_weight: float = 0.5,
+                                     log_interval: int = 100):
+    """
+    Perform a train-step for a model trained with local self-supervised loss, possibly in combination with DGL.
+
+    :param model: The model.
+    :param inputs: The inputs.
+    :param labels: The labels.
+    :param criterion: The criterion.
+    :param optimizers: The optimizers.
+    :param training_step: The training-step (integer), important to wandb logging.
+    :param modules_accumulators: Accumulators for each local module.
+    :param last_gradient_weight: Weight of the last gradient in each intermediate gradient calculator.
+    :param log_interval: How many training/testing steps between each logging (to wandb).
+    :return: The loss of this train-step, as well as the predictions.
+    """
+    inputs_representation = torch.clone(inputs)
+    loss_value, predictions = None, None
+
+    modules_outputs: List[torch.Tensor] = list()
+
+    # Perform the forward-pass.
+    for i in range(len(model.blocks)):
+        inputs_representation, outputs = model(inputs_representation, first_block_index=i, last_block_index=i)
+        modules_outputs.append(outputs)
+
+        if i == len(model.blocks) - 2:
+            predictions = torch.max(outputs, dim=1)[1]
+
+        inputs_representation = inputs_representation.detach()  # Prepare the input tensor for the next block.
+
+    # Can't change variables within inner functions, but can change inner state of mutable variables.
+    # https://stackoverflow.com/questions/11987358/
+    last_layer_grad = dict(value=None)  # This will hold the gradient of the last layer.
+
+    def last_module_hook(grad):
+        assert last_layer_grad['value'] is None, "\'last_layer_grad\' should not have been set yet."
+        last_layer_grad['value'] = grad
+
+    def intermediate_module_hook(grad):
+        assert last_layer_grad['value'] is not None, "\'last_layer_grad\' should have been set."
+        return (1 - last_gradient_weight) * grad + last_gradient_weight * last_layer_grad['value']
+
+    # Perform the backward-pass, using the gradients of the last layer w.r.t the outputs tensor.
+    for i in range(len(model.blocks) - 1, -1, -1):
+        module_outputs = modules_outputs[i]
+        module_optimizer = optimizers[i]
+
+        if module_outputs is not None:
+            assert module_optimizer is not None
+            module_optimizer.zero_grad()
+            loss = criterion(module_outputs, labels)
+
+            modules_accumulators[i].update(
+                mean_loss=loss.item(),
+                num_corrects=torch.sum(torch.eq(torch.max(module_outputs, dim=1)[1], labels.data)).item(),
+                n_samples=inputs.size(0)
+            )
+
+            if last_layer_grad['value'] is None:
+                # import ipdb; ipdb.set_trace()
+                assert i == len(model.blocks) - 2, "This should happen in the lassst block (that is not MaxPool)."
+                module_outputs.register_hook(last_module_hook)
+                loss_value = loss.item()  # This loss will be returned eventually, since it's the final model's loss.
+            else:
+                # import ipdb; ipdb.set_trace()
+                module_outputs.register_hook(intermediate_module_hook)
+
+            loss.backward()
+            module_optimizer.step()
+
+    if training_step % log_interval == 0:
+        for i, modules_accumulator in enumerate(modules_accumulators):
+            if modules_accumulator is not None:
+                wandb.log(data=modules_accumulator.get_dict(prefix=f'module#{i}_train'), step=training_step)
+                modules_accumulator.reset()
+
+    return loss_value, predictions
 
 
 def perform_train_step_cdni(model, inputs, labels, criterion, optim):
@@ -336,7 +568,7 @@ def perform_train_step_cdni(model, inputs, labels, criterion, optim):
     loss.backward()
     optim.step()
 
-    return loss, predictions
+    return loss.item(), predictions
 
 
 def perform_train_step_regular(model, inputs, labels, criterion, optim):
@@ -363,12 +595,13 @@ def perform_train_step_regular(model, inputs, labels, criterion, optim):
     loss.backward()
     optim.step()
 
-    return loss, predictions
+    return loss.item(), predictions
 
 
 def perform_train_step(model, inputs, labels, criterion, optim,
-                       train_step, is_dgl, is_cdni, ssl, ssl_criterion,
-                       pred_loss_weight, ssl_loss_weight, first_trainable_block, shift_ssl_labels):
+                       training_step, is_dgl, is_cdni, ssl, ssl_criterion,
+                       pred_loss_weight, ssl_loss_weight, first_trainable_block, shift_ssl_labels,
+                       is_direct_global, modules_accumulators, last_gradient_weight):
     """
     Perform a single train-step, which is done differently when using regular training, DGL and cDNI.
 
@@ -377,22 +610,31 @@ def perform_train_step(model, inputs, labels, criterion, optim,
     :param labels: The labels.
     :param criterion: The criterion.
     :param optim: The optimizer (or plural optimizers).
-    :param train_step:
+    :param training_step: The training-step (integer), important to wandb logging.
     :param is_dgl: Whether this model is trained using DGL (affects the optimizer and the train-step functionality).
     :param is_cdni: Whether this model is trained using DNI with context or not (affects the train-step functionality).
-    :param ssl:
-    :param ssl_criterion:
-    :param pred_loss_weight:
-    :param ssl_loss_weight:
-    :param first_trainable_block:
-    :param shift_ssl_labels:
+    :param ssl: Whether this model is trained using SSL.
+    :param ssl_criterion: The criterion for the SSL predictions.
+    :param pred_loss_weight: When combining with DGL, the weight for the scores' prediction loss.
+    :param ssl_loss_weight: When combining with DGL, the weight for the SSL prediction loss.
+    :param first_trainable_block: Can be used to freeze a few layers in their initial weights.
+    :param shift_ssl_labels: Whether to shift the SSL labels or keep them the original images.
+    :param is_direct_global: Whether to use direct global gradient or not.
+    :param modules_accumulators: Accumulators for each local module.
+    :param last_gradient_weight: Weight of the last gradient in each intermediate gradient calculator.
     :return: The loss of this train-step, as well as the predictions.
     """
     mutual_args = (model, inputs, labels, criterion, optim)
 
     if is_dgl:
-        return perform_train_step_local(*mutual_args, train_step, ssl, ssl_criterion, pred_loss_weight, ssl_loss_weight,
-                                        first_trainable_block, shift_ssl_labels)
+        if is_direct_global:
+            return perform_train_step_direct_global(*mutual_args, training_step, modules_accumulators,
+                                                    last_gradient_weight)
+        elif ssl:
+            return perform_train_step_ssl(*mutual_args, training_step, ssl_criterion, pred_loss_weight, ssl_loss_weight,
+                                          first_trainable_block, shift_ssl_labels)
+        else:
+            return perform_train_step_dgl(*mutual_args, training_step, modules_accumulators)
     elif is_cdni:
         return perform_train_step_cdni(*mutual_args)
     else:
@@ -441,57 +683,11 @@ def get_optim(model, optimizer_params, is_dgl):
         return optimizer_constuctor(model.parameters(), **optimizer_params)
 
 
-class Accumulator:
-    """
-    Accumulate loss and correct predictions of an interval,
-    to calculate later mean-loss & accuracy.
-    """
-
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.loss_sum: float = 0
-        self.pred_loss_sum: float = 0
-        self.ssl_loss_sum: float = 0
-        self.corrects_sum: int = 0
-        self.total_samples: int = 0
-        self.begin_time: float = time.time()
-
-    def update(self, mean_loss: float, num_corrects: int, n_samples: int,
-               mean_pred_loss: float = 0, mean_ssl_loss: float = 0):
-        self.loss_sum += mean_loss * n_samples
-        self.pred_loss_sum += mean_pred_loss * n_samples
-        self.ssl_loss_sum += mean_ssl_loss * n_samples
-        self.corrects_sum += num_corrects
-        self.total_samples += n_samples
-
-    def get_mean_loss(self) -> float:
-        return self.loss_sum / self.total_samples
-
-    def get_mean_pred_loss(self) -> float:
-        return self.pred_loss_sum / self.total_samples
-
-    def get_mean_ssl_loss(self) -> float:
-        return self.ssl_loss_sum / self.total_samples
-
-    def get_accuracy(self) -> float:
-        return 100 * (self.corrects_sum / self.total_samples)
-
-    def get_time(self) -> float:
-        return time.time() - self.begin_time
-
-    def get_dict(self, prefix='') -> Dict:
-        return {f'{prefix}_accuracy': self.get_accuracy(),
-                f'{prefix}_loss': self.get_mean_loss(),
-                f'{prefix}_pred_loss': self.get_mean_pred_loss(),
-                f'{prefix}_ssl_loss': self.get_mean_ssl_loss()}
-
-
 def train_model(model, criterion, optimizer_params, dataloaders, device,
                 num_epochs=25, log_interval=100, is_dgl=False, is_cdni=False,
                 is_ssl=False, ssl_criterion=None, pred_loss_weight=1, ssl_loss_weight=0.1,
-                first_trainable_block=0, shift_ssl_labels=False):
+                first_trainable_block=0, shift_ssl_labels=False,
+                is_direct_global=False, last_gradient_weight: float = 0.5):
     """
     A general function to train a model and return the best model found.
 
@@ -506,10 +702,12 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
     :param is_cdni: Whether this model is trained using DNI with context or not (affects the train-step functionality).
     :param is_ssl: Whether this model is trained using self-supervised local loss (predicting the shifted image).
     :param ssl_criterion:
-    :param pred_loss_weight:
-    :param ssl_loss_weight:
-    :param first_trainable_block:
-    :param shift_ssl_labels:
+    :param pred_loss_weight: When combining with DGL, the weight for the scores' prediction loss.
+    :param ssl_loss_weight: When combining with DGL, the weight for the SSL prediction loss.
+    :param first_trainable_block: Can be used to freeze a few layers in their initial weights.
+    :param shift_ssl_labels: Whether to shift the SSL labels or keep them the original images.
+    :param is_direct_global: Whether to use direct global gradient or not.
+    :param last_gradient_weight: Weight of the last gradient in each intermediate gradient calculator.
     :return: the model with the lowest test error
     """
     best_weights = copy.deepcopy(model.state_dict())
@@ -517,9 +715,15 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
 
     optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]] = get_optim(model, optimizer_params, is_dgl)
 
+    total_time = 0
     training_step = 0
     interval_accumulator = Accumulator()
     epoch_accumulator = Accumulator()
+
+    if is_dgl:
+        modules_accumulators = [Accumulator() if (aux_net is not None) else None for aux_net in model.auxiliary_nets]
+    else:
+        modules_accumulators = None
 
     for epoch in range(num_epochs):
         # model_state = copy.deepcopy(model.state_dict())  # For debugging purposes later - verify weights change.
@@ -535,17 +739,18 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
             train_step_result = perform_train_step(model, inputs, labels, criterion, optim, training_step,
                                                    is_dgl, is_cdni,
                                                    is_ssl, ssl_criterion, pred_loss_weight, ssl_loss_weight,
-                                                   first_trainable_block, shift_ssl_labels)
+                                                   first_trainable_block, shift_ssl_labels, is_direct_global,
+                                                   modules_accumulators, last_gradient_weight)
 
             accumulator_kwargs = dict()
-            if is_dgl:
+            if is_ssl:
                 loss, predictions, predictions_loss, ssl_loss = train_step_result
                 accumulator_kwargs['mean_pred_loss'] = predictions_loss.item() if predictions_loss is not None else 0
                 accumulator_kwargs['mean_ssl_loss'] = ssl_loss.item() if ssl_loss is not None else 0
             else:
                 loss, predictions = train_step_result
 
-            accumulator_kwargs['mean_loss'] = loss.item()
+            accumulator_kwargs['mean_loss'] = loss
             accumulator_kwargs['num_corrects'] = torch.sum(torch.eq(predictions, labels.data)).item()
             accumulator_kwargs['n_samples'] = inputs.size(0)  # This equals the batch-size, except in the last minibatch
 
@@ -556,7 +761,12 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
                 wandb.log(data=interval_accumulator.get_dict(prefix='train'), step=training_step)
                 interval_accumulator.reset()
 
-        epoch_test_loss, epoch_test_accuracy = evaluate_model(model, criterion, dataloaders['test'], device)
+        if is_dgl:
+            epoch_test_loss, epoch_test_accuracy = evaluate_local_model(model, criterion, dataloaders['test'], device,
+                                                                        training_step)
+        else:
+            epoch_test_loss, epoch_test_accuracy = evaluate_model(model, criterion, dataloaders['test'], device)
+
         wandb.log(data={'test_accuracy': epoch_test_accuracy, 'test_loss': epoch_test_loss}, step=training_step)
 
         # if the current model reached the best results so far, deep copy the weights of the model.
@@ -565,14 +775,19 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
             best_weights = copy.deepcopy(model.state_dict())
 
         epoch_time_elapsed = epoch_accumulator.get_time()
-        logger.info(f'Epoch {epoch + 1:0>2d}/{num_epochs:0>2d} | '
-                    f'{int(epoch_time_elapsed // 60):d}m {int(epoch_time_elapsed) % 60:0>2d}s | '
+        total_time += epoch_time_elapsed
+        epochs_left = num_epochs - (epoch + 1)
+        avg_epoch_time = total_time / (epoch + 1)
+        time_left = avg_epoch_time * epochs_left
+        logger.info(f'Epoch {epoch + 1:0>3d}/{num_epochs:0>3d} '
+                    f'({str(timedelta(seconds=epoch_time_elapsed)).split(".")[0]}) | '
+                    f'ETA {str(timedelta(seconds=time_left)).split(".")[0]} | '
                     f'Train '
                     f'loss={epoch_accumulator.get_mean_loss():.4f} '
-                    f'accuracy={epoch_accumulator.get_accuracy():.2f}% | '
+                    f'acc={epoch_accumulator.get_accuracy():.2f}% | '
                     f'Test '
                     f'loss={epoch_test_loss:.4f} '
-                    f'accuracy={epoch_test_accuracy:.2f}%')
+                    f'acc={epoch_test_accuracy:.2f}%')
 
         # # For debugging purposes - verify that the weights of the model changed.
         # new_model_state = copy.deepcopy(model.state_dict())

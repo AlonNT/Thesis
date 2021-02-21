@@ -147,7 +147,7 @@ def get_blocks(config: List[Union[int, str]],
                 pred_aux_net = get_cnn(image_size=image_size,
                                        in_channels=out_channels,
                                        conv_layers_channels=[out_channels],
-                                       affine_layers_channels=[aux_mlp_hidden_dim] * aux_mlp_n_hidden_layers)
+                                       affine_hidden_layers_channels=[aux_mlp_hidden_dim] * aux_mlp_n_hidden_layers)
             pred_auxiliary_nets.append(pred_aux_net)
 
             upsampling_kwargs = dict(image_size=ssl_input_image_size, target_image_size=32) if upsample else dict()
@@ -259,4 +259,7 @@ class VGGwDGL(nn.Module):
         scores_outputs = scores_aux_net(scores_aux_net_input) if (scores_aux_net is not None) else None
         ssl_outputs = ssl_aux_net(representation) if (ssl_aux_net is not None) else None
 
-        return representation, scores_outputs, ssl_outputs
+        if self.ssl_auxiliary_nets is None:
+            return representation, scores_outputs  # This mode trains only DGL, nothing to return as ssl_outputs.
+        else:
+            return representation, scores_outputs, ssl_outputs

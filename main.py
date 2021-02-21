@@ -19,9 +19,13 @@ def get_model(args):
                   padding_mode=args.padding_mode)
     if args.dgl:
         model_name = f'{args.model} with DGL'
+
         kwargs.update(dict(pred_aux_type=args.pred_aux_type,
                            aux_mlp_n_hidden_layers=args.aux_mlp_n_hidden_layers,
                            aux_mlp_hidden_dim=args.aux_mlp_hidden_dim))
+        if args.is_direct_global:
+            model_name += ' & direct-global-learning'
+
         if args.ssl:
             kwargs['use_ssl'] = True
             model_name += ' & SSL'
@@ -45,6 +49,25 @@ def validate_args(args):
     if args.shift_ssl_labels and (args.padding_mode != 'circular'):
         logger.warning("When using shifted images predictions, "
                        "it's better to use circular-padding and not zero-padding. ")
+
+    if (args.ssl or args.is_direct_global) and not args.dgl:
+        raise ValueError("When training with local self-supervised loss or direct global loss, "
+                         "one should also give --dgl (because it's decoupled modules as well). "
+                         "You can give zero loss weight for the score's loss to only use ssl.")
+
+    if args.is_direct_global and args.ssl:
+        raise ValueError("Can not use both direct global loss and ssl at the moment.")
+
+    if not ((args.pred_loss_weight > 0) and
+            (args.ssl_loss_weight > 0) and
+            (args.pred_loss_weight + args.ssl_loss_weight == 1)):
+        raise ValueError("pred_loss_weight and ssl_loss_weight should sum to 1.")
+
+    if (not args.disable_random_crop) and args.enable_random_resized_crop:
+        raise ValueError('Can not have both \'random_crop\' and \'random_resized_crop\'.')
+
+    if (not args.disable_normalization_to_plus_minus_one) and args.enable_normalization_to_unit_gaussian:
+        raise ValueError("Must choose only one normalization - [-1,+1] or unit gaussian.")
 
 
 def main():
@@ -96,7 +119,8 @@ def main():
     train_model(model, criterion, optimizer_params, dataloaders, device,
                 args.epochs, args.log_interval, args.dgl, args.cdni,
                 args.ssl, ssl_criterion, args.pred_loss_weight, args.ssl_loss_weight,
-                args.first_trainable_block, args.shift_ssl_labels)
+                args.first_trainable_block, args.shift_ssl_labels,
+                args.is_direct_global, args.last_gradient_weight)
 
 
 def parse_args():
@@ -148,6 +172,14 @@ def parse_args():
                         help=f'The first trainable block index. '
                              f'Positive values can be used to fix first few blocks in their initial weights.'
                              f'Default is 0.')
+
+    parser.add_argument('--is_direct_global', action='store_true',
+                        help='Use direct global gradient.')
+    parser.add_argument('--last_gradient_weight', type=float, default=0.5,
+                        help=f'Weight of the last gradient to be used in each intermediate gradient calculator.  '
+                             f'The intermediate gradient will be '
+                             f'(1-last_gradient_weight)*original_gradient + last_gradient_weight*last_layer_gradient. '
+                             f'Default is 0.5.')
 
     # Arguments for Decoupled-Greedy-Learning.
     parser.add_argument('--dgl', action='store_true',
