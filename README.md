@@ -3,6 +3,15 @@
 - [Table of Contents](#table-of-contents)
 - [Introduction](#introduction)
 - [Experiments](#experiments)
+  - [Getting Started](#getting-started)
+    - [Creating The Environment](#creating-the-environment)
+      - [CUDA >= 10.2](#cuda--102)
+      - [CUDA 9](#cuda-9)
+    - [wandb](#wandb)
+    - [Clone The Repo](#clone-the-repo)
+    - [Running The Experiments](#running-the-experiments)
+      - [Prerequisites](#prerequisites)
+      - [Example Command-lines](#example-command-lines)
   - [1st iteration](#1st-iteration)
   - [2nd iteration](#2nd-iteration)
   - [3rd iteration](#3rd-iteration)
@@ -52,6 +61,113 @@ layers
 (inherently impossible in back-propagation).
 
 # Experiments
+
+## Getting Started
+
+### Creating The Environment
+
+We use [conda](https://docs.conda.io/en/latest/) and [mamba](https://github.com/mamba-org/mamba) for creating the environments.  
+mamba is a used to install packages in conda environment, and it works much faster than conda.
+
+#### CUDA >= 10.2
+
+For training on GPUs having CUDA 10.2, we can use the newest version of PyTorch (currently 1.7.1). 
+
+Create the environment named *torch-cuda10*
+
+```shell
+mamba create --name torch-cuda10 python=3.8
+```
+Install some useful packages for logging and visualizations
+```shell
+mamba install --name torch-cuda10 loguru wandb -c conda-forge
+```
+Install PyTorch and torchvision. 
+```shell
+mamba install --name torch-cuda10 pytorch torchvision cudatoolkit=10.2 -c pytorch
+```
+
+#### CUDA 9
+
+For training on GPUs having CUDA 9, we must use PyTorch version <= 1.10.  
+Note that using this old version of PyTorch has some pitfalls.  
+So far I encountered the absence of Flatten layer and a bug in circular padding.
+
+Create the environment named *torch-cuda9*
+```shell
+mamba create --name torch-cuda9 python=3.7
+```
+Install some useful packages for logging and visualizations
+```shell
+mamba install --name torch-cuda9 loguru wandb -c conda-forge
+```
+Install PyTorch and torchvision. 
+```shell
+mamba install --name torch-cuda9 pytorch==1.1.0 torchvision==0.3.0 cudatoolkit=9.0 -c pytorch
+```
+
+### wandb
+
+We use [wandb](wandb.ai) for visualizing the experiments. For setting everything up, this section needs to be performed (once, like building the enviroment). 
+
+ 
+[login](https://app.wandb.ai/login) online to wandb. I used the option of *login with GitHub* and my user is [alonnt](https://wandb.ai/alonnt).
+
+Then, in the environment containing wandb, run `wandb login`.
+
+### Clone The Repo
+
+```shell
+git clone git@github.com:AlonNT/Thesis.git <REPO-PATH>
+```
+
+### Running The Experiments
+
+#### Prerequisites
+
+SSH to the machine on which you want to run the experiment. Then, cd into the repository directory
+```shell
+cd <REPO-PATH>
+```
+
+Activate the relevant environment you created previously (depending on which GPU you are using), e.g.
+```shell
+conda activate torch-cuda10
+```
+
+The package wandb needs to write some files during running, and by default it writes it to `~/.config/wandb`. While training on a remote machine this path might be in accessible for writing, so we need to change it by running:
+```shell
+export WANDB_CONFIG_DIR=/PATH/ACCESSIBLE/FROM/REMOTE/MACHINE/.config/wandb/
+```
+
+Now run the experiment you want. Each run will log to wandb, as well as to a local log-file (in some predefined directory which defaults to `./experiments`).
+
+#### Example Command-lines
+
+See help for the different possible arguments
+```shell
+python main.py --help
+```
+
+Run an experiment with the default arguments:
+```shell
+python main.py
+```
+
+Run on a GPU, giving a device argument (use different i's for running on different GPUs in the same machine):
+```shell
+python main.py --device cuda:0
+```
+
+Train with DGL:
+```shell
+python main.py --device cuda:0 --dgl
+```
+
+Train with DGL where in each intermediate auxiliary-network use a mixup of 50-50 between the local gradient and the last aux-net gradient:
+```shell
+python ./main.py --device cuda:0 --dgl --is_direct_global --last_gradient_weight 0.5
+```
 
 ## 1st iteration
 

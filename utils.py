@@ -28,11 +28,13 @@ class Accumulator:
 
     def reset(self):
         self.loss_sum: float = 0
-        self.pred_loss_sum: float = 0
-        self.ssl_loss_sum: float = 0
         self.corrects_sum: int = 0
         self.total_samples: int = 0
         self.begin_time: float = time.time()
+
+        # These are for training with SSL & DGL combined, to examine the two different objectives separately.
+        self.pred_loss_sum: float = 0
+        self.ssl_loss_sum: float = 0
 
     def update(self, mean_loss: float, num_corrects: int, n_samples: int,
                mean_pred_loss: float = 0, mean_ssl_loss: float = 0):
@@ -525,12 +527,10 @@ def perform_train_step_direct_global(model, inputs, labels, criterion, optimizer
             )
 
             if last_layer_grad['value'] is None:
-                # import ipdb; ipdb.set_trace()
-                assert i == len(model.blocks) - 2, "This should happen in the lassst block (that is not MaxPool)."
+                assert i == len(model.blocks) - 2, "This should happen in the last block (that is not MaxPool)."
                 module_outputs.register_hook(last_module_hook)
                 loss_value = loss.item()  # This loss will be returned eventually, since it's the final model's loss.
             else:
-                # import ipdb; ipdb.set_trace()
                 module_outputs.register_hook(intermediate_module_hook)
 
             loss.backward()
@@ -545,33 +545,7 @@ def perform_train_step_direct_global(model, inputs, labels, criterion, optimizer
     return loss_value, predictions
 
 
-def perform_train_step_cdni(model, inputs, labels, criterion, optim):
-    """
-    Perform a train-step for a model trained with cDNI.
-    The difference between the regular train-step and this one is that the model forward pass
-    needs to be fed with the labels (to be used as context for the synthetic gradients synthesizers),
-    in addition to the inputs.
-
-    :param model: The model.
-    :param inputs: The inputs.
-    :param labels: The labels.
-    :param criterion: The criterion.
-    :param optim: The optimizer (or plural optimizers).
-    :return: The loss of this train-step, as well as the predictions.
-    """
-    optim.zero_grad()
-
-    outputs = model(inputs, labels)
-    _, predictions = torch.max(outputs, 1)
-    loss = criterion(outputs, labels)
-
-    loss.backward()
-    optim.step()
-
-    return loss.item(), predictions
-
-
-def perform_train_step_regular(model, inputs, labels, criterion, optim):
+def perform_train_step_regular(model, inputs, labels, criterion, optimizer):
     """
     Perform a regular train-step:
     (1) Feed the inputs (i.e. minibatch images) to the model.
@@ -583,23 +557,23 @@ def perform_train_step_regular(model, inputs, labels, criterion, optim):
     :param inputs: The inputs.
     :param labels: The labels.
     :param criterion: The criterion.
-    :param optim: The optimizer (or plural optimizers).
+    :param optimizer: The optimizer.
     :return: The loss of this train-step, as well as the predictions.
     """
-    optim.zero_grad()
+    optimizer.zero_grad()
 
     outputs = model(inputs)
     _, predictions = torch.max(outputs, 1)
     loss = criterion(outputs, labels)
 
     loss.backward()
-    optim.step()
+    optimizer.step()
 
     return loss.item(), predictions
 
 
 def perform_train_step(model, inputs, labels, criterion, optim,
-                       training_step, is_dgl, is_cdni, ssl, ssl_criterion,
+                       training_step, is_dgl, ssl, ssl_criterion,
                        pred_loss_weight, ssl_loss_weight, first_trainable_block, shift_ssl_labels,
                        is_direct_global, modules_accumulators, last_gradient_weight):
     """
@@ -612,7 +586,6 @@ def perform_train_step(model, inputs, labels, criterion, optim,
     :param optim: The optimizer (or plural optimizers).
     :param training_step: The training-step (integer), important to wandb logging.
     :param is_dgl: Whether this model is trained using DGL (affects the optimizer and the train-step functionality).
-    :param is_cdni: Whether this model is trained using DNI with context or not (affects the train-step functionality).
     :param ssl: Whether this model is trained using SSL.
     :param ssl_criterion: The criterion for the SSL predictions.
     :param pred_loss_weight: When combining with DGL, the weight for the scores' prediction loss.
@@ -635,8 +608,6 @@ def perform_train_step(model, inputs, labels, criterion, optim,
                                           first_trainable_block, shift_ssl_labels)
         else:
             return perform_train_step_dgl(*mutual_args, training_step, modules_accumulators)
-    elif is_cdni:
-        return perform_train_step_cdni(*mutual_args)
     else:
         return perform_train_step_regular(*mutual_args)
 
@@ -684,7 +655,7 @@ def get_optim(model, optimizer_params, is_dgl):
 
 
 def train_model(model, criterion, optimizer_params, dataloaders, device,
-                num_epochs=25, log_interval=100, is_dgl=False, is_cdni=False,
+                num_epochs=25, log_interval=100, is_dgl=False, 
                 is_ssl=False, ssl_criterion=None, pred_loss_weight=1, ssl_loss_weight=0.1,
                 first_trainable_block=0, shift_ssl_labels=False,
                 is_direct_global=False, last_gradient_weight: float = 0.5):
@@ -737,8 +708,7 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
             labels = labels.to(device)
 
             train_step_result = perform_train_step(model, inputs, labels, criterion, optim, training_step,
-                                                   is_dgl, is_cdni,
-                                                   is_ssl, ssl_criterion, pred_loss_weight, ssl_loss_weight,
+                                                   is_dgl, is_ssl, ssl_criterion, pred_loss_weight, ssl_loss_weight,
                                                    first_trainable_block, shift_ssl_labels, is_direct_global,
                                                    modules_accumulators, last_gradient_weight)
 

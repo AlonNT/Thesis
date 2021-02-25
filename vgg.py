@@ -22,6 +22,7 @@ configs = {
 
     # These are versions similar to the original VGG models but with less down-sampling,
     # reaching final spatial size of 4x4 instead of 1x1 in the original VGG architectures.
+    # 'c' stands for CIFAR, i.e. models that are suited to CIFAR instead of ImageNet.
     'VGG11c': [64, 128, 'M', 256, 256, 'M', 512, 512, 512, 512, 'M'],
     'VGG13c': [64, 64, 128, 128, 'M', 256, 256, 'M', 512, 512, 512, 512, 'M'],
     'VGG16c': [64, 64, 128, 128, 'M', 256, 256, 256, 'M', 512, 512, 512, 512, 512, 512, 'M'],
@@ -194,7 +195,7 @@ class VGGwDGL(nn.Module):
                  final_mlp_hidden_dim: int = 1024,
                  dropout_prob: float = 0,
                  padding_mode: str = 'zeros',
-                 pred_aux_type: str = 'mlp',
+                 pred_aux_type: str = 'cnn',
                  aux_mlp_n_hidden_layers: int = 1,
                  aux_mlp_hidden_dim: int = 1024,
                  use_ssl: bool = False,
@@ -249,6 +250,7 @@ class VGGwDGL(nn.Module):
         for i in range(first_block_index, last_block_index + 1):
             representation = self.blocks[i](representation)
 
+        # For the scores prediction aux-net, feed the representation after max-pooling (if it's indeed the next layer).
         next_is_pool = ((last_block_index+1 < len(self.blocks)) and
                         isinstance(self.blocks[last_block_index+1], nn.MaxPool2d))
         scores_aux_net_input = self.blocks[last_block_index+1](representation) if next_is_pool else representation

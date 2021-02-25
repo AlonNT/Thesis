@@ -117,7 +117,7 @@ def main():
     optimizer_params = dict(optimizer_type=args.optimizer_type, lr=args.learning_rate,
                             weight_decay=args.weight_decay, momentum=args.momentum)
     train_model(model, criterion, optimizer_params, dataloaders, device,
-                args.epochs, args.log_interval, args.dgl, args.cdni,
+                args.epochs, args.log_interval, args.dgl,
                 args.ssl, ssl_criterion, args.pred_loss_weight, args.ssl_loss_weight,
                 args.first_trainable_block, args.shift_ssl_labels,
                 args.is_direct_global, args.last_gradient_weight)
@@ -184,7 +184,7 @@ def parse_args():
     # Arguments for Decoupled-Greedy-Learning.
     parser.add_argument('--dgl', action='store_true',
                         help='Use decoupled greedy learning.')
-    parser.add_argument('--pred_aux_type', type=str, default='mlp', choices=['mlp', 'cnn'],
+    parser.add_argument('--pred_aux_type', type=str, default='cnn', choices=['mlp', 'cnn'],
                         help=f'Type of the auxiliary networks predicting the classes scores. '
                              f'Default is \'mlp\'.')
     parser.add_argument('--aux_mlp_n_hidden_layers', type=int, default=1,
@@ -209,33 +209,30 @@ def parse_args():
                              f'Default is 0.1.')
 
     # Arguments for the data augmentations.
+    # These refer to data augmentations that are enabled by default (that's way they are prefixed with 'disable').
     parser.add_argument('--disable_normalization_to_plus_minus_one', action='store_true',
                         help='If true, disable normalization of the values to the range [-1,1] (instead of [0,1]).')
     parser.add_argument('--disable_random_crop', action='store_true',
                         help='If true, disable random cropping which is padding of 4 followed by random crop.')
-    parser.add_argument('--enable_random_resized_crop', action='store_true',
-                        help='If true, enable random resized cropping.')
     parser.add_argument('--disable_random_horizontal_flip', action='store_true',
                         help='If true, disable random horizontal flip.')
+
+    # These refer to data augmentations that can be enabled (that's way they are prefixed with 'enable').
+    parser.add_argument('--enable_random_resized_crop', action='store_true',
+                        help='If true, enable random resized cropping.')
     parser.add_argument('--enable_normalization_to_unit_gaussian', action='store_true',
                         help='If true, enable normalization of the values to a unit gaussian.')
     parser.add_argument('--enable_random_erasing', action='store_true',
                         help='If true, performs erase a random rectangle in the image.')
 
     # Arguments for logging the training process.
-    parser.add_argument('--path', type=str, default='experiments',
+    parser.add_argument('--path', type=str, default='./experiments',
                         help=f'Output path for the experiment - '
                              f'a sub-directory named with the data and time will be created within. '
                              f'Default is \'experiments\'.')
     parser.add_argument('--log_interval', type=int, default=100,
                         help=f'How many iterations between each training log. '
                              f'Default is 100.')
-
-    # Deprecated arguments (DNI is no longer supported).
-    parser.add_argument('--dni', action='store_true',
-                        help='Use decoupled neural interfaces.')
-    parser.add_argument('--cdni', action='store_true',
-                        help='Use decoupled neural interfaces with context.')
 
     return parser.parse_args()
 
