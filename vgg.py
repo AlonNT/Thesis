@@ -265,3 +265,46 @@ class VGGwDGL(nn.Module):
             return representation, scores_outputs  # This mode trains only DGL, nothing to return as ssl_outputs.
         else:
             return representation, scores_outputs, ssl_outputs
+
+
+class VGGwLG(nn.Module):
+    def __init__(self,
+                 vgg_name: str,
+                 final_mlp_n_hidden_layers: int = 1,
+                 final_mlp_hidden_dim: int = 1024,
+                 dropout_prob: float = 0,
+                 padding_mode: str = 'zeros',
+                 pred_aux_type: str = 'cnn',
+                 aux_mlp_n_hidden_layers: int = 1,
+                 aux_mlp_hidden_dim: int = 1024):
+        super(VGGwLG, self).__init__()
+        blocks, auxiliary_networks, _, _ = get_blocks(configs[vgg_name],
+                                                      dropout_prob,
+                                                      padding_mode,
+                                                      aux_mlp_n_hidden_layers,
+                                                      aux_mlp_hidden_dim,
+                                                      final_mlp_n_hidden_layers,
+                                                      final_mlp_hidden_dim,
+                                                      pred_aux_type=pred_aux_type)
+        self.blocks = nn.ModuleList(blocks)
+        self.auxiliary_nets = nn.ModuleList(auxiliary_networks)
+
+    def forward(self, x: torch.Tensor):
+        representation: torch.Tensor = x
+        aux_nets_outputs: List[Optional[torch.Tensor]] = list()
+        for i in range(len(self.blocks)):
+            representation = self.blocks[i](representation)
+            scores_aux_net = self.auxiliary_nets[i]
+            if scores_aux_net is None:
+                aux_nets_outputs.append(None)
+                continue
+
+            # Feed the representation after max-pooling (if it's indeed the next layer).
+            next_is_pool = (i+1 < len(self.blocks)) and isinstance(self.blocks[i+1], nn.MaxPool2d)
+            scores_aux_net_input = self.blocks[i+1](representation) if next_is_pool else representation
+            outputs = scores_aux_net(scores_aux_net_input)
+            aux_nets_outputs.append(outputs)
+
+            representation = representation.detach()
+        
+        return aux_nets_outputs

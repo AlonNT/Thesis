@@ -89,8 +89,6 @@ def cross_entropy_gradient(logits, labels):
     # Subtract 1 from the labels indices, which gives the final gradient of the cross-entropy loss.
     p.scatter_add_(dim=1, index=labels.unsqueeze(dim=-1), src=torch.full_like(p, fill_value=-1))
 
-    # TODO For some reason this differ from the gradient computed by torch.nn.CrossEntropyLoss (checked with hooks).
-
     return p
 
 
@@ -471,7 +469,7 @@ def perform_train_step_direct_global(model, inputs, labels, criterion, optimizer
                                      training_step, modules_accumulators, last_gradient_weight: float = 0.5,
                                      log_interval: int = 100):
     """
-    Perform a train-step for a model trained with local self-supervised loss, possibly in combination with DGL.
+    Perform a train-step for a model with "direct-global-feedback".
 
     :param model: The model.
     :param inputs: The inputs.
@@ -546,6 +544,78 @@ def perform_train_step_direct_global(model, inputs, labels, criterion, optimizer
     return loss_value, predictions
 
 
+def bdot(a, b):
+    """
+    Calcuates batch-wise dot-product, used 
+    https://github.com/pytorch/pytorch/issues/18027#issuecomment-473119948
+    as a reference.
+    """
+    batch_size = a.shape[0]
+    dimension = a.shape[1]
+    return torch.bmm(a.view(batch_size, 1, dimension), 
+                     b.view(batch_size, dimension, 1)).reshape(-1)
+
+
+def perform_train_step_last_gradient(model, inputs, labels, criterion, optimizer,
+                                     training_step, modules_accumulators, 
+                                     last_gradient_weight: float = 0.5, log_interval: int = 100):
+    """
+    Perform a train-step for a model trained with the last gradient in each intermediate module.
+
+    :param model: The model.
+    :param inputs: The inputs.
+    :param labels: The labels.
+    :param criterion: The criterion.
+    :param optimizer: The optimizer.
+    :param training_step: The training-step (integer), important to wandb logging.
+    :param modules_accumulators: Accumulators for each local module.
+    :param last_gradient_weight: Weight of the last gradient in each intermediate gradient calculator.
+    :param log_interval: How many training/testing steps between each logging (to wandb).
+    :return: The loss of this train-step, as well as the predictions.
+    """
+    minibatch_size = inputs.size(0)
+
+    aux_nets_outputs = model(inputs)
+
+    aux_nets_losses = [criterion(outputs, labels) if (outputs is not None) else None
+                       for outputs in aux_nets_outputs]
+    aux_nets_predictions = [torch.max(outputs, dim=1)[1] if (outputs is not None) else None
+                            for outputs in aux_nets_outputs]
+
+    last_logits = aux_nets_outputs[-2]  # minus 2 because the last block is a pooling layer
+    last_loss = aux_nets_losses[-2]
+    last_gradient = (1 / minibatch_size) * cross_entropy_gradient(last_logits, labels).detach()
+    
+    dummy_losses = [torch.mean(bdot(last_gradient, aux_net_outputs))
+                    for aux_net_outputs in aux_nets_outputs[:-2]
+                    if aux_net_outputs is not None]
+
+    loss = (last_loss + 
+            (1 - last_gradient_weight) * torch.sum(torch.stack([l for l in aux_nets_losses if l is not None])) + 
+            last_gradient_weight * torch.sum(torch.stack(dummy_losses)))
+    loss.backward()
+    optimizer.zero_grad()
+    optimizer.step()
+
+    # Update the corresponding accumulators to visualize the performance of each module.
+    for i in range(len(model.blocks)):
+        if model.auxiliary_nets[i] is not None:        
+            modules_accumulators[i].update(
+                mean_loss=aux_nets_losses[i].item(),
+                num_corrects=torch.sum(torch.eq(aux_nets_predictions[i], labels.data)).item(),
+                n_samples=minibatch_size
+            )
+
+    # Visualize the performance of each module once in a while.
+    if training_step % log_interval == 0:
+        for i, modules_accumulator in enumerate(modules_accumulators):
+            if modules_accumulator is not None:
+                wandb.log(data=modules_accumulator.get_dict(prefix=f'module#{i}_train'), step=training_step)
+                modules_accumulator.reset()
+
+    return last_loss.item(), aux_nets_predictions[-2]
+
+
 def perform_train_step_regular(model, inputs, labels, criterion, optimizer):
     """
     Perform a regular train-step:
@@ -576,7 +646,7 @@ def perform_train_step_regular(model, inputs, labels, criterion, optimizer):
 def perform_train_step(model, inputs, labels, criterion, optim,
                        training_step, is_dgl, ssl, ssl_criterion,
                        pred_loss_weight, ssl_loss_weight, first_trainable_block, shift_ssl_labels,
-                       is_direct_global, modules_accumulators, last_gradient_weight):
+                       is_direct_global, modules_accumulators, last_gradient_weight, use_last_gradient):
     """
     Perform a single train-step, which is done differently when using regular training, DGL and cDNI.
 
@@ -604,6 +674,9 @@ def perform_train_step(model, inputs, labels, criterion, optim,
         if is_direct_global:
             return perform_train_step_direct_global(*mutual_args, training_step, modules_accumulators,
                                                     last_gradient_weight)
+        elif use_last_gradient:
+            return perform_train_step_last_gradient(*mutual_args, training_step, modules_accumulators, 
+                                                    last_gradient_weight)
         elif ssl:
             return perform_train_step_ssl(*mutual_args, training_step, ssl_criterion, pred_loss_weight, ssl_loss_weight,
                                           first_trainable_block, shift_ssl_labels)
@@ -613,7 +686,7 @@ def perform_train_step(model, inputs, labels, criterion, optim,
         return perform_train_step_regular(*mutual_args)
 
 
-def get_optim(model, optimizer_params, is_dgl):
+def get_optim(model, optimizer_params, is_dgl, use_last_gradient=False):
     """
     Return the optimizer (or plural optimizers) to train the given model.
     If the model is trained with DGL there are several optimizers,
@@ -633,7 +706,9 @@ def get_optim(model, optimizer_params, is_dgl):
         optimizer_constuctor = torch.optim.SGD
     else:
         raise ValueError(f'optimizer_type {optimizer_type} should be \'Adam\' or \'SGD\'.')
-
+    
+    if use_last_gradient:
+        return optimizer_constuctor(model.parameters(), **optimizer_params)
     if is_dgl:
         optimizers = list()
 
@@ -659,7 +734,8 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
                 num_epochs=25, log_interval=100, is_dgl=False, 
                 is_ssl=False, ssl_criterion=None, pred_loss_weight=1, ssl_loss_weight=0.1,
                 first_trainable_block=0, shift_ssl_labels=False,
-                is_direct_global=False, last_gradient_weight: float = 0.5):
+                is_direct_global=False, last_gradient_weight: float = 0.5,
+                use_last_gradient=False):
     """
     A general function to train a model and return the best model found.
 
@@ -679,13 +755,16 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
     :param first_trainable_block: Can be used to freeze a few layers in their initial weights.
     :param shift_ssl_labels: Whether to shift the SSL labels or keep them the original images.
     :param is_direct_global: Whether to use direct global gradient or not.
+    :param use_last_gradient: Whether to use last gradient or not.
+                              This should be the same in theory as `is_direct_global`
+                              but it's implemented quite differently.
     :param last_gradient_weight: Weight of the last gradient in each intermediate gradient calculator.
     :return: the model with the lowest test error
     """
     best_weights = copy.deepcopy(model.state_dict())
     best_accuracy = 0.0
 
-    optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]] = get_optim(model, optimizer_params, is_dgl)
+    optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]] = get_optim(model, optimizer_params, is_dgl, use_last_gradient)
 
     total_time = 0
     training_step = 0
@@ -698,7 +777,8 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
         modules_accumulators = None
 
     for epoch in range(num_epochs):
-        # model_state = copy.deepcopy(model.state_dict())  # For debugging purposes later - verify weights change.
+        # For debugging purposes later - verify weights change.
+        # model_state = copy.deepcopy(model.state_dict())
         model.train()
         epoch_accumulator.reset()
 
@@ -711,7 +791,7 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
             train_step_result = perform_train_step(model, inputs, labels, criterion, optim, training_step,
                                                    is_dgl, is_ssl, ssl_criterion, pred_loss_weight, ssl_loss_weight,
                                                    first_trainable_block, shift_ssl_labels, is_direct_global,
-                                                   modules_accumulators, last_gradient_weight)
+                                                   modules_accumulators, last_gradient_weight, use_last_gradient)
 
             accumulator_kwargs = dict()
             if is_ssl:

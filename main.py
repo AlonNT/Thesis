@@ -7,7 +7,7 @@ import wandb
 import torch
 from loguru import logger
 
-from vgg import VGG, VGGwDGL, configs
+from vgg import VGG, VGGwDGL, VGGwLG, configs
 from utils import get_dataloaders, train_model
 
 
@@ -25,6 +25,10 @@ def get_model(args):
                            aux_mlp_hidden_dim=args.aux_mlp_hidden_dim))
         if args.is_direct_global:
             model_name += ' & direct-global-learning'
+        
+        if args.use_last_gradient:
+            model_name += ' using-last-gradient'
+            return VGGwLG(**kwargs), model_name
 
         if args.ssl:
             kwargs['use_ssl'] = True
@@ -57,6 +61,9 @@ def validate_args(args):
 
     if args.is_direct_global and args.ssl:
         raise ValueError("Can not use both direct global loss and ssl at the moment.")
+
+    if args.is_direct_global and args.use_last_gradient:
+        raise ValueError("Can not use both is_direct_global and use_last_gradient at the moment.")
 
     if not ((args.pred_loss_weight > 0) and
             (args.ssl_loss_weight > 0) and
@@ -120,7 +127,7 @@ def main():
                 args.epochs, args.log_interval, args.dgl,
                 args.ssl, ssl_criterion, args.pred_loss_weight, args.ssl_loss_weight,
                 args.first_trainable_block, args.shift_ssl_labels,
-                args.is_direct_global, args.last_gradient_weight)
+                args.is_direct_global, args.last_gradient_weight, args.use_last_gradient)
 
 
 def parse_args():
@@ -163,6 +170,8 @@ def parse_args():
 
     parser.add_argument('--is_direct_global', action='store_true',
                         help='Use direct global gradient')
+    parser.add_argument('--use_last_gradient', action='store_true',
+                        help='Use Last gradient in each intermediate module')
     parser.add_argument('--last_gradient_weight', type=float, default=0.5,
                         help=f'Weight of the last gradient to be used in each intermediate gradient calculator.  '
                              f'The intermediate gradient will be '
