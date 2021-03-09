@@ -243,7 +243,8 @@ def get_dataloaders(batch_size: int = 64,
     dataloaders = {t: torch.utils.data.DataLoader(datasets[t],
                                                   batch_size=batch_size,
                                                   shuffle=(t == 'train'),
-                                                  num_workers=6)
+                                                  num_workers=6,
+                                                  drop_last=True)
                    for t in ['train', 'test']}
 
     return dataloaders

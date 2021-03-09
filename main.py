@@ -126,113 +126,93 @@ def main():
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Main script. '
-                    'This enables running the different experiments while logging to a log-file and to wandb.'
+                    'This enables running the different experiments while logging to a log-file and to wandb.',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
     # Arguments defining the model.
     parser.add_argument('--model', type=str, default='VGG11c', choices=list(configs.keys()),
-                        help=f'The model name for the network architecture. '
-                             f'Default is \'VGG11c\'.')
+                        help=f'The model name for the network architecture')
     parser.add_argument('--final_mlp_n_hidden_layers', type=int, default=1,
-                        help=f'How many hidden layers the final MLP at the end of the convolution blocks. '
-                             f'Default is 1.')
+                        help=f'How many hidden layers the final MLP at the end of the convolution blocks')
     parser.add_argument('--final_mlp_hidden_dim', type=int, default=1024,
-                        help=f'Dimension of each hidden layer the final MLP at the end of the convolution blocks. '
-                             f'Default is 1024.')
+                        help=f'Dimension of each hidden layer the final MLP at the end of the convolution blocks')
     parser.add_argument('--dropout_prob', type=float, default=0,
-                        help=f'Dropout probability (will be added after each non linearity). '
-                             f'Default is 0.')
+                        help=f'Dropout probability (will be added after each non linearity)')
     parser.add_argument('--padding_mode', type=str, default='zeros', choices=['zeros', 'circular'],
-                        help=f'Padding mode for the convolution layers. '
-                             f'Default is \'zeros\'.')
+                        help=f'Padding mode for the convolution layers')
 
     # Arguments defining the training-process
     parser.add_argument('--device', type=str, default='cpu', choices=['cpu'] + [f'cuda:{i}' for i in range(8)],
-                        help=f'On which device to train. '
-                             f'Default is \'cpu\'.')
+                        help=f'On which device to train')
     parser.add_argument('--epochs', type=int, default=1500,
-                        help=f'Number of epochs. '
-                             f'Default is 1500.')
+                        help=f'Number of epochs')
     parser.add_argument('--optimizer_type', type=str, default='SGD', choices=['Adam', 'SGD'],
-                        help=f'Optimizer type. '
-                             f'Default is \'SGD\'.')
+                        help=f'Optimizer type')
     parser.add_argument('--batch_size', type=int, default=64,
-                        help=f'Batch size. '
-                             f'Default is 64.')
+                        help=f'Batch size')
     parser.add_argument('--learning_rate', type=float, default=0.005,
-                        help=f'Learning-rate. '
-                             f'Default is 0.005.')
+                        help=f'Learning-rate')
     parser.add_argument('--momentum', type=float, default=0.9,
-                        help=f'Momentum (will be used only if optimizer-type is SGD). '
-                             f'Default is 0.9.')
+                        help=f'Momentum (will be used only if optimizer-type is SGD)')
     parser.add_argument('--weight_decay', type=float, default=0.00001,
-                        help=f'Weight decay. '
-                             f'Default is 0.00001.')
+                        help=f'Weight decay')
     parser.add_argument('--first_trainable_block', type=int, default=0,
                         help=f'The first trainable block index. '
-                             f'Positive values can be used to fix first few blocks in their initial weights.'
-                             f'Default is 0.')
+                             f'Positive values can be used to fix first few blocks in their initial weights')
 
     parser.add_argument('--is_direct_global', action='store_true',
-                        help='Use direct global gradient.')
+                        help='Use direct global gradient')
     parser.add_argument('--last_gradient_weight', type=float, default=0.5,
                         help=f'Weight of the last gradient to be used in each intermediate gradient calculator.  '
                              f'The intermediate gradient will be '
-                             f'(1-last_gradient_weight)*original_gradient + last_gradient_weight*last_layer_gradient. '
-                             f'Default is 0.5.')
+                             f'(1-last_gradient_weight)*original_gradient + last_gradient_weight*last_layer_gradient')
 
     # Arguments for Decoupled-Greedy-Learning.
     parser.add_argument('--dgl', action='store_true',
-                        help='Use decoupled greedy learning.')
+                        help='Use decoupled greedy learning')
     parser.add_argument('--pred_aux_type', type=str, default='cnn', choices=['mlp', 'cnn'],
-                        help=f'Type of the auxiliary networks predicting the classes scores. '
-                             f'Default is \'mlp\'.')
+                        help=f'Type of the auxiliary networks predicting the classes scores')
     parser.add_argument('--aux_mlp_n_hidden_layers', type=int, default=1,
-                        help=f'How many hidden layers in each auxiliary network (which is a MLP). '
-                             f'Default is 1.')
+                        help=f'How many hidden layers in each auxiliary network (which is a MLP)')
     parser.add_argument('--aux_mlp_hidden_dim', type=int, default=1024,
-                        help=f'Dimension of each hidden layer in each auxiliary network (which is a MLP). '
-                             f'Default is 1024.')
+                        help=f'Dimension of each hidden layer in each auxiliary network (which is a MLP)')
 
     # Arguments for self-supervised local loss (in combination with DGL).
     parser.add_argument('--ssl', action='store_true',
-                        help='Use self-supervised local loss (predict the image).')
+                        help='Use self-supervised local loss (predict the image)')
     parser.add_argument('--shift_ssl_labels', action='store_true',
-                        help='Shift the target images to be produced by the SSL auxiliary networks.')
+                        help='Shift the target images to be produced by the SSL auxiliary networks')
     parser.add_argument('--upsample', action='store_true',
-                        help='Whether to upsample SSL predictions or leave them downsampled.')
+                        help='Whether to upsample SSL predictions or leave them downsampled')
     parser.add_argument('--pred_loss_weight', type=float, default=0.9,
-                        help=f'Weight of the prediction loss when using both prediction-loss and SSL-loss.'
-                             f'Default is 0.9.')
+                        help=f'Weight of the prediction loss when using both prediction-loss and SSL-loss')
     parser.add_argument('--ssl_loss_weight', type=float, default=0.1,
-                        help=f'Weight of the SSL loss when using both prediction-loss and SSL-loss.'
-                             f'Default is 0.1.')
+                        help=f'Weight of the SSL loss when using both prediction-loss and SSL-loss')
 
     # Arguments for the data augmentations.
     # These refer to data augmentations that are enabled by default (that's way they are prefixed with 'disable').
     parser.add_argument('--disable_normalization_to_plus_minus_one', action='store_true',
-                        help='If true, disable normalization of the values to the range [-1,1] (instead of [0,1]).')
+                        help='If true, disable normalization of the values to the range [-1,1] (instead of [0,1])')
     parser.add_argument('--disable_random_crop', action='store_true',
-                        help='If true, disable random cropping which is padding of 4 followed by random crop.')
+                        help='If true, disable random cropping which is padding of 4 followed by random crop')
     parser.add_argument('--disable_random_horizontal_flip', action='store_true',
-                        help='If true, disable random horizontal flip.')
+                        help='If true, disable random horizontal flip')
 
     # These refer to data augmentations that can be enabled (that's way they are prefixed with 'enable').
     parser.add_argument('--enable_random_resized_crop', action='store_true',
-                        help='If true, enable random resized cropping.')
+                        help='If true, enable random resized cropping')
     parser.add_argument('--enable_normalization_to_unit_gaussian', action='store_true',
-                        help='If true, enable normalization of the values to a unit gaussian.')
+                        help='If true, enable normalization of the values to a unit gaussian')
     parser.add_argument('--enable_random_erasing', action='store_true',
-                        help='If true, performs erase a random rectangle in the image.')
+                        help='If true, performs erase a random rectangle in the image')
 
     # Arguments for logging the training process.
     parser.add_argument('--path', type=str, default='./experiments',
                         help=f'Output path for the experiment - '
-                             f'a sub-directory named with the data and time will be created within. '
-                             f'Default is \'experiments\'.')
+                             f'a sub-directory named with the data and time will be created within')
     parser.add_argument('--log_interval', type=int, default=100,
-                        help=f'How many iterations between each training log. '
-                             f'Default is 100.')
+                        help=f'How many iterations between each training log')
 
     return parser.parse_args()
 
