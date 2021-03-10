@@ -248,6 +248,55 @@ def get_dataloaders(batch_size: int = 64,
     return dataloaders
 
 
+def evaluate_model_with_last_gradient(model, criterion, dataloader, device, training_step=None, log_to_wandb: bool = True):
+    """
+    Evaluate the given model on the test set.
+    In addition to returning the final test loss & accuracy,
+    this function evaluate each one of the model local modules (by logging to wandb).
+
+    :param model: The model
+    :param criterion: The criterion.
+    :param dataloader: The test set data-loader.
+    :param device: The device to use.
+    :param training_step: The training-step (integer), important to wandb logging.
+    :param log_to_wandb: Whether to log to wandb or not.
+    :return: The test set loss and accuracy.
+    """
+    model.eval()
+
+    modules_accumulators = [Accumulator() if (aux_net is not None) else None for aux_net in model.auxiliary_nets]
+
+    for inputs, labels in dataloader:
+        inputs = inputs.to(device)
+        labels = labels.to(device)
+
+        with torch.no_grad():
+            aux_nets_outputs = model(inputs)
+
+            aux_nets_losses = [criterion(outputs, labels) if (outputs is not None) else None
+                               for outputs in aux_nets_outputs]
+            aux_nets_predictions = [torch.max(outputs, dim=1)[1] if (outputs is not None) else None
+                                    for outputs in aux_nets_outputs]
+            
+            # Update the corresponding accumulators to visualize the performance of each module.
+            for i in range(len(model.blocks)):
+                if model.auxiliary_nets[i] is not None:        
+                    modules_accumulators[i].update(
+                        mean_loss=aux_nets_losses[i].item(),
+                        num_corrects=torch.sum(torch.eq(aux_nets_predictions[i], labels.data)).item(),
+                        n_samples=inputs.size(0)
+                    )
+
+    if log_to_wandb:
+        assert training_step is not None
+        for i, modules_accumulator in enumerate(modules_accumulators):
+            if modules_accumulator is not None:
+                wandb.log(data=modules_accumulator.get_dict(prefix=f'module#{i}_test'), step=training_step)
+
+    final_accumulator = modules_accumulators[-2]  # Last one is None because last block is MaxPool with no aux-net.
+    return final_accumulator.get_mean_loss(), final_accumulator.get_accuracy()
+
+
 def evaluate_local_model(model, criterion, dataloader, device, training_step=None, log_to_wandb: bool = True):
     """
     Evaluate the given model on the test set.
@@ -573,6 +622,7 @@ def perform_train_step_last_gradient(model, inputs, labels, criterion, optimizer
     :param log_interval: How many training/testing steps between each logging (to wandb).
     :return: The loss of this train-step, as well as the predictions.
     """
+    optimizer.zero_grad()
     minibatch_size = inputs.size(0)
 
     aux_nets_outputs = model(inputs)
@@ -593,8 +643,11 @@ def perform_train_step_last_gradient(model, inputs, labels, criterion, optimizer
     loss = (last_loss + 
             (1 - last_gradient_weight) * torch.sum(torch.stack([l for l in aux_nets_losses if l is not None])) + 
             last_gradient_weight * torch.sum(torch.stack(dummy_losses)))
+
+    # This line (instead of the above loss definition) gives DGL equivalent implementation. 
+    # loss = torch.sum(torch.stack([l for l in aux_nets_losses if l is not None]))
+
     loss.backward()
-    optimizer.zero_grad()
     optimizer.step()
 
     # Update the corresponding accumulators to visualize the performance of each module.
@@ -613,7 +666,7 @@ def perform_train_step_last_gradient(model, inputs, labels, criterion, optimizer
                 wandb.log(data=modules_accumulator.get_dict(prefix=f'module#{i}_train'), step=training_step)
                 modules_accumulator.reset()
 
-    return last_loss.item(), aux_nets_predictions[-2]
+    return aux_nets_losses[-2].item(), aux_nets_predictions[-2]
 
 
 def perform_train_step_regular(model, inputs, labels, criterion, optimizer):
@@ -812,7 +865,10 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
                 wandb.log(data=interval_accumulator.get_dict(prefix='train'), step=training_step)
                 interval_accumulator.reset()
 
-        if is_dgl:
+        if use_last_gradient:
+            epoch_test_loss, epoch_test_accuracy = evaluate_model_with_last_gradient(model, criterion, dataloaders['test'], device,
+                                                                                     training_step)
+        elif is_dgl:
             epoch_test_loss, epoch_test_accuracy = evaluate_local_model(model, criterion, dataloaders['test'], device,
                                                                         training_step)
         else:

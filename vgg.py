@@ -294,15 +294,14 @@ class VGGwLG(nn.Module):
         aux_nets_outputs: List[Optional[torch.Tensor]] = list()
         for i in range(len(self.blocks)):
             representation = self.blocks[i](representation)
-            scores_aux_net = self.auxiliary_nets[i]
-            if scores_aux_net is None:
+            if self.auxiliary_nets[i] is None:
                 aux_nets_outputs.append(None)
                 continue
 
             # Feed the representation after max-pooling (if it's indeed the next layer).
             next_is_pool = (i+1 < len(self.blocks)) and isinstance(self.blocks[i+1], nn.MaxPool2d)
             scores_aux_net_input = self.blocks[i+1](representation) if next_is_pool else representation
-            outputs = scores_aux_net(scores_aux_net_input)
+            outputs = self.auxiliary_nets[i](scores_aux_net_input)
             aux_nets_outputs.append(outputs)
 
             representation = representation.detach()

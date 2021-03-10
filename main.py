@@ -171,7 +171,8 @@ def parse_args():
     parser.add_argument('--is_direct_global', action='store_true',
                         help='Use direct global gradient')
     parser.add_argument('--use_last_gradient', action='store_true',
-                        help='Use Last gradient in each intermediate module')
+                        help='Use Last gradient in each intermediate module. '
+                             'Similar theoretically to `is_direct_global` but implemeted quite differently.')
     parser.add_argument('--last_gradient_weight', type=float, default=0.5,
                         help=f'Weight of the last gradient to be used in each intermediate gradient calculator.  '
                              f'The intermediate gradient will be '
