@@ -44,7 +44,12 @@
     - [Random feedback weights support learning in deep neural networks (Nov 2014)](#random-feedback-weights-support-learning-in-deep-neural-networks-nov-2014)
     - [Direct Feedback Alignment Provides Learning in Deep Neural Networks (Sep 2016)](#direct-feedback-alignment-provides-learning-in-deep-neural-networks-sep-2016)
     - [Direct Feedback Alignment Scales to Modern Deep Learning Tasks and Architectures (Jun 2020)](#direct-feedback-alignment-scales-to-modern-deep-learning-tasks-and-architectures-jun-2020)
+  - [Theoretical Papers](#theoretical-papers)
+    - [Learning Boolean Circuits with Neural Networks (Oct 2019)](#learning-boolean-circuits-with-neural-networks-oct-2019)
+    - [Learning Parities with Neural Networks (Feb 2020)](#learning-parities-with-neural-networks-feb-2020)
+    - [When Hardness of Approximation Meets Hardness of Learning (Aug 2020)](#when-hardness-of-approximation-meets-hardness-of-learning-aug-2020)
   - [Miscellaneous](#miscellaneous)
+    - [Improving the Accuracy of Early Exits in Multi-Exit Architectures via Curriculum Learning (Apr 2021)](#improving-the-accuracy-of-early-exits-in-multi-exit-architectures-via-curriculum-learning-apr-2021)
     - [Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey (Jan 2021)](#training-deep-architectures-without-end-to-end-backpropagation-a-brief-survey-jan-2021)
     - [The Right Tool for the Job: Matching Model and Instance Complexities (Apr 2020)](#the-right-tool-for-the-job-matching-model-and-instance-complexities-apr-2020)
     - [Supervised Contrastive Learning (Apr 2020)](#supervised-contrastive-learning-apr-2020)
@@ -1013,8 +1018,104 @@ geometric learning with graph-convolutional networks and NLP with transformers.
 Take home messages:
 - Seems to work okay but not as good as back-prop.
 
+## Theoretical Papers
+
+### Learning Boolean Circuits with Neural Networks (Oct 2019)
+
+- Eran Malach and Shai Shalev-Shwartz.  
+  The Hebrew University, Israel.
+- [paper](https://arxiv.org/pdf/1910.11923.pdf)
+- [lecture](https://www.youtube.com/watch?v=zaEAUeALfIk) (first 19 minutes are relevant)
+- Published later in NeurIPS 2020 as another paper:  
+  [The Implications of Local Correlation on Learning
+Some Deep Functions](https://proceedings.neurips.cc/paper/2020/file/0e4ceef65add6cf21c0f3f9da53b71c0-Paper.pdf): 
+
+Learnability highly depends on the distribution of the data (besides the labeling function). As a toy experiment demonstrating it, learning parities when the data distribution is uniform fails (as promised theoretically), but if the data distribution is slightly biased product distribution the learning succeed.
+
+<p align="center">
+<img src="images/biased_vs_uniform_distribution.png" alt="biased_vs_uniform_distribution" width="50%"/>
+</p>
+
+To separate hard from easy to learn distributions, this work presents the property of *local correlation*: correlation between local patterns of the input and the target label. The focus is on learning deep neural-networks using a gradient-based algorithm, when the target function is a tree-structured Boolean circuit. In this case, the existence of correlation between the gates of the circuit and the target label determines whether the optimization succeeds or fails. 
+
+<p align="center">
+<img src="images/tree_structured_boolean_circuit.png" alt="tree_structured_boolean_circuit" width="60%"/>
+</p>
+
+The neural network which succeed in learning this model is structured similar to the labeling function which is the tree-structured boolean circuit. Each boolean gate is replaced with a one hidden layer neural-network. Then, each such "neural-gate" converges to the corresponding boolean-gate, so the overall learning process succeeds.
+
+<p align="center">
+<img src="images/nn_implementing_boolean_circuit.png" alt="nn_implementing_boolean_circuit" width="90%"/>
+</p>
+
+### Learning Parities with Neural Networks (Feb 2020)
+
+- Amit Daniely and Eran Malach.  
+  The Hebrew University, Israel.
+- Accepted to NeurIPS 2020.
+- [paper](https://proceedings.neurips.cc/paper/2020/file/eaae5e04a259d09af85c108fe4d7dd0c-Paper.pdf)
+- [appendix](https://proceedings.neurips.cc/paper/2020/file/eaae5e04a259d09af85c108fe4d7dd0c-Supplemental.pdf)
+
+There are many works showing learnability of neural networks, but most of them show learnability of models that can be learned using linear methods. So these results show that learning neural-networks with gradient-descent is competitive with learning a linear classifier on top of a data-independent representation of the examples. This leaves much to be desired, as neural networks are far more successful than linear methods.  
+This paper shows that under certain distributions, sparse parities are learnable via gradient decent on depth-two network. On the other hand, under the same distributions, these parities cannot be learned efficiently by linear methods.
+
+The specific distribution over the inputs is a mixture (50-50) of uniform distribution, and a distribution which is uniform on indices outside the parity, but all the indices inside the parity are equal. So the second half of the distribution somehow "reveals" the true labeling function.
+
+The intuition behind the negative result is that parities (on the uniform distribution) can not be learned using statistical-queries, in particular using gradient-descent. So if there exists a successful linear model, it should succeed to learn using gradient descent (since it's convex). 
+
+The intuition behind the positive result is that after the first gradient step there is a subset of "good" neurons that approximately implement functions of a specific kind, which can be combined linearly to implement the parity. Furthermore, the weights of the first layer from the second step onwards do not change much.
+
+### When Hardness of Approximation Meets Hardness of Learning (Aug 2020)
+
+- Eran Malach and Shai Shalev-Shwartz.  
+  The Hebrew University, Israel.
+- [paper](https://arxiv.org/pdf/2008.08059.pdf)
+
+A failure of a supervised learning algorithm can occur due to two possible reasons: wrong choice of hypothesis class (hardness of *approximation*), or failure to find the best function within the hypothesis class (hardness of *learning*).  Although both approximation and learnability are important for the success of the algorithm, they are typically studied separately. This work show a single hardness property that implies both hardness of approximation using linear classes and shallow networks, and hardness of learning using correlation queries and gradient-descent.
+
+The property that is proposed in this paper is the *variance* of a distribution family. The definition is as follows. Fix some function phi from X to [-1,+1] and observe the variance of the inner-product over all the pairs in the distribution family:
+<p align="center">
+<img src="images/hardness_of_approximation_and_learning_formula_2.png" alt="hardness_of_approximation_and_learning_formula_2" width="32%"/>
+</p>
+Now define the variance of the entire distribution family as the supremum
+<p align="center">
+<img src="images/hardness_of_approximation_and_learning_formula_1.png" alt="hardness_of_approximation_and_learning_formula_1" width="30%"/>
+</p>
+
+An example to the usefulness of this property is for orthogonal classes, since from Parseval's identity we get
+<p align="center">
+<img src="images/hardness_of_approximation_and_learning_formula_3.png" alt="hardness_of_approximation_and_learning_formula_3" width="65%"/>
+</p>
+and since the D-norm is at most the infinity-norm (which is at most 1 by the definition of phi) we get
+<p align="center">
+<img src="images/hardness_of_approximation_and_learning_formula_4.png" alt="hardness_of_approximation_and_learning_formula_4" width="16%"/>
+</p>
+so if the set of functions F is exponentially big, let's say the set of all parities (along with the uniform distribution, to form a "distribution family"), the variance become exponentially small which causes approximation to be impossible (unless and exponential number of features in the fixed embedding is used, or the linear separator will have an exponential norm).
+
+
 
 ## Miscellaneous
+
+### Improving the Accuracy of Early Exits in Multi-Exit Architectures via Curriculum Learning (Apr 2021)
+
+- Arian Bakhtiarnia, Qi Zhang and Alexandros Iosifidis.  
+  Aarhus University, Denmark
+- [paper](https://arxiv.org/pdf/2104.10461.pdf)
+- [code](https://gitlab.au.dk/maleci/MultiExitCurriculumLearning)
+
+Multi-exit architectures allow deep neural networks to terminate their execution early in order to adhere to tight deadlines. Branches composed of just a few layers of neurons are added at intermediate layers of a deep network. These branches can then be used to make inference time more dynamic at the cost of accuracy. There are various methods for detecting where to exit, one of the easiest and most intuitive ones being to determine the confidence of the output of a branch (e.g. a threshold on the entropy of the classification result).
+
+<p align="center">
+<img src="images/multi_exit.png" alt="Curriculum Learning" width="70%"/>
+</p>
+
+Curriculum learning is a training strategy that imitates human learning by sorting the training samples based on their difficulty and gradually introducing them to the network. It's composed of two main components: a *sorting function* that takes training samples as input and assigns a difficulty value to each of them and sorts them based on their difficulty values, and a *pacing function* that determines the pace at which new training samples are introduced to the network during the training process.
+
+<p align="center">
+<img src="images/curriculum_learning.png" alt="Curriculum Learning" width="70%"/>
+</p>
+
+This paper tries to improve the performance of the early exits auxiliary networks by using curriculum learning, and showed empirically it helps improve their accuracy. Note that in some cases anti-curriculum (i.e. going from hard to easy samples) works better.
 
 ### Training Deep Architectures Without End-to-End Backpropagation: A Brief Survey (Jan 2021)
 
