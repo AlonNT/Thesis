@@ -40,6 +40,8 @@
     - [Local Critic Training for Model-Parallel Learning of Deep Neural Networks (Feb 2021)](#local-critic-training-for-model-parallel-learning-of-deep-neural-networks-feb-2021)
   - [Target Propagation](#target-propagation)
     - [Difference Target Propagation (Dec 2014)](#difference-target-propagation-dec-2014)
+  - [Convolutional Kernel Methods](#convolutional-kernel-methods)
+    - [The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods (Jan 2021)](#the-unreasonable-effectiveness-of-patches-in-deep-convolutional-kernels-methods-jan-2021)
   - [Feedback Alignment](#feedback-alignment)
     - [Random feedback weights support learning in deep neural networks (Nov 2014)](#random-feedback-weights-support-learning-in-deep-neural-networks-nov-2014)
     - [Direct Feedback Alignment Provides Learning in Deep Neural Networks (Sep 2016)](#direct-feedback-alignment-provides-learning-in-deep-neural-networks-sep-2016)
@@ -945,6 +947,35 @@ Take home messages:
 - Interesting idea. 
 - Unfortunately, seems to work worse than the alternatives (proxy objectives and synthetic gradients). \
   Furthermore, experiments were done using only fully-connected networks (MNIST and CIFAR-10).
+
+## Convolutional Kernel Methods
+
+### The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods (Jan 2021)
+
+- Louis Thiry , Michael Arbel, Eugene Belilovsky, Edouard Oyallon. 
+- [paper](https://arxiv.org/abs/2101.07528.pdf)
+- [code](https://github.com/louity/patches)
+
+Convolutional kernel methods can be competitive with standard supervised deep convolutional networks, while being more amenable to theoretical analysis. This work highlights the importance of a data-dependent feature extraction step that is the key to obtain good performance in convolutional kernel methods. Specifically, this work shows a single layer of image patches followed by a linear classifier is already obtaining classification accuracies on CIFAR-10 in the same range as previous more sophisticated convolutional kernel methods, and scaling this method to the challenging ImageNet dataset, shows that such a simple approach can exceed all existing non-learned representation methods. Experiments to analyze the patches dictionary show they exhibit low-dimensional properties.
+
+The classification pipeline consists of the following steps: 
+- Whitening of a dictionary D of random patches.  
+  For a fixed dataset, this dictionary D is obtained by uniformly sampling patches from images over the whole training set. 
+  The whitening step subtracts the mean µ then applies the linear transformation W = (λI + Σ)^{−1/2} to the centered patch.
+- Nearest neighbor quantization of images patches via D.  
+  For each whitened patch, encode its Q-Nearest Neighbors from the set D (|Q|=0.4|D|).
+- Spatially averaging, to reduce the computational burden of our method.  
+  This is implemented as an average pooling with kernel size k1 and stride s1. 
+- Finally, this representation is being fed to a linear classifier, or a 1-hidden layer CNN.  
+  In order to reduce the computation cost (following the same line of idea of a "bottleneck" in ResNet), it's being factorized into two convolutional operators. The first one with kernel size k2 and stride 1 reduces the number of channels from D to c_2 and the second one with kernel size k3 and stride 1 outputs a number of channel equal to the number of image classes. Then we apply a global average pooling. For the 1-hidden layer experiment, we simply add a ReLU between the first and the second convolutional layer.
+
+<p align="center">
+<img src="images/the-unreasonable-effectiveness-of-patches-in-deep-convolutional-kernels-methods_fig1.png" alt="The classification pipeline" width="90%"/>
+</p>
+
+Takehome messages:
+- It seems that natural images patches indeed lie on low dimensional manifolds.
+- It will be interesting to stack this method on multiple layers and optimize them layerwise.
 
 ## Feedback Alignment
 
