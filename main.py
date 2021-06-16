@@ -1,14 +1,11 @@
 import argparse
-import datetime
-import os
-import sys
 import wandb
 
 import torch
 from loguru import logger
 
 from vgg import VGG, VGGwDGL, VGGwLG, configs
-from utils import get_dataloaders, train_model
+from utils import get_dataloaders, train_model, configure_logger, create_out_dir
 
 
 def get_model(args):
@@ -81,19 +78,8 @@ def main():
     args = parse_args()
     validate_args(args)
 
-    logger_format = '<magenta>{time:YYYY-MM-DD HH:mm:ss}</magenta> | <level>{message}</level>'
-
-    datetime_string = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    out_dir = os.path.join(args.path, datetime_string)
-    os.mkdir(out_dir)
-
-    # Configure the logger:
-    # (1) Remove the default logger (to stdout) and use a one with a custom format.
-    # (2) Adds a log file named `run.log` in the given output directory.
-    logger.remove()
-    logger.remove()
-    logger.add(sink=sys.stdout, format=logger_format)
-    logger.add(sink=os.path.join(out_dir, 'run.log'), format=logger_format)
+    out_dir = create_out_dir(args.path)
+    configure_logger(out_dir)
 
     model, model_name = get_model(args)
 

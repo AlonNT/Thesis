@@ -1,4 +1,7 @@
 import copy
+import datetime
+import os
+import sys
 import time
 
 import torch
@@ -14,7 +17,7 @@ from typing import List, Union, Optional, Dict
 from loguru import logger
 from datetime import timedelta
 
-from consts import CLASSES
+from consts import CLASSES, LOGGER_FORMAT, DATETIME_STRING_FORMAT
 
 
 class Accumulator:
@@ -241,7 +244,7 @@ def get_dataloaders(batch_size: int = 64,
     dataloaders = {t: torch.utils.data.DataLoader(datasets[t],
                                                   batch_size=batch_size,
                                                   shuffle=(t == 'train'),
-                                                  num_workers=6,
+                                                  num_workers=0,
                                                   drop_last=True)
                    for t in ['train', 'test']}
 
@@ -687,7 +690,7 @@ def perform_train_step_regular(model, inputs, labels, criterion, optimizer):
     optimizer.zero_grad()
 
     outputs = model(inputs)
-    _, predictions = torch.max(outputs, 1)
+    _, predictions = torch.max(outputs, dim=1)
     loss = criterion(outputs, labels)
 
     loss.backward()
@@ -911,3 +914,27 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
 
     model.load_state_dict(best_weights)  # load best model weights
     return model
+
+
+def create_out_dir(parent_out_dir: str) -> str:
+    """
+    Creates the output directory in the given parent output directory,
+    which will be named by the current date and time.
+    """
+    datetime_string = datetime.datetime.now().strftime(DATETIME_STRING_FORMAT)
+    out_dir = os.path.join(parent_out_dir, datetime_string)
+    os.mkdir(out_dir)
+
+    return out_dir
+
+
+def configure_logger(out_dir: str):
+    """
+    Configure the logger:
+    (1) Remove the default logger (to stdout) and use a one with a custom format.
+    (2) Adds a log file named `run.log` in the given output directory.
+    """
+    logger.remove()
+    logger.remove()
+    logger.add(sink=sys.stdout, format=LOGGER_FORMAT)
+    logger.add(sink=os.path.join(out_dir, 'run.log'), format=LOGGER_FORMAT)
