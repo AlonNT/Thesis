@@ -9,6 +9,9 @@ The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods
 """
 import argparse
 import copy
+from functools import partial
+from math import ceil
+
 import wandb
 
 import numpy as np
@@ -31,37 +34,35 @@ from utils import (configure_logger,
                    evaluate_model)
 
 
-def calculate_smaller_than_kth_value_mask(x, k) -> torch.Tensor:
-    return torch.less(x, x.kthvalue(dim=1, k=k + 1, keepdim=True).values)
+def calculate_smaller_than_kth_value_mask(x: torch.Tensor, k: int) -> torch.Tensor:
+    return torch.less(x, x.kthvalue(dim=1, k=k+1, keepdim=True).values)
 
 
 class ClassifierOnPatchBasedEmbedding(nn.Module):
     def __init__(self,
-                 kernel_convolution,
-                 bias_convolution,
-                 pool_size,
-                 pool_stride,
-                 k_neighbors,
-                 n_channels):
+                 kernel_convolution: torch.Tensor,
+                 bias_convolution: torch.Tensor,
+                 k_neighbors: int,
+                 n_channels: int,
+                 use_avg_pool: bool,
+                 pool_size: int,
+                 pool_stride: int):
         super(ClassifierOnPatchBasedEmbedding, self).__init__()
 
-        self.n_patches = kernel_convolution.shape[0]
-        self.patch_based_embedding = PatchBasedEmbedding(kernel_convolution,
-                                                         bias_convolution,
-                                                         pool_size,
-                                                         pool_stride,
-                                                         k_neighbors)
+        self.n_patches: int = kernel_convolution.shape[0]
+        self.patch_based_embedding = PatchBasedEmbedding(kernel_convolution, bias_convolution, k_neighbors)
+
         kernel_size = kernel_convolution.size(-1)
         embedding_spatial_size = CIFAR10_IMAGE_SIZE - kernel_size + 1
-        intermediate_n_features = n_channels * (embedding_spatial_size ** 2)
-
-        self.classifier = nn.Sequential(
-            # TODO check if it helps, and WTF is ceil_mode.
-            # nn.AvgPool2d(kernel_size=pool_size, stride=pool_stride, ceil_mode=True),
-            nn.Conv2d(in_channels=self.n_patches, out_channels=n_channels, kernel_size=(1, 1)),
-            nn.Flatten(),
-            nn.Linear(in_features=intermediate_n_features, out_features=N_CLASSES)
-        )
+        pooled_embedding_dim = ceil((embedding_spatial_size - pool_size) / pool_stride + 1)
+        conv_input_spatial_size = pooled_embedding_dim if use_avg_pool else embedding_spatial_size
+        intermediate_n_features = n_channels * (conv_input_spatial_size ** 2)
+        classifier_layers = [nn.Conv2d(in_channels=self.n_patches, out_channels=n_channels, kernel_size=(1, 1)),
+                             nn.Flatten(),
+                             nn.Linear(in_features=intermediate_n_features, out_features=N_CLASSES)]
+        if use_avg_pool:
+            classifier_layers = [nn.AvgPool2d(pool_size, pool_stride, ceil_mode=True)] + classifier_layers
+        self.classifier = nn.Sequential(*classifier_layers)
 
     def forward(self, x):
         embedding = self.patch_based_embedding(x)
@@ -80,18 +81,14 @@ class PatchBasedEmbedding(nn.Module):
     def __init__(self,
                  kernel_convolution: torch.Tensor,
                  bias_convolution: torch.Tensor,
-                 pool_size: int,
-                 pool_stride: int,
                  k_neighbors: int):
         super(PatchBasedEmbedding, self).__init__()
         self.kernel_convolution = nn.Parameter(kernel_convolution, requires_grad=False)
         self.bias_convolution = nn.Parameter(bias_convolution, requires_grad=False)
-        self.pool_size = pool_size
-        self.pool_stride = pool_stride
         self.k_neighbors = k_neighbors
 
     def forward(self, images):
-        squared_distances = F.conv2d(images, -1 * self.kernel_convolution) + self.bias_convolution
+        squared_distances = F.conv2d(images, -1 * self.kernel_convolution, self.bias_convolution)
         embedding = calculate_smaller_than_kth_value_mask(squared_distances, self.k_neighbors).float()
         return embedding
 
@@ -235,11 +232,61 @@ def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, lo
     return model
 
 
-def validate_args(args):
-    pass
+def calc_covariance(tensor, mean):
+    centered_tensor = tensor - mean
+    return (centered_tensor @ centered_tensor.t()) / tensor.size(1)
 
 
-def get_conv_kernel_and_bias(batch_size, n_patches, patch_size):
+def calc_mean_patch(dataloader, patch_size, agg_func: Callable):
+    total_size = 0
+    mean = None
+    for inputs, _ in dataloader:
+        if total_size > 200:   # Might be useful for debugging purposes...
+            break
+
+        # Unfold the input batch to its patches - shape (N, C*H*W, M) where M is the number of patches per image.
+        patches = F.unfold(inputs, patch_size)
+
+        # Replace the batch axis with the patch axis, to obtain shape (C*H*W, N, M)
+        patches = patches.swapaxes(0, 1).contiguous()   # TODO is .contiguous() needed ?
+
+        # Flatten the batch and n_patches axes, to obtain shape (C*H*W, N*M)
+        patches = torch.flatten(patches, start_dim=1).double()
+
+        # Perform the aggregation function over the batch-size and number of patches per image.
+        # For example, when calculating mean it'll a (C*H*W)-dimensional vector,
+        # and when calculating the covariance it will be a square matrix of shape (C*H*W, C*H*W)
+        aggregated_patch = agg_func(patches)
+
+        if mean is None:
+            mean = torch.zeros_like(aggregated_patch)
+
+        batch_size = inputs.size(0)
+        mean = ((total_size / (total_size + batch_size)) * mean +
+                (batch_size / (total_size + batch_size)) * aggregated_patch)
+
+        total_size += batch_size
+
+    return mean
+
+
+def calc_whitening(dataloader, patch_size, whitening_regularization_factor):
+    mean_patch = calc_mean_patch(dataloader, patch_size, agg_func=partial(torch.mean, dim=1))
+    mean_as_column_vector = torch.unsqueeze(mean_patch, dim=-1)
+    covariance = calc_mean_patch(dataloader, patch_size, agg_func=partial(calc_covariance, mean=mean_as_column_vector))
+
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance.cpu().numpy())
+
+    inv_sqrt_eigenvalues = np.diag(1. / np.sqrt(eigenvalues + whitening_regularization_factor))
+    whitening_matrix = eigenvectors.dot(inv_sqrt_eigenvalues)
+    whitening_matrix = whitening_matrix.astype(np.float32)
+
+    return whitening_matrix
+
+
+def get_conv_kernel_and_bias(batch_size, n_patches, patch_size,
+                             use_whitening: bool = False,
+                             whitening_regularization_factor: float = 0.):
     clean_dataloaders = get_dataloaders(batch_size,
                                         normalize_to_unit_gaussian=False,
                                         normalize_to_plus_minus_one=True,
@@ -251,41 +298,54 @@ def get_conv_kernel_and_bias(batch_size, n_patches, patch_size):
     patches = sample_random_patches(clean_dataloaders['train'],
                                     n_patches=n_patches,
                                     patch_size=patch_size,
-                                    visualize=True)
+                                    visualize=False)
 
+    original_shape = patches.shape
     patches_flattened = patches.reshape(patches.shape[0], -1)
-    patches_norms_squared = np.linalg.norm(patches_flattened, axis=1) ** 2
-    bias_convolution = patches_norms_squared.reshape(1, -1, 1, 1)
 
-    patches = torch.from_numpy(patches)
-    bias_convolution = torch.from_numpy(bias_convolution)
+    if use_whitening:
+        whitening_matrix = calc_whitening(clean_dataloaders['train'], patch_size, whitening_regularization_factor)
+    else:
+        whitening_matrix = np.eye(patches_flattened.shape[1])
 
-    return patches, bias_convolution
+    kernel = np.linalg.multi_dot([patches_flattened, whitening_matrix, whitening_matrix.T])
+    bias = np.linalg.norm(patches_flattened.dot(whitening_matrix), axis=1) ** 2
+
+    kernel = torch.from_numpy(kernel).view(original_shape).float()
+    bias = torch.from_numpy(bias).float()
+
+    return kernel, bias
 
 
 def main():
     args = parse_args()
-    validate_args(args)
     out_dir = create_out_dir(args.path)
     configure_logger(out_dir)
 
-    device = torch.device(args.device)
+    logger.info(f'Starting to train patch-based-classifier '
+                f'for {args.epochs} epochs '
+                f'(using device {args.device})')
+    logger.info(f'batch_size={args.batch_size}, '
+                f'learning_rate={args.learning_rate}, '
+                f'weight_decay={args.weight_decay}')
+    logger.info(f'n_patches={args.n_patches}, '
+                f'patch_size={args.patch_size}')
+    if args.use_avg_pool:
+        logger.info(f'Using AvgPool (size={args.pool_size}, stride={args.pool_stride})')
+    if args.use_whitening:
+        logger.info(f'Using whitening (whitening_regularization_factor={args.whitening_regularization_factor}')
 
-    # model, model_name = get_model(args)
-    # logger.info(f'Starting to train {model_name} '
-    #             f'for {args.epochs} epochs '
-    #             f'(using {args.device}) | '
-    #             f'opt={args.optimizer_type}, '
-    #             f'bs={args.batch_size}, '
-    #             f'lr={args.learning_rate}, '
-    #             f'wd={args.weight_decay}')
-    # model = model.to(device)
-
-    kernel, bias = get_conv_kernel_and_bias(args.batch_size, args.n_patches, args.patch_size)
-    model = ClassifierOnPatchBasedEmbedding(kernel_convolution=kernel, bias_convolution=bias, pool_size=args.pool_size,
-                                            pool_stride=args.pool_stride,
+    kernel, bias = get_conv_kernel_and_bias(args.batch_size, args.n_patches, args.patch_size,
+                                            args.use_whitening, args.whitening_regularization_factor)
+    model = ClassifierOnPatchBasedEmbedding(kernel_convolution=kernel,
+                                            bias_convolution=bias,
                                             k_neighbors=int(args.k_neighbors_fraction * args.n_patches),
-                                            n_channels=args.n_channels)
+                                            n_channels=args.n_channels,
+                                            use_avg_pool=args.use_avg_pool,
+                                            pool_size=args.pool_size,
+                                            pool_stride=args.pool_stride)
+    device = torch.device(args.device)
+    model = model.to(device)
 
     wandb.init(project='thesis', config=args)
     wandb.watch(model)
@@ -332,12 +392,18 @@ def parse_args():
                         help=f'The number of patches')
     parser.add_argument('--patch_size', type=int, default=6,
                         help=f'The size of the patches')
+    parser.add_argument('--use_avg_pool', action='store_true',
+                        help='If true, use whitening on the patches')
     parser.add_argument('--pool_size', type=int, default=5,
                         help=f'The size of the average-pooling layer after the patch-based-embedding')
     parser.add_argument('--pool_stride', type=int, default=3,
                         help=f'The stride of the average-pooling layer after the patch-based-embedding')
     parser.add_argument('--k_neighbors_fraction', type=float, default=0.4,
                         help=f'which k to use in the k-nearest-neighbors, as a fraction of the total number of patches')
+    parser.add_argument('--use_whitening', action='store_true',
+                        help='If true, use whitening on the patches')
+    parser.add_argument('--whitening_regularization_factor', type=float, default=0.001,
+                        help=f'The regularization factor (a.k.a. lambda) of the whitening matrix')
 
     # Arguments for logging the training process.
     parser.add_argument('--path', type=str, default='./experiments',
