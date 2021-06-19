@@ -9,6 +9,7 @@ The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods
 """
 import argparse
 import copy
+import os
 from functools import partial
 from math import ceil
 
@@ -63,6 +64,8 @@ class ClassifierOnPatchBasedEmbedding(nn.Module):
         if use_avg_pool:
             classifier_layers = [nn.AvgPool2d(pool_size, pool_stride, ceil_mode=True)] + classifier_layers
         self.classifier = nn.Sequential(*classifier_layers)
+
+        # TODO should we try to use adaptive_avg_pool2d in the end, like the original code had?
 
     def forward(self, x):
         embedding = self.patch_based_embedding(x)
@@ -270,9 +273,11 @@ def calc_mean_patch(dataloader, patch_size, agg_func: Callable):
     return mean
 
 
-def calc_whitening(dataloader, patch_size, whitening_regularization_factor):
+def calc_whitening(dataloader, patch_size, whitening_regularization_factor) -> np.ndarray:
+    logger.info('Performing a first pass over the dataset to calculate the mean patch.')
     mean_patch = calc_mean_patch(dataloader, patch_size, agg_func=partial(torch.mean, dim=1))
     mean_as_column_vector = torch.unsqueeze(mean_patch, dim=-1)
+    logger.info('Performing a second pass over the dataset to calculate the covariance.')
     covariance = calc_mean_patch(dataloader, patch_size, agg_func=partial(calc_covariance, mean=mean_as_column_vector))
 
     eigenvalues, eigenvectors = np.linalg.eigh(covariance.cpu().numpy())
@@ -280,6 +285,25 @@ def calc_whitening(dataloader, patch_size, whitening_regularization_factor):
     inv_sqrt_eigenvalues = np.diag(1. / np.sqrt(eigenvalues + whitening_regularization_factor))
     whitening_matrix = eigenvectors.dot(inv_sqrt_eigenvalues)
     whitening_matrix = whitening_matrix.astype(np.float32)
+
+    return whitening_matrix
+
+
+def get_whitening_matrix(dataloader, use_whitening: bool, patch_size: int, regularization_factor: float) -> np.ndarray:
+    matrix_size = 3 * (patch_size ** 2)
+    if use_whitening:
+        filename = f'whitening_matrix_patch_size_{patch_size}_reg_{regularization_factor}.bin'
+        if os.path.isfile(filename):
+            logger.info(f'Reading whitening matrix from file {filename}.')
+            whitening_matrix = np.fromfile(filename, dtype=np.float32).reshape(matrix_size,
+                                                                               matrix_size)
+        else:
+            logger.info('Calculating whitening matrix.')
+            whitening_matrix = calc_whitening(dataloader, patch_size, regularization_factor)
+            whitening_matrix.tofile(filename)
+            logger.info(f'Whitening matrix saved in file {filename}.')
+    else:
+        whitening_matrix = np.eye(matrix_size, dtype=np.float32)
 
     return whitening_matrix
 
@@ -300,18 +324,14 @@ def get_conv_kernel_and_bias(batch_size, n_patches, patch_size,
                                     patch_size=patch_size,
                                     visualize=False)
 
-    original_shape = patches.shape
+    whitening_matrix = get_whitening_matrix(clean_dataloaders['train'],
+                                            use_whitening, patch_size, whitening_regularization_factor)
+
     patches_flattened = patches.reshape(patches.shape[0], -1)
-
-    if use_whitening:
-        whitening_matrix = calc_whitening(clean_dataloaders['train'], patch_size, whitening_regularization_factor)
-    else:
-        whitening_matrix = np.eye(patches_flattened.shape[1])
-
     kernel = np.linalg.multi_dot([patches_flattened, whitening_matrix, whitening_matrix.T])
     bias = np.linalg.norm(patches_flattened.dot(whitening_matrix), axis=1) ** 2
 
-    kernel = torch.from_numpy(kernel).view(original_shape).float()
+    kernel = torch.from_numpy(kernel).view(patches.shape).float()
     bias = torch.from_numpy(bias).float()
 
     return kernel, bias
@@ -396,7 +416,7 @@ def parse_args():
                         help='If true, use whitening on the patches')
     parser.add_argument('--pool_size', type=int, default=5,
                         help=f'The size of the average-pooling layer after the patch-based-embedding')
-    parser.add_argument('--pool_stride', type=int, default=3,
+    parser.add_argument('--pool_stride', type=int, default=2,
                         help=f'The stride of the average-pooling layer after the patch-based-embedding')
     parser.add_argument('--k_neighbors_fraction', type=float, default=0.4,
                         help=f'which k to use in the k-nearest-neighbors, as a fraction of the total number of patches')
