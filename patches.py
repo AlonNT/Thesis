@@ -35,6 +35,69 @@ from utils import (configure_logger,
                    evaluate_model)
 
 
+"""
+Ideas
+
+Bridge the gap between my implementation and theirs.
+* Classifier architecture:
+  Theirs:
+  - Input image
+    3 x 32 x 32
+  - Twice (for positive / negative patches):
+    + k-nearest-patches-mask
+      2048 x 27 x 27
+    + AvgPool(kernel_size=5, stride=3, ceil_mode=True)
+      2048 x 9 x 9
+    + AdaptiveAvgPool(output_size=6)
+      2048 x 6 x 6
+    + BatchNorm
+      2048 x 6 x 6
+    + Conv2d(2048, 128, kernel_size=1, stride=1)
+      128 x 6 x 6
+  - Addition (element-wise) of the two tensors corresponding to positive / negative patches
+    128 x 6 x 6
+  - Conv2d(128, 10, kernel_size=6, stride=1)
+    10 x 1 x 1
+  - AdaptiveAvgPool(output_size=1) 
+    NO EFFECT since the size is already the target size.
+    10 x 1 x 1
+ 
+  Mine:
+  - Input image
+    3 x 32 x 32
+  - Twice (for positive / negative patches):
+    + k-nearest-patches-mask
+      2048 x 27 x 27
+    + AvgPool
+      2048 x 9 x 9
+    + BatchNorm
+      2048 x 9 x 9
+    + Conv2d(2048, 128, kernel_size=1, stride=1)
+      128 x 9 x 9
+  - Addition (element-wise) of the two tensors corresponding to positive / negative patches
+    128 x 9 x 9
+  - Flatten
+    10,368
+  - Linear(10368, 10)
+    10
+
+* In the linear classifier experiments the AvgPool stride is 3 
+  and in the 1-hidden-layer (i.e. ReLU in-between) it's 2. 
+* Use same learning-rate - 0.003 for |D|=2K and 0.001 for larger |D|.
+* Use and same learning-rate scheduler - decay by a factor of 0.1 
+  at epochs 100 and 150 (total training 175 epochs).
+* Use 128 batch-size and not 64
+
+General improvements:
+* Make the dictionary more symmetric by horizontal flipping.
+* Make a better use of patches - instead of random patches selection:
+  + Cluster them (is it tractable?)
+  + Iteratively improve the patches dictionary - random at the beginning 
+    and then keep only the most "active" ones.
+
+"""
+
+
 def calculate_smaller_than_kth_value_mask(x: torch.Tensor, k: int) -> torch.Tensor:
     return torch.less(x, x.kthvalue(dim=1, k=k+1, keepdim=True).values)
 
@@ -45,31 +108,62 @@ class ClassifierOnPatchBasedEmbedding(nn.Module):
                  bias_convolution: torch.Tensor,
                  k_neighbors: int,
                  n_channels: int,
+                 add_flipped_patches: bool,
+                 add_negative_patches: bool,
+                 use_batch_norm: bool,
                  use_avg_pool: bool,
                  pool_size: int,
                  pool_stride: int):
         super(ClassifierOnPatchBasedEmbedding, self).__init__()
 
-        self.n_patches: int = kernel_convolution.shape[0]
-        self.patch_based_embedding = PatchBasedEmbedding(kernel_convolution, bias_convolution, k_neighbors)
-
-        kernel_size = kernel_convolution.size(-1)
+        kernel_size = kernel_convolution.shape[-1]
         embedding_spatial_size = CIFAR10_IMAGE_SIZE - kernel_size + 1
         pooled_embedding_dim = ceil((embedding_spatial_size - pool_size) / pool_stride + 1)
         conv_input_spatial_size = pooled_embedding_dim if use_avg_pool else embedding_spatial_size
         intermediate_n_features = n_channels * (conv_input_spatial_size ** 2)
-        classifier_layers = [nn.Conv2d(in_channels=self.n_patches, out_channels=n_channels, kernel_size=(1, 1)),
-                             nn.Flatten(),
-                             nn.Linear(in_features=intermediate_n_features, out_features=N_CLASSES)]
-        if use_avg_pool:
-            classifier_layers = [nn.AvgPool2d(pool_size, pool_stride, ceil_mode=True)] + classifier_layers
-        self.classifier = nn.Sequential(*classifier_layers)
+
+        self.add_negative_patches = add_negative_patches
+        self.n_patches = kernel_convolution.shape[0]
+        self.patch_based_embedding = PatchBasedEmbedding(kernel_convolution, bias_convolution, k_neighbors,
+                                                         add_flipped_patches, add_negative_patches)
+        self.avg_pool = nn.AvgPool2d(pool_size, pool_stride, ceil_mode=True) if use_avg_pool else None
+        self.flatten = nn.Flatten()
+        self.final_layer = nn.Linear(in_features=intermediate_n_features, out_features=N_CLASSES)
+
+        if not self.add_negative_patches:
+            self.batch_norm = nn.BatchNorm2d(self.n_patches) if use_batch_norm else None
+            self.bottle_neck_conv = nn.Conv2d(in_channels=self.n_patches, out_channels=n_channels, kernel_size=(1, 1))
+        else:
+            self.batch_norm_1 = nn.BatchNorm2d(self.n_patches)
+            self.batch_norm_2 = nn.BatchNorm2d(self.n_patches)
+            self.bottle_neck_conv_1 = nn.Conv2d(in_channels=self.n_patches, out_channels=n_channels, kernel_size=(1, 1))
+            self.bottle_neck_conv_2 = nn.Conv2d(in_channels=self.n_patches, out_channels=n_channels, kernel_size=(1, 1))
 
         # TODO should we try to use adaptive_avg_pool2d in the end, like the original code had?
 
     def forward(self, x):
-        embedding = self.patch_based_embedding(x)
-        scores = self.classifier(embedding)
+        if not self.add_negative_patches:
+            k_nearest_patches_mask = self.patch_based_embedding(x)
+            k_nearest_patches_mask_pooled = self.avg_pool(k_nearest_patches_mask)
+            k_nearest_patches_mask_normalized = self.batch_norm(k_nearest_patches_mask_pooled)
+            hidden_layer = self.bottle_neck_conv(k_nearest_patches_mask_normalized)
+        else:
+            k_nearest_patches_mask, k_nearest_negative_patches_mask = self.patch_based_embedding(x)
+
+            k_nearest_patches_mask_pooled = self.avg_pool(k_nearest_patches_mask)
+            k_nearest_negative_patches_mask_pooled = self.avg_pool(k_nearest_negative_patches_mask)
+
+            k_nearest_patches_mask_normalized = self.batch_norm_1(k_nearest_patches_mask_pooled)
+            k_nearest_negative_patches_mask_normalized = self.batch_norm_2(k_nearest_negative_patches_mask_pooled)
+
+            hidden_layer_1 = self.bottle_neck_conv_1(k_nearest_patches_mask_normalized)
+            hidden_layer_2 = self.bottle_neck_conv_2(k_nearest_negative_patches_mask_normalized)
+
+            hidden_layer = hidden_layer_1 + hidden_layer_2
+
+        hidden_layer_flat = self.flatten(hidden_layer)
+        scores = self.final_layer(hidden_layer_flat)
+
         return scores
 
 
@@ -78,22 +172,43 @@ class PatchBasedEmbedding(nn.Module):
     Calculating the k-nearest-neighbors is implemented as convolution with bias, as was done in
     The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods
     (https://arxiv.org/pdf/2101.07528.pdf)
-    Details can be found in the Appendix B (page 13).
+    Details can be found in Appendix B (page 13).
     """
 
     def __init__(self,
                  kernel_convolution: torch.Tensor,
                  bias_convolution: torch.Tensor,
-                 k_neighbors: int):
+                 k_neighbors: int,
+                 add_flipped_patches: bool,
+                 add_negative_patches: bool):
         super(PatchBasedEmbedding, self).__init__()
+
         self.kernel_convolution = nn.Parameter(kernel_convolution, requires_grad=False)
-        self.bias_convolution = nn.Parameter(bias_convolution, requires_grad=False)
+
+        # The bias will be added to a tensor of shape (N, n_patches, H, W) to reshaping it to (1, n_patches, 1, 1)
+        # will make the addition "broadcastable".
+        self.bias_convolution = nn.Parameter(bias_convolution.view(1, -1, 1, 1), requires_grad=False)
+
         self.k_neighbors = k_neighbors
+        self.add_flipped_patches = add_flipped_patches
+        self.add_negative_patches = add_negative_patches
 
     def forward(self, images):
-        squared_distances = F.conv2d(images, -1 * self.kernel_convolution, self.bias_convolution)
-        embedding = calculate_smaller_than_kth_value_mask(squared_distances, self.k_neighbors).float()
-        return embedding
+        conv_result_no_bias = F.conv2d(images, self.kernel_convolution)
+        squared_distances = -1 * conv_result_no_bias + self.bias_convolution
+
+        if self.add_negative_patches:
+            squared_distances_to_negative_patches = conv_result_no_bias + self.bias_convolution
+            k_nearest_negative_patches_mask = calculate_smaller_than_kth_value_mask(
+                squared_distances_to_negative_patches, self.k_neighbors).float()
+
+            # TODO try to concat the distances to positive & negative patches and then get k-nearest_neighbors...
+            # squared_distances = torch.cat((squared_distances, squared_distances_to_negative_patches), dim=1)
+
+        k_nearest_patches_mask = calculate_smaller_than_kth_value_mask(squared_distances, self.k_neighbors).float()
+
+        return k_nearest_patches_mask if not self.add_negative_patches else (k_nearest_patches_mask,
+                                                                             k_nearest_negative_patches_mask)
 
 
 def sample_random_patches(data_loader,
@@ -171,7 +286,7 @@ def visualize_image_patch_pair(image, patch, patch_x_start, patch_y_start):
     plt.show()
 
 
-def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, log_interval):
+def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, scheduler, log_interval):
     best_weights = copy.deepcopy(model.state_dict())
     best_accuracy = 0.0
 
@@ -213,6 +328,8 @@ def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, lo
         if epoch_test_accuracy > best_accuracy:
             best_accuracy = epoch_test_accuracy
             best_weights = copy.deepcopy(model.state_dict())
+
+        scheduler.step()
 
         epoch_time_elapsed = epoch_accumulator.get_time()
         total_time += epoch_time_elapsed
@@ -361,6 +478,9 @@ def main():
                                             bias_convolution=bias,
                                             k_neighbors=int(args.k_neighbors_fraction * args.n_patches),
                                             n_channels=args.n_channels,
+                                            add_flipped_patches=args.add_flipped_patches,
+                                            add_negative_patches=args.add_negative_patches,
+                                            use_batch_norm=args.use_batch_norm,
                                             use_avg_pool=args.use_avg_pool,
                                             pool_size=args.pool_size,
                                             pool_stride=args.pool_stride)
@@ -372,6 +492,7 @@ def main():
 
     optimizer = torch.optim.SGD(model.parameters(), args.learning_rate, args.momentum, weight_decay=args.weight_decay)
     criterion = torch.nn.CrossEntropyLoss().to(device)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[50, 75], gamma=0.1, verbose=True)
     augmented_dataloaders = get_dataloaders(args.batch_size,
                                             normalize_to_unit_gaussian=False,
                                             normalize_to_plus_minus_one=True,
@@ -380,7 +501,7 @@ def main():
                                             random_erasing=False,
                                             random_resized_crop=False)
 
-    train_model(model, augmented_dataloaders, args.epochs, device, criterion, optimizer, args.log_interval)
+    train_model(model, augmented_dataloaders, args.epochs, device, criterion, optimizer, scheduler, args.log_interval)
 
 
 def parse_args():
@@ -397,9 +518,9 @@ def parse_args():
     # Arguments defining the training-process
     parser.add_argument('--device', type=str, default='cpu', choices=['cpu'] + [f'cuda:{i}' for i in range(8)],
                         help=f'On which device to train')
-    parser.add_argument('--epochs', type=int, default=1500,
+    parser.add_argument('--epochs', type=int, default=80,
                         help=f'Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=64,
+    parser.add_argument('--batch_size', type=int, default=128,
                         help=f'Batch size')
     parser.add_argument('--learning_rate', type=float, default=0.003,
                         help=f'Learning-rate')
@@ -416,7 +537,7 @@ def parse_args():
                         help='If true, use whitening on the patches')
     parser.add_argument('--pool_size', type=int, default=5,
                         help=f'The size of the average-pooling layer after the patch-based-embedding')
-    parser.add_argument('--pool_stride', type=int, default=2,
+    parser.add_argument('--pool_stride', type=int, default=3,
                         help=f'The stride of the average-pooling layer after the patch-based-embedding')
     parser.add_argument('--k_neighbors_fraction', type=float, default=0.4,
                         help=f'which k to use in the k-nearest-neighbors, as a fraction of the total number of patches')
@@ -424,6 +545,12 @@ def parse_args():
                         help='If true, use whitening on the patches')
     parser.add_argument('--whitening_regularization_factor', type=float, default=0.001,
                         help=f'The regularization factor (a.k.a. lambda) of the whitening matrix')
+    parser.add_argument('--use_batch_norm', action='store_true',
+                        help=f'Whether to use batch normalization after the patch-based-embedding')
+    parser.add_argument('--add_negative_patches', action='store_true',
+                        help=f'Whether to use the negative patches as well (i.e. original patches multiplied by -1)')
+    parser.add_argument('--add_flipped_patches', action='store_true',
+                        help=f'Whether to use the horizontal flipped patches as well')
 
     # Arguments for logging the training process.
     parser.add_argument('--path', type=str, default='./experiments',
