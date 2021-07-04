@@ -229,7 +229,12 @@ def get_dataloaders(batch_size: int = 64,
         # For the different normalization values see:
         # https://discuss.pytorch.org/t/normalization-in-the-mnist-example/457/7
         if normalize_to_unit_gaussian:
-            normalization_values = [(0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)]
+            # These noramlization values are taken from https://github.com/kuangliu/pytorch-cifar/issues/19
+            # normalization_values = [(0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)]
+
+            # These noramlization values are taken from https://github.com/louity/patches
+            # and also https://stackoverflow.com/questions/50710493/cifar-10-meaningless-normalization-values
+            normalization_values = [(0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)]
         else:
             normalization_values = [(0.5, 0.5, 0.5), (0.5, 0.5, 0.5)]
         for t in ['train', 'test']:
@@ -244,8 +249,7 @@ def get_dataloaders(batch_size: int = 64,
     dataloaders = {t: torch.utils.data.DataLoader(datasets[t],
                                                   batch_size=batch_size,
                                                   shuffle=(t == 'train'),
-                                                  num_workers=0,
-                                                  drop_last=True)
+                                                  num_workers=2)
                    for t in ['train', 'test']}
 
     return dataloaders
