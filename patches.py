@@ -68,7 +68,7 @@ Bridge the gap between my implementation and theirs.
   - Twice (for positive / negative patches):
     + k-nearest-patches-mask
       2048 x 27 x 27
-    + AvgPool
+    + AvgPool(kernel_size=5, stride=3, ceil_mode=True)
       2048 x 9 x 9
     + BatchNorm
       2048 x 9 x 9
@@ -83,10 +83,11 @@ Bridge the gap between my implementation and theirs.
 
 * In the linear classifier experiments the AvgPool stride is 3 
   and in the 1-hidden-layer (i.e. ReLU in-between) it's 2. 
-* Use same learning-rate - 0.003 for |D|=2K and 0.001 for larger |D|.
-* Use and same learning-rate scheduler - decay by a factor of 0.1 
-  at epochs 100 and 150 (total training 175 epochs).
-* Use 128 batch-size and not 64
+* Use the same learning-rate and scehduler.
+* The data-loader they use for whitening / patches-extraction 
+  is images with values in [0,1] (the only transform is ToTensor).
+  The data-loader they use for training is unit-gaussian 
+  with random cropping and horizontal flipping.
 
 General improvements:
 * Make the dictionary more symmetric by horizontal flipping.
@@ -113,29 +114,42 @@ class ClassifierOnPatchBasedEmbedding(nn.Module):
                  use_batch_norm: bool,
                  use_avg_pool: bool,
                  pool_size: int,
-                 pool_stride: int):
+                 pool_stride: int,
+                 use_adaptive_avg_pool: bool,
+                 last_layer_is_conv: bool):
         super(ClassifierOnPatchBasedEmbedding, self).__init__()
 
         kernel_size = kernel_convolution.shape[-1]
         embedding_spatial_size = CIFAR10_IMAGE_SIZE - kernel_size + 1
         pooled_embedding_dim = ceil((embedding_spatial_size - pool_size) / pool_stride + 1)
         conv_input_spatial_size = pooled_embedding_dim if use_avg_pool else embedding_spatial_size
+        if use_adaptive_avg_pool:
+            conv_input_spatial_size = 6
         intermediate_n_features = n_channels * (conv_input_spatial_size ** 2)
 
+        self.add_flipped_patches = add_flipped_patches
         self.add_negative_patches = add_negative_patches
+        self.use_avg_pool = use_avg_pool
+        self.use_batch_norm = use_batch_norm
+        self.use_adaptive_avg_pool = use_adaptive_avg_pool
+        self.last_layer_is_conv = last_layer_is_conv
         self.n_patches = kernel_convolution.shape[0]
         self.patch_based_embedding = PatchBasedEmbedding(kernel_convolution, bias_convolution, k_neighbors,
                                                          add_flipped_patches, add_negative_patches)
         self.avg_pool = nn.AvgPool2d(pool_size, pool_stride, ceil_mode=True) if use_avg_pool else None
         self.flatten = nn.Flatten()
-        self.final_layer = nn.Linear(in_features=intermediate_n_features, out_features=N_CLASSES)
-
+        self.adaptive_avg_pool = torch.nn.AdaptiveAvgPool2d(output_size=6) if use_adaptive_avg_pool else None
+        if not last_layer_is_conv:
+            self.final_layer = nn.Linear(in_features=intermediate_n_features, out_features=N_CLASSES)
+        else:
+            self.final_layer = nn.Conv2d(in_channels=n_channels, out_channels=N_CLASSES, kernel_size=(6, 6))
+        
         if not self.add_negative_patches:
             self.batch_norm = nn.BatchNorm2d(self.n_patches) if use_batch_norm else None
             self.bottle_neck_conv = nn.Conv2d(in_channels=self.n_patches, out_channels=n_channels, kernel_size=(1, 1))
         else:
-            self.batch_norm_1 = nn.BatchNorm2d(self.n_patches)
-            self.batch_norm_2 = nn.BatchNorm2d(self.n_patches)
+            self.batch_norm_1 = nn.BatchNorm2d(self.n_patches) if use_batch_norm else None
+            self.batch_norm_2 = nn.BatchNorm2d(self.n_patches) if use_batch_norm else None
             self.bottle_neck_conv_1 = nn.Conv2d(in_channels=self.n_patches, out_channels=n_channels, kernel_size=(1, 1))
             self.bottle_neck_conv_2 = nn.Conv2d(in_channels=self.n_patches, out_channels=n_channels, kernel_size=(1, 1))
 
@@ -143,26 +157,41 @@ class ClassifierOnPatchBasedEmbedding(nn.Module):
 
     def forward(self, x):
         if not self.add_negative_patches:
-            k_nearest_patches_mask = self.patch_based_embedding(x)
-            k_nearest_patches_mask_pooled = self.avg_pool(k_nearest_patches_mask)
-            k_nearest_patches_mask_normalized = self.batch_norm(k_nearest_patches_mask_pooled)
-            hidden_layer = self.bottle_neck_conv(k_nearest_patches_mask_normalized)
+            embedding = self.patch_based_embedding(x)
+            if self.use_avg_pool:
+                embedding = self.avg_pool(embedding)
+            if self.use_adaptive_avg_pool:
+                embedding = self.adaptive_avg_pool(embedding)
+            if self.use_batch_norm:
+                embedding = self.batch_norm(embedding)
+            embedding = self.bottle_neck_conv(embedding)
         else:
-            k_nearest_patches_mask, k_nearest_negative_patches_mask = self.patch_based_embedding(x)
+            embedding1, embedding2 = self.patch_based_embedding(x)
 
-            k_nearest_patches_mask_pooled = self.avg_pool(k_nearest_patches_mask)
-            k_nearest_negative_patches_mask_pooled = self.avg_pool(k_nearest_negative_patches_mask)
+            if self.use_avg_pool:
+                embedding1 = self.avg_pool(embedding1)
+                embedding2 = self.avg_pool(embedding2)
 
-            k_nearest_patches_mask_normalized = self.batch_norm_1(k_nearest_patches_mask_pooled)
-            k_nearest_negative_patches_mask_normalized = self.batch_norm_2(k_nearest_negative_patches_mask_pooled)
+            if self.use_adaptive_avg_pool:
+                embedding1 = self.adaptive_avg_pool(embedding1)
+                embedding2 = self.adaptive_avg_pool(embedding2)
 
-            hidden_layer_1 = self.bottle_neck_conv_1(k_nearest_patches_mask_normalized)
-            hidden_layer_2 = self.bottle_neck_conv_2(k_nearest_negative_patches_mask_normalized)
+            if self.use_batch_norm:
+                embedding1 = self.batch_norm_1(embedding1)
+                embedding2 = self.batch_norm_2(embedding2)
 
-            hidden_layer = hidden_layer_1 + hidden_layer_2
+            embedding1 = self.bottle_neck_conv_1(embedding1)
+            embedding2 = self.bottle_neck_conv_2(embedding2)
 
-        hidden_layer_flat = self.flatten(hidden_layer)
-        scores = self.final_layer(hidden_layer_flat)
+            embedding = embedding1 + embedding2
+
+        if not self.last_layer_is_conv:
+            embedding_flat = self.flatten(embedding)
+            scores = self.final_layer(embedding_flat)
+        else:
+            scores = self.final_layer(embedding)
+            scores = torch.squeeze(scores, dim=3)
+            scores = torch.squeeze(scores, dim=2)
 
         return scores
 
@@ -296,6 +325,7 @@ def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, sc
     epoch_accumulator = Accumulator()
 
     for epoch in range(num_epochs):
+        # model_state = copy.deepcopy(model.state_dict())
         model.train()
         epoch_accumulator.reset()
 
@@ -316,10 +346,21 @@ def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, sc
 
             if training_step % log_interval == 0:
                 wandb.log(data=interval_accumulator.get_dict(prefix='train'), step=training_step)
-                logger.info(f'{training_step=}'
-                            f'loss={interval_accumulator.get_mean_loss():.4f} '
-                            f'acc={interval_accumulator.get_accuracy():.2f}%')
+                # logger.info(f'{training_step=:10d} '
+                #             f'loss={interval_accumulator.get_mean_loss():.4f} '
+                #             f'acc={interval_accumulator.get_accuracy():.2f}%')
                 interval_accumulator.reset()
+
+        # # For debugging purposes - verify that the weights of the model changed.
+        # new_model_state = copy.deepcopy(model.state_dict())
+        # for weight_name in new_model_state.keys():
+        #     old_weight = model_state[weight_name]
+        #     new_weight = new_model_state[weight_name]
+        #     if torch.allclose(old_weight, new_weight):
+        #         logger.warning(f'Weight \'{weight_name}\' of shape {list(new_weight.size())} did not change.')
+        #     else:
+        #         logger.debug(f'Weight \'{weight_name}\' of shape {list(new_weight.size())} changed.')
+        # model_state = copy.deepcopy(new_model_state)
 
         epoch_test_loss, epoch_test_accuracy = evaluate_model(model, criterion, dataloaders['test'], device)
         wandb.log(data={'test_accuracy': epoch_test_accuracy, 'test_loss': epoch_test_loss}, step=training_step)
@@ -361,14 +402,14 @@ def calc_mean_patch(dataloader, patch_size, agg_func: Callable):
     total_size = 0
     mean = None
     for inputs, _ in dataloader:
-        if total_size > 200:   # Might be useful for debugging purposes...
-            break
+        # if total_size > 200:   # Might be useful for debugging purposes...
+        #     break
 
         # Unfold the input batch to its patches - shape (N, C*H*W, M) where M is the number of patches per image.
         patches = F.unfold(inputs, patch_size)
 
         # Replace the batch axis with the patch axis, to obtain shape (C*H*W, N, M)
-        patches = patches.swapaxes(0, 1).contiguous()   # TODO is .contiguous() needed ?
+        patches = patches.transpose(0, 1).contiguous()   # TODO is .contiguous() needed ?
 
         # Flatten the batch and n_patches axes, to obtain shape (C*H*W, N*M)
         patches = torch.flatten(patches, start_dim=1).double()
@@ -430,7 +471,7 @@ def get_conv_kernel_and_bias(batch_size, n_patches, patch_size,
                              whitening_regularization_factor: float = 0.):
     clean_dataloaders = get_dataloaders(batch_size,
                                         normalize_to_unit_gaussian=False,
-                                        normalize_to_plus_minus_one=True,
+                                        normalize_to_plus_minus_one=False,
                                         random_crop=False,
                                         random_horizontal_flip=False,
                                         random_erasing=False,
@@ -483,7 +524,9 @@ def main():
                                             use_batch_norm=args.use_batch_norm,
                                             use_avg_pool=args.use_avg_pool,
                                             pool_size=args.pool_size,
-                                            pool_stride=args.pool_stride)
+                                            pool_stride=args.pool_stride,
+                                            use_adaptive_avg_pool=args.use_adaptive_avg_pool,
+                                            last_layer_is_conv=args.last_layer_is_conv)
     device = torch.device(args.device)
     model = model.to(device)
 
@@ -492,14 +535,14 @@ def main():
 
     optimizer = torch.optim.SGD(model.parameters(), args.learning_rate, args.momentum, weight_decay=args.weight_decay)
     criterion = torch.nn.CrossEntropyLoss().to(device)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[50, 75], gamma=0.1, verbose=True)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[50, 75], gamma=0.1)
     augmented_dataloaders = get_dataloaders(args.batch_size,
-                                            normalize_to_unit_gaussian=False,
-                                            normalize_to_plus_minus_one=True,
-                                            random_crop=False,  # TODO change to True
-                                            random_horizontal_flip=False,
-                                            random_erasing=False,
-                                            random_resized_crop=False)
+                                            normalize_to_unit_gaussian=args.enable_normalization_to_unit_gaussian,
+                                            normalize_to_plus_minus_one=not args.disable_normalization_to_plus_minus_one,
+                                            random_crop=not args.disable_random_crop,  # TODO change to True
+                                            random_horizontal_flip=not args.disable_random_horizontal_flip,
+                                            random_erasing=args.enable_random_erasing,
+                                            random_resized_crop=args.enable_random_resized_crop)
 
     train_model(model, augmented_dataloaders, args.epochs, device, criterion, optimizer, scheduler, args.log_interval)
 
@@ -529,7 +572,7 @@ def parse_args():
     parser.add_argument('--weight_decay', type=float, default=0,
                         help=f'Weight decay')
 
-    parser.add_argument('--n_patches', type=int, default=10,
+    parser.add_argument('--n_patches', type=int, default=2048,
                         help=f'The number of patches')
     parser.add_argument('--patch_size', type=int, default=6,
                         help=f'The size of the patches')
@@ -550,13 +593,17 @@ def parse_args():
     parser.add_argument('--add_negative_patches', action='store_true',
                         help=f'Whether to use the negative patches as well (i.e. original patches multiplied by -1)')
     parser.add_argument('--add_flipped_patches', action='store_true',
-                        help=f'Whether to use the horizontal flipped patches as well')
+                        help=f'Whether to use the negative patches as well (i.e. original patches multiplied by -1)')
+    parser.add_argument('--use_adaptive_avg_pool', action='store_true',
+                        help=f'Whether to use the adaptive avg-pooling on the embedding output to get spatial size 6')
+    parser.add_argument('--last_layer_is_conv', action='store_true',
+                        help=f'Whether to use conv layer instead of linear layer as the last layer which predicts the scores')
 
     # Arguments for logging the training process.
     parser.add_argument('--path', type=str, default='./experiments',
                         help=f'Output path for the experiment - '
                              f'a sub-directory named with the data and time will be created within')
-    parser.add_argument('--log_interval', type=int, default=3,
+    parser.add_argument('--log_interval', type=int, default=100,
                         help=f'How many iterations between each training log')
 
     # Arguments for the data augmentations.
