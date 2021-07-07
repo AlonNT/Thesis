@@ -13,6 +13,8 @@ import os
 from functools import partial
 from math import ceil
 
+from torchvision.transforms.functional import hflip
+
 import wandb
 
 import numpy as np
@@ -83,7 +85,7 @@ Bridge the gap between my implementation and theirs.
 
 * In the linear classifier experiments the AvgPool stride is 3 
   and in the 1-hidden-layer (i.e. ReLU in-between) it's 2. 
-* Use the same learning-rate and scehduler.
+* Use the same learning-rate and scheduler.
 * The data-loader they use for whitening / patches-extraction 
   is images with values in [0,1] (the only transform is ToTensor).
   The data-loader they use for training is unit-gaussian 
@@ -96,6 +98,10 @@ General improvements:
   + Iteratively improve the patches dictionary - random at the beginning 
     and then keep only the most "active" ones.
 
+Experiments:
+* Remove the AdaptiveAvgPool which reduce spatial size from 9x9 to 6x6.
+* When adding negative batches simply concat and don't duplicate all layers.
+* Use ReLU after the bottle-neck layer (conv 1x1) to make it non-linear. They reached accuracy 88.53% at epoch 140/174.
 """
 
 
@@ -110,13 +116,15 @@ class ClassifierOnPatchBasedEmbedding(nn.Module):
                  k_neighbors: int,
                  n_channels: int,
                  add_flipped_patches: bool,
-                 add_negative_patches: bool,
+                 add_negative_patches_as_network_branch: bool,
+                 add_negative_patches_as_more_patches: bool,
                  use_batch_norm: bool,
                  use_avg_pool: bool,
                  pool_size: int,
                  pool_stride: int,
                  use_adaptive_avg_pool: bool,
-                 last_layer_is_conv: bool):
+                 use_relu_after_bottleneck: bool,
+                 add_flipped_patches_as_more_patches: bool):
         super(ClassifierOnPatchBasedEmbedding, self).__init__()
 
         kernel_size = kernel_convolution.shape[-1]
@@ -128,35 +136,43 @@ class ClassifierOnPatchBasedEmbedding(nn.Module):
         intermediate_n_features = n_channels * (conv_input_spatial_size ** 2)
 
         self.add_flipped_patches = add_flipped_patches
-        self.add_negative_patches = add_negative_patches
+        self.add_negative_patches_as_network_branch = add_negative_patches_as_network_branch
         self.use_avg_pool = use_avg_pool
         self.use_batch_norm = use_batch_norm
         self.use_adaptive_avg_pool = use_adaptive_avg_pool
-        self.last_layer_is_conv = last_layer_is_conv
+        self.use_relu_after_bottleneck = use_relu_after_bottleneck
+        self.add_flipped_patches_as_more_patches = add_flipped_patches_as_more_patches
         self.n_patches = kernel_convolution.shape[0]
-        self.patch_based_embedding = PatchBasedEmbedding(kernel_convolution, bias_convolution, k_neighbors,
-                                                         add_flipped_patches, add_negative_patches)
+        self.embedding_n_channels = (2 ** (int(add_negative_patches_as_more_patches) +
+                                           int(add_flipped_patches_as_more_patches))) * self.n_patches
+
+        self.patch_based_embedding = PatchBasedEmbedding(
+            kernel_convolution, bias_convolution, k_neighbors, add_flipped_patches,
+            add_negative_patches_as_network_branch, add_negative_patches_as_more_patches,
+            add_flipped_patches_as_more_patches)
         self.avg_pool = nn.AvgPool2d(pool_size, pool_stride, ceil_mode=True) if use_avg_pool else None
-        self.flatten = nn.Flatten()
         self.adaptive_avg_pool = torch.nn.AdaptiveAvgPool2d(output_size=6) if use_adaptive_avg_pool else None
-        if not last_layer_is_conv:
-            self.final_layer = nn.Linear(in_features=intermediate_n_features, out_features=N_CLASSES)
-        else:
-            self.final_layer = nn.Conv2d(in_channels=n_channels, out_channels=N_CLASSES, kernel_size=(6, 6))
-        
-        if not self.add_negative_patches:
+        self.flatten = nn.Flatten()
+        self.bottleneck_relu = nn.ReLU() if self.use_relu_after_bottleneck else None
+        self.final_layer = nn.Linear(in_features=intermediate_n_features, out_features=N_CLASSES)
+
+        if not self.add_negative_patches_as_network_branch:
             self.batch_norm = nn.BatchNorm2d(self.n_patches) if use_batch_norm else None
-            self.bottle_neck_conv = nn.Conv2d(in_channels=self.n_patches, out_channels=n_channels, kernel_size=(1, 1))
+            self.bottle_neck_conv = nn.Conv2d(in_channels=self.embedding_n_channels,
+                                              out_channels=n_channels,
+                                              kernel_size=(1, 1))
         else:
             self.batch_norm_1 = nn.BatchNorm2d(self.n_patches) if use_batch_norm else None
             self.batch_norm_2 = nn.BatchNorm2d(self.n_patches) if use_batch_norm else None
-            self.bottle_neck_conv_1 = nn.Conv2d(in_channels=self.n_patches, out_channels=n_channels, kernel_size=(1, 1))
-            self.bottle_neck_conv_2 = nn.Conv2d(in_channels=self.n_patches, out_channels=n_channels, kernel_size=(1, 1))
-
-        # TODO should we try to use adaptive_avg_pool2d in the end, like the original code had?
+            self.bottle_neck_conv_1 = nn.Conv2d(in_channels=self.n_patches,
+                                                out_channels=n_channels,
+                                                kernel_size=(1, 1))
+            self.bottle_neck_conv_2 = nn.Conv2d(in_channels=self.n_patches,
+                                                out_channels=n_channels,
+                                                kernel_size=(1, 1))
 
     def forward(self, x):
-        if not self.add_negative_patches:
+        if not self.add_negative_patches_as_network_branch:
             embedding = self.patch_based_embedding(x)
             if self.use_avg_pool:
                 embedding = self.avg_pool(embedding)
@@ -183,15 +199,18 @@ class ClassifierOnPatchBasedEmbedding(nn.Module):
             embedding1 = self.bottle_neck_conv_1(embedding1)
             embedding2 = self.bottle_neck_conv_2(embedding2)
 
+            # TODO when add_negative_patches_as_network_branch is True, try to perform ReLU on each separate embedding
+            # if self.bottleneck_relu:
+            #     embedding1 = self.bottleneck_relu(embedding1)
+            #     embedding2 = self.bottleneck_relu(embedding2)
+
             embedding = embedding1 + embedding2
 
-        if not self.last_layer_is_conv:
-            embedding_flat = self.flatten(embedding)
-            scores = self.final_layer(embedding_flat)
-        else:
-            scores = self.final_layer(embedding)
-            scores = torch.squeeze(scores, dim=3)
-            scores = torch.squeeze(scores, dim=2)
+        if self.bottleneck_relu:
+            embedding = self.bottleneck_relu(embedding)
+
+        embedding_flat = self.flatten(embedding)
+        scores = self.final_layer(embedding_flat)
 
         return scores
 
@@ -209,7 +228,9 @@ class PatchBasedEmbedding(nn.Module):
                  bias_convolution: torch.Tensor,
                  k_neighbors: int,
                  add_flipped_patches: bool,
-                 add_negative_patches: bool):
+                 add_negative_patches_as_network_branch: bool,
+                 add_negative_patches_as_more_patches: bool,
+                 add_flipped_patches_as_more_patches: bool):
         super(PatchBasedEmbedding, self).__init__()
 
         self.kernel_convolution = nn.Parameter(kernel_convolution, requires_grad=False)
@@ -220,24 +241,50 @@ class PatchBasedEmbedding(nn.Module):
 
         self.k_neighbors = k_neighbors
         self.add_flipped_patches = add_flipped_patches
-        self.add_negative_patches = add_negative_patches
+        self.add_negative_patches_as_network_branch = add_negative_patches_as_network_branch
+        self.add_negative_patches_as_more_patches = add_negative_patches_as_more_patches
+        self.add_flipped_patches_as_more_patches = add_flipped_patches_as_more_patches
+
+        if self.add_flipped_patches_as_more_patches:
+            self.flipped_kernel = nn.Parameter(hflip(self.kernel_convolution), requires_grad=False)
+        else:
+            self.flipped_kernel = None
 
     def forward(self, images):
         conv_result_no_bias = F.conv2d(images, self.kernel_convolution)
         squared_distances = -1 * conv_result_no_bias + self.bias_convolution
 
-        if self.add_negative_patches:
-            squared_distances_to_negative_patches = conv_result_no_bias + self.bias_convolution
-            k_nearest_negative_patches_mask = calculate_smaller_than_kth_value_mask(
-                squared_distances_to_negative_patches, self.k_neighbors).float()
+        calc_negative_patches = self.add_negative_patches_as_network_branch or self.add_negative_patches_as_more_patches
+        squared_distances_to_negative_patches = (conv_result_no_bias + self.bias_convolution if calc_negative_patches
+                                                 else None)
 
-            # TODO try to concat the distances to positive & negative patches and then get k-nearest_neighbors...
-            # squared_distances = torch.cat((squared_distances, squared_distances_to_negative_patches), dim=1)
+        all_squared_distances = [squared_distances]
 
-        k_nearest_patches_mask = calculate_smaller_than_kth_value_mask(squared_distances, self.k_neighbors).float()
+        if self.add_flipped_patches_as_more_patches:
+            conv_result_to_flipped_kernel_no_bias = F.conv2d(images, self.flipped_kernel)
+            squared_distances_to_flipped_patches = -1 * conv_result_to_flipped_kernel_no_bias + self.bias_convolution
+            all_squared_distances.append(squared_distances_to_flipped_patches)
 
-        return k_nearest_patches_mask if not self.add_negative_patches else (k_nearest_patches_mask,
-                                                                             k_nearest_negative_patches_mask)
+        if self.add_negative_patches_as_more_patches:
+            all_squared_distances.append(squared_distances_to_negative_patches)
+            if self.add_flipped_patches_as_more_patches:
+                squared_distances_to_flipped_negative_patches = (conv_result_to_flipped_kernel_no_bias +
+                                                                 self.bias_convolution)
+                all_squared_distances.append(squared_distances_to_flipped_negative_patches)
+
+        if self.add_flipped_patches_as_more_patches or self.add_negative_patches_as_more_patches:
+            squared_distances_to_all_patches = torch.cat(all_squared_distances, dim=1)
+            k_nearest_patches_mask = calculate_smaller_than_kth_value_mask(squared_distances_to_all_patches,
+                                                                           self.k_neighbors).float()
+            return k_nearest_patches_mask
+        else:
+            k_nearest_patches_mask = calculate_smaller_than_kth_value_mask(squared_distances, self.k_neighbors).float()
+            if self.add_negative_patches_as_network_branch:
+                k_nearest_negative_patches_mask = calculate_smaller_than_kth_value_mask(
+                    squared_distances_to_negative_patches, self.k_neighbors).float()
+                return k_nearest_patches_mask, k_nearest_negative_patches_mask
+            else:
+                return k_nearest_patches_mask
 
 
 def sample_random_patches(data_loader,
@@ -409,7 +456,7 @@ def calc_mean_patch(dataloader, patch_size, agg_func: Callable):
         patches = F.unfold(inputs, patch_size)
 
         # Replace the batch axis with the patch axis, to obtain shape (C*H*W, N, M)
-        patches = patches.transpose(0, 1).contiguous()   # TODO is .contiguous() needed ?
+        patches = patches.transpose(0, 1).contiguous()  # TODO is .contiguous() needed ?
 
         # Flatten the batch and n_patches axes, to obtain shape (C*H*W, N*M)
         patches = torch.flatten(patches, start_dim=1).double()
@@ -515,18 +562,18 @@ def main():
 
     kernel, bias = get_conv_kernel_and_bias(args.batch_size, args.n_patches, args.patch_size,
                                             args.use_whitening, args.whitening_regularization_factor)
-    model = ClassifierOnPatchBasedEmbedding(kernel_convolution=kernel,
-                                            bias_convolution=bias,
-                                            k_neighbors=int(args.k_neighbors_fraction * args.n_patches),
-                                            n_channels=args.n_channels,
-                                            add_flipped_patches=args.add_flipped_patches,
-                                            add_negative_patches=args.add_negative_patches,
-                                            use_batch_norm=args.use_batch_norm,
-                                            use_avg_pool=args.use_avg_pool,
-                                            pool_size=args.pool_size,
-                                            pool_stride=args.pool_stride,
-                                            use_adaptive_avg_pool=args.use_adaptive_avg_pool,
-                                            last_layer_is_conv=args.last_layer_is_conv)
+    model = ClassifierOnPatchBasedEmbedding(
+        kernel_convolution=kernel, bias_convolution=bias,
+        k_neighbors=int(args.k_neighbors_fraction * args.n_patches),
+        n_channels=args.n_channels, add_flipped_patches=args.add_flipped_patches,
+        add_negative_patches_as_network_branch=args.add_negative_patches_as_network_branch,
+        add_negative_patches_as_more_patches=args.add_negative_patches_as_more_patches,
+        use_batch_norm=args.use_batch_norm,
+        use_avg_pool=args.use_avg_pool, pool_size=args.pool_size,
+        pool_stride=args.pool_stride,
+        use_adaptive_avg_pool=args.use_adaptive_avg_pool,
+        use_relu_after_bottleneck=args.use_relu_after_bottleneck
+    )
     device = torch.device(args.device)
     model = model.to(device)
 
@@ -590,14 +637,19 @@ def parse_args():
                         help=f'The regularization factor (a.k.a. lambda) of the whitening matrix')
     parser.add_argument('--use_batch_norm', action='store_true',
                         help=f'Whether to use batch normalization after the patch-based-embedding')
-    parser.add_argument('--add_negative_patches', action='store_true',
-                        help=f'Whether to use the negative patches as well (i.e. original patches multiplied by -1)')
+    parser.add_argument('--use_relu_after_bottleneck', action='store_true',
+                        help=f'Whether to use ReLU after the bottleneck layer')
+    parser.add_argument('--add_negative_patches_as_network_branch', action='store_true',
+                        help=f'Whether to use the negative patches as well (i.e. original patches multiplied by -1). '
+                             f'These patches are being used as a separate network branch, as the original paper.')
+    parser.add_argument('--add_negative_patches_as_more_patches', action='store_true',
+                        help=f'Whether to use the negative patches as well (i.e. original patches multiplied by -1). '
+                             f'These patches are being concatenated to the original patches so the dictionary size is '
+                             f'multiplied by two')
     parser.add_argument('--add_flipped_patches', action='store_true',
                         help=f'Whether to use the negative patches as well (i.e. original patches multiplied by -1)')
     parser.add_argument('--use_adaptive_avg_pool', action='store_true',
                         help=f'Whether to use the adaptive avg-pooling on the embedding output to get spatial size 6')
-    parser.add_argument('--last_layer_is_conv', action='store_true',
-                        help=f'Whether to use conv layer instead of linear layer as the last layer which predicts the scores')
 
     # Arguments for logging the training process.
     parser.add_argument('--path', type=str, default='./experiments',
