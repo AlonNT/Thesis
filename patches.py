@@ -642,11 +642,11 @@ def main():
 
     model = train_patch_based_model(args)
 
-    model.eval()
-    model.prediction_mode_off()
-    # TODO remove gradients from the model computational-graph since they are no longer needed.
-
-    model2 = train_patch_based_model(args, existing_model=model)
+    if args.depth == 2:
+        model.eval()
+        model.prediction_mode_off()
+        # TODO remove gradients from the model computational-graph since they are no longer needed.
+        model2 = train_patch_based_model(args, existing_model=model)
 
 
 def parse_args():
@@ -679,6 +679,8 @@ def parse_args():
     parser.add_argument('--weight_decay', type=float, default=0,
                         help=f'Weight decay')
 
+    parser.add_argument('--depth', type=int, default=1, choices=[1, 2],
+                        help=f'How many modules to stack on top of one another')
     parser.add_argument('--n_patches', type=int, default=2048,
                         help=f'The number of patches')
     parser.add_argument('--patch_size', type=int, default=6,
