@@ -370,14 +370,15 @@ def visualize_image_patch_pair(image, patch, patch_x_start, patch_y_start):
     ax.imshow(np.transpose(patch, axes=(1, 2, 0)))
     plt.show()
 
+training_step = 0
 
 def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, scheduler, log_interval,
                 inputs_preprocessing_function=None):
     best_weights = copy.deepcopy(model.state_dict())
     best_accuracy = 0.0
 
+    global training_step
     total_time = 0
-    training_step = 0
     interval_accumulator = Accumulator()
     epoch_accumulator = Accumulator()
 
@@ -428,7 +429,7 @@ def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, sc
         #         logger.debug(f'Weight \'{weight_name}\' of shape {list(new_weight.size())} changed.')
         # model_state = copy.deepcopy(new_model_state)
 
-        epoch_test_loss, epoch_test_accuracy = evaluate_model(model, criterion, dataloaders['test'], device)
+        epoch_test_loss, epoch_test_accuracy = evaluate_model(model, criterion, dataloaders['test'], device, inputs_preprocessing_function)
         # epoch_test_loss, epoch_test_accuracy = 0.5, 90  # TODO temporary
         wandb.log(data={'test_accuracy': epoch_test_accuracy, 'test_loss': epoch_test_loss}, step=training_step)
 

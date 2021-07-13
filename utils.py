@@ -351,7 +351,7 @@ def evaluate_local_model(model, criterion, dataloader, device, training_step=Non
     return final_accumulator.get_mean_loss(), final_accumulator.get_accuracy()
 
 
-def evaluate_model(model, criterion, dataloader, device):
+def evaluate_model(model, criterion, dataloader, device, inputs_preprocessing_function=None):
     """
     Evaluate the given model on the test set.
 
@@ -371,6 +371,8 @@ def evaluate_model(model, criterion, dataloader, device):
         labels = labels.to(device)
 
         with torch.no_grad():
+            if inputs_preprocessing_function is not None:
+                inputs = inputs_preprocessing_function(inputs)
             result = model(inputs)
 
             # In DGL the model forward function also return the inputs representation
