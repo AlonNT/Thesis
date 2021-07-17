@@ -1,0 +1,10 @@
+opt:
+  epochs: 2
+  learning_rate_decay_steps: [1]
+arch:
+  n_channels: 128
+  pool_size: 5
+  pool_stride: 3
+  conv_kernel_size: 1
+  use_relu_after_bottleneck: True
+  n_patches: 256

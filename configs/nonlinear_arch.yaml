@@ -1,0 +1,9 @@
+opt:
+  epochs: 175
+  learning_rate_decay_steps: [100, 150]
+arch:
+  n_channels: 2048
+  pool_size: 3
+  pool_stride: 2
+  conv_kernel_size: 3
+  use_relu_after_bottleneck: True
