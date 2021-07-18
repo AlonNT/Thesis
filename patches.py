@@ -619,9 +619,8 @@ def main():
     configure_logger(args.env.path)
 
     logger.info(f'Starting to train patch-based-classifier with the following arguments:')
-    for arg_name, value in args.flattened_dict():
+    for arg_name, value in args.flattened_dict().items():
         logger.info(f'{f"{arg_name} ":-<50} {value}')
-
     model = train_patch_based_model(args)
 
     if args.depth == 2:

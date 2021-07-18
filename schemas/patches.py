@@ -51,10 +51,12 @@ class OptimizationArgs(ImmutableArgs):
     @validator('learning_rate_decay_steps', each_item=True)
     def validate_learning_rate_decay_steps_below_epochs(cls, v, values):
         assert v < values['epochs'], "Each decay step must be lower than the total number of epoch."
+        return v
 
     @validator('learning_rate_decay_steps')
     def validate_learning_rate_decay_steps_are_ascending(cls, v):
         assert all(v[i] <= v[i+1] for i in range(len(v)-1)), "Decay steps should be ascending."
+        return v
 
 
 class ArchitectureArgs(ImmutableArgs):
@@ -138,11 +140,12 @@ class EnvironmentArgs(ImmutableArgs):
         out_dir.mkdir(exist_ok=True)  # exist_ok because this validator is being called multiple times (I think)
         return out_dir
 
-    @validator('device', )
+    @validator('device')
     def validate_device_exists(cls, v):
         if v.startswith('cuda:'):
             assert torch.cuda.is_available(), f"CUDA is not available, so can't use device {v}"
             assert int(v[-1]) < torch.cuda.device_count(), f"GPU index {v[-1]} is higher than the number of GPUS."
+        return v
 
 
 class DataArgs(ImmutableArgs):
