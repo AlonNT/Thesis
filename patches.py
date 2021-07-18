@@ -12,6 +12,7 @@ import copy
 from functools import partial
 from math import ceil
 
+import yaml
 from torchvision.transforms.functional import hflip
 
 import wandb
@@ -28,6 +29,7 @@ from typing import Callable, Optional, Tuple
 from datetime import timedelta
 
 from consts import CIFAR10_IMAGE_SIZE, N_CLASSES
+from schemas.patches import Args, ArchitectureArgs
 from utils import (configure_logger,
                    create_out_dir,
                    get_dataloaders,
@@ -109,65 +111,45 @@ def calculate_smaller_than_kth_value_mask(x: torch.Tensor, k: int) -> torch.Tens
 
 class ClassifierOnPatchBasedEmbedding(nn.Module):
     def __init__(self,
+                 args: ArchitectureArgs,
                  kernel_convolution: torch.Tensor,
                  bias_convolution: torch.Tensor,
-                 k_neighbors: int,
-                 n_channels: int,
-                 add_flipped_patches: bool,
-                 add_negative_patches_as_network_branch: bool,
-                 add_negative_patches_as_more_patches: bool,
-                 use_batch_norm: bool,
-                 conv_kernel_size: int,
-                 use_avg_pool: bool,
-                 pool_size: int,
-                 pool_stride: int,
-                 use_adaptive_avg_pool: bool,
-                 use_relu_after_bottleneck: bool,
                  input_image_spatial_size: int = CIFAR10_IMAGE_SIZE):
         super(ClassifierOnPatchBasedEmbedding, self).__init__()
 
-        self.add_flipped_patches = add_flipped_patches
-        self.add_negative_patches_as_network_branch = add_negative_patches_as_network_branch
-        self.use_avg_pool = use_avg_pool
-        self.use_batch_norm = use_batch_norm
-        self.use_adaptive_avg_pool = use_adaptive_avg_pool
-        self.use_relu_after_bottleneck = use_relu_after_bottleneck
-        self.n_patches = kernel_convolution.shape[0]
-        self.embedding_n_channels = (2 ** (int(add_negative_patches_as_more_patches) +
-                                           int(add_flipped_patches))) * self.n_patches
+        self.args = args
+        self.embedding_n_channels = (2 ** (int(args.add_negative_patches_as_more_patches) +
+                                           int(args.add_flipped_patches))) * args.n_patches
 
-        kernel_size = kernel_convolution.shape[-1]
-        embedding_spatial_size = input_image_spatial_size - kernel_size + 1
-        pooled_embedding_dim = ceil((embedding_spatial_size - pool_size) / pool_stride + 1)
-        conv_input_spatial_size = pooled_embedding_dim if use_avg_pool else embedding_spatial_size
-        if use_adaptive_avg_pool:
+        embedding_spatial_size = input_image_spatial_size - args.patch_size + 1
+        pooled_embedding_dim = ceil((embedding_spatial_size - args.pool_size) / args.pool_stride + 1)
+        conv_input_spatial_size = pooled_embedding_dim if args.use_avg_pool else embedding_spatial_size
+        if args.use_adaptive_avg_pool:
             conv_input_spatial_size = 6
-        conv_output_spatial_size = conv_input_spatial_size - conv_kernel_size + 1
-        intermediate_n_features = n_channels * (conv_output_spatial_size ** 2)
+        conv_output_spatial_size = conv_input_spatial_size - args.conv_kernel_size + 1
+        intermediate_n_features = args.n_channels * (conv_output_spatial_size ** 2)
 
-        self.patch_based_embedding = PatchBasedEmbedding(
-            kernel_convolution, bias_convolution, k_neighbors, add_flipped_patches,
-            add_negative_patches_as_network_branch, add_negative_patches_as_more_patches)
-        self.avg_pool = nn.AvgPool2d(pool_size, pool_stride, ceil_mode=True) if use_avg_pool else None
-        self.adaptive_avg_pool = torch.nn.AdaptiveAvgPool2d(output_size=6) if use_adaptive_avg_pool else None
+        self.patch_based_embedding = PatchBasedEmbedding(args, kernel_convolution, bias_convolution)
+        self.avg_pool = nn.AvgPool2d(args.pool_size, args.pool_stride, ceil_mode=True) if args.use_avg_pool else None
+        self.adaptive_avg_pool = torch.nn.AdaptiveAvgPool2d(output_size=6) if args.use_adaptive_avg_pool else None
         self.flatten = nn.Flatten()
-        self.bottleneck_relu = nn.ReLU() if self.use_relu_after_bottleneck else None
+        self.bottleneck_relu = nn.ReLU() if args.use_relu_after_bottleneck else None
         self.final_layer = nn.Linear(in_features=intermediate_n_features, out_features=N_CLASSES)
 
-        if not self.add_negative_patches_as_network_branch:
-            self.batch_norm = nn.BatchNorm2d(self.embedding_n_channels) if use_batch_norm else None
+        if not args.add_negative_patches_as_network_branch:
+            self.batch_norm = nn.BatchNorm2d(self.embedding_n_channels) if args.use_batch_norm else None
             self.bottle_neck_conv = nn.Conv2d(in_channels=self.embedding_n_channels,
-                                              out_channels=n_channels,
-                                              kernel_size=conv_kernel_size)
+                                              out_channels=args.n_channels,
+                                              kernel_size=args.conv_kernel_size)
         else:
-            self.batch_norm_1 = nn.BatchNorm2d(self.n_patches) if use_batch_norm else None
-            self.batch_norm_2 = nn.BatchNorm2d(self.n_patches) if use_batch_norm else None
-            self.bottle_neck_conv_1 = nn.Conv2d(in_channels=self.n_patches,
-                                                out_channels=n_channels,
-                                                kernel_size=conv_kernel_size)
-            self.bottle_neck_conv_2 = nn.Conv2d(in_channels=self.n_patches,
-                                                out_channels=n_channels,
-                                                kernel_size=conv_kernel_size)
+            self.batch_norm_1 = nn.BatchNorm2d(args.n_patches) if args.use_batch_norm else None
+            self.batch_norm_2 = nn.BatchNorm2d(args.n_patches) if args.use_batch_norm else None
+            self.bottle_neck_conv_1 = nn.Conv2d(in_channels=args.n_patches,
+                                                out_channels=args.n_channels,
+                                                kernel_size=args.conv_kernel_size)
+            self.bottle_neck_conv_2 = nn.Conv2d(in_channels=args.n_patches,
+                                                out_channels=args.n_channels,
+                                                kernel_size=args.conv_kernel_size)
 
         self.scores_prediction_mode: bool = True
 
@@ -178,27 +160,27 @@ class ClassifierOnPatchBasedEmbedding(nn.Module):
         self.scores_prediction_mode = True
 
     def forward(self, x):
-        if not self.add_negative_patches_as_network_branch:
+        if not self.args.add_negative_patches_as_network_branch:
             embedding = self.patch_based_embedding(x)
-            if self.use_avg_pool:
+            if self.args.use_avg_pool:
                 embedding = self.avg_pool(embedding)
-            if self.use_adaptive_avg_pool:
+            if self.args.use_adaptive_avg_pool:
                 embedding = self.adaptive_avg_pool(embedding)
-            if self.use_batch_norm:
+            if self.args.use_batch_norm:
                 embedding = self.batch_norm(embedding)
             embedding = self.bottle_neck_conv(embedding)
         else:
             embedding1, embedding2 = self.patch_based_embedding(x)
 
-            if self.use_avg_pool:
+            if self.args.use_avg_pool:
                 embedding1 = self.avg_pool(embedding1)
                 embedding2 = self.avg_pool(embedding2)
 
-            if self.use_adaptive_avg_pool:
+            if self.args.use_adaptive_avg_pool:
                 embedding1 = self.adaptive_avg_pool(embedding1)
                 embedding2 = self.adaptive_avg_pool(embedding2)
 
-            if self.use_batch_norm:
+            if self.args.use_batch_norm:
                 embedding1 = self.batch_norm_1(embedding1)
                 embedding2 = self.batch_norm_2(embedding2)
 
@@ -213,7 +195,7 @@ class ClassifierOnPatchBasedEmbedding(nn.Module):
             embedding = embedding1 + embedding2
 
         if self.scores_prediction_mode:
-            if self.bottleneck_relu:
+            if self.args.use_relu_after_bottleneck:
                 embedding = self.bottleneck_relu(embedding)
             embedding_flat = self.flatten(embedding)
             scores = self.final_layer(embedding_flat)
@@ -231,26 +213,19 @@ class PatchBasedEmbedding(nn.Module):
     """
 
     def __init__(self,
+                 args: ArchitectureArgs,
                  kernel_convolution: torch.Tensor,
-                 bias_convolution: torch.Tensor,
-                 k_neighbors: int,
-                 add_flipped_patches: bool,
-                 add_negative_patches_as_network_branch: bool,
-                 add_negative_patches_as_more_patches: bool):
+                 bias_convolution: torch.Tensor):
         super(PatchBasedEmbedding, self).__init__()
 
+        self.args = args
         self.kernel_convolution = nn.Parameter(kernel_convolution, requires_grad=False)
 
         # The bias will be added to a tensor of shape (N, n_patches, H, W) to reshaping it to (1, n_patches, 1, 1)
         # will make the addition "broadcastable".
         self.bias_convolution = nn.Parameter(bias_convolution.view(1, -1, 1, 1), requires_grad=False)
 
-        self.k_neighbors = k_neighbors
-        self.add_flipped_patches = add_flipped_patches
-        self.add_negative_patches_as_network_branch = add_negative_patches_as_network_branch
-        self.add_negative_patches_as_more_patches = add_negative_patches_as_more_patches
-
-        if self.add_flipped_patches:
+        if args.add_flipped_patches:
             self.flipped_kernel = nn.Parameter(hflip(self.kernel_convolution), requires_grad=False)
         else:
             self.flipped_kernel = None
@@ -259,45 +234,45 @@ class PatchBasedEmbedding(nn.Module):
         conv_result_no_bias = F.conv2d(images, self.kernel_convolution)
         squared_distances = -1 * conv_result_no_bias + self.bias_convolution
 
-        calc_negative_patches = self.add_negative_patches_as_network_branch or self.add_negative_patches_as_more_patches
+        calc_negative_patches = (self.args.add_negative_patches_as_network_branch or
+                                 self.args.add_negative_patches_as_more_patches)
         squared_distances_to_negative_patches = (conv_result_no_bias + self.bias_convolution if calc_negative_patches
                                                  else None)
 
         all_squared_distances = [squared_distances]
 
-        if self.add_flipped_patches:
+        if self.args.add_flipped_patches:
             conv_result_to_flipped_kernel_no_bias = F.conv2d(images, self.flipped_kernel)
             squared_distances_to_flipped_patches = -1 * conv_result_to_flipped_kernel_no_bias + self.bias_convolution
             all_squared_distances.append(squared_distances_to_flipped_patches)
 
-        if self.add_negative_patches_as_more_patches:
+        if self.args.add_negative_patches_as_more_patches:
             all_squared_distances.append(squared_distances_to_negative_patches)
-            if self.add_flipped_patches:
+            if self.args.add_flipped_patches:
                 squared_distances_to_flipped_negative_patches = (conv_result_to_flipped_kernel_no_bias +
                                                                  self.bias_convolution)
                 all_squared_distances.append(squared_distances_to_flipped_negative_patches)
 
-        if self.add_flipped_patches or self.add_negative_patches_as_more_patches:
+        if self.args.add_flipped_patches or self.args.add_negative_patches_as_more_patches:
             squared_distances_to_all_patches = torch.cat(all_squared_distances, dim=1)
             k_nearest_patches_mask = calculate_smaller_than_kth_value_mask(squared_distances_to_all_patches,
-                                                                           self.k_neighbors).float()
+                                                                           self.args.k_neighbors).float()
             return k_nearest_patches_mask
         else:
-            k_nearest_patches_mask = calculate_smaller_than_kth_value_mask(squared_distances, self.k_neighbors).float()
-            if self.add_negative_patches_as_network_branch:
+            k_nearest_patches_mask = calculate_smaller_than_kth_value_mask(squared_distances,
+                                                                           self.args.k_neighbors).float()
+            if self.args.add_negative_patches_as_network_branch:
                 k_nearest_negative_patches_mask = calculate_smaller_than_kth_value_mask(
-                    squared_distances_to_negative_patches, self.k_neighbors).float()
+                    squared_distances_to_negative_patches, self.args.k_neighbors).float()
                 return k_nearest_patches_mask, k_nearest_negative_patches_mask
             else:
                 return k_nearest_patches_mask
 
 
 @torch.no_grad()
-def sample_random_patches(data_loader,
-                          n_patches: int,
-                          patch_size: int,
+def sample_random_patches(args: Args,
+                          data_loader,
                           existing_model: Optional[nn.Module] = None,
-                          device: Optional[torch.device] = None,
                           visualize: bool = False):
     """
     This function sample random patches from the data, given by the data-loader object.
@@ -309,14 +284,14 @@ def sample_random_patches(data_loader,
     batch_size = data_loader.batch_size
     n_images, height, width, channels = data_loader.dataset.data.shape
     if existing_model is not None:
-        channels, height, width = get_model_output_shape(existing_model, device)
+        channels, height, width = get_model_output_shape(existing_model, args.env.device)
 
     spatial_size = height
-    n_patches_per_row_or_col = spatial_size - patch_size + 1
+    n_patches_per_row_or_col = spatial_size - args.arch.patch_size + 1
     n_patches_per_image = n_patches_per_row_or_col ** 2
     n_patches_in_dataset = n_images * n_patches_per_image
 
-    patches_indices_in_dataset = rng.choice(n_patches_in_dataset, size=n_patches, replace=False)  # TODO sort
+    patches_indices_in_dataset = np.sort(rng.choice(n_patches_in_dataset, size=args.arch.n_patches, replace=False))
 
     images_indices = patches_indices_in_dataset % n_images
     patches_indices_in_images = patches_indices_in_dataset // n_images
@@ -326,7 +301,8 @@ def sample_random_patches(data_loader,
     batches_indices = images_indices // batch_size
     images_indices_in_batches = images_indices % batch_size
 
-    patches = np.empty(shape=(n_patches, channels, patch_size, patch_size), dtype=np.float32)
+    patches = np.empty(shape=(args.arch.n_patches, channels, args.arch.patch_size, args.arch.patch_size),
+                       dtype=np.float32)
 
     for batch_index, (inputs, _) in enumerate(data_loader):
         if batch_index not in batches_indices:
@@ -336,7 +312,7 @@ def sample_random_patches(data_loader,
         relevant_patches_indices = np.where(relevant_patches_mask)[0]
 
         if existing_model is not None:
-            inputs = inputs.to(device)
+            inputs = inputs.to(args.env.device)
             inputs = existing_model(inputs)
         inputs = inputs.cpu().numpy()
 
@@ -344,8 +320,8 @@ def sample_random_patches(data_loader,
             image_index_in_batch = images_indices_in_batches[i]
             patch_x_start = patches_x_indices_in_images[i]
             patch_y_start = patches_y_indices_in_images[i]
-            patch_x_slice = slice(patch_x_start, patch_x_start + patch_size)
-            patch_y_slice = slice(patch_y_start, patch_y_start + patch_size)
+            patch_x_slice = slice(patch_x_start, patch_x_start + args.arch.patch_size)
+            patch_y_slice = slice(patch_y_start, patch_y_start + args.arch.patch_size)
 
             patches[i] = inputs[image_index_in_batch, :, patch_x_slice, patch_y_slice]
 
@@ -372,8 +348,7 @@ def visualize_image_patch_pair(image, patch, patch_x_start, patch_y_start):
 
 training_step = 0
 
-def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, scheduler, log_interval,
-                inputs_preprocessing_function=None):
+def train_model(args: Args, model, dataloaders, criterion, optimizer, scheduler, inputs_preprocessing_function=None):
     best_weights = copy.deepcopy(model.state_dict())
     best_accuracy = 0.0
 
@@ -382,7 +357,7 @@ def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, sc
     interval_accumulator = Accumulator()
     epoch_accumulator = Accumulator()
 
-    for epoch in range(num_epochs):
+    for epoch in range(args.opt.epochs):
         # if epoch > 0:  # TODO temporary
         #     break
         # model_state = copy.deepcopy(model.state_dict())
@@ -394,8 +369,8 @@ def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, sc
             #     break
             training_step += 1
 
-            inputs = inputs.to(device)
-            labels = labels.to(device)
+            inputs = inputs.to(args.env.device)
+            labels = labels.to(args.env.device)
 
             if inputs_preprocessing_function is not None:
                 with torch.no_grad():
@@ -411,7 +386,7 @@ def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, sc
             epoch_accumulator.update(**accumulator_kwargs)
             interval_accumulator.update(**accumulator_kwargs)
 
-            if training_step % log_interval == 0:
+            if training_step % args.env.log_interval == 0:
                 wandb.log(data=interval_accumulator.get_dict(prefix='train'), step=training_step)
                 # logger.info(f'{training_step=:10d} '
                 #             f'loss={interval_accumulator.get_mean_loss():.4f} '
@@ -429,7 +404,7 @@ def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, sc
         #         logger.debug(f'Weight \'{weight_name}\' of shape {list(new_weight.size())} changed.')
         # model_state = copy.deepcopy(new_model_state)
 
-        epoch_test_loss, epoch_test_accuracy = evaluate_model(model, criterion, dataloaders['test'], device, inputs_preprocessing_function)
+        epoch_test_loss, epoch_test_accuracy = evaluate_model(model, criterion, dataloaders['test'], args.env.device, inputs_preprocessing_function)
         # epoch_test_loss, epoch_test_accuracy = 0.5, 90  # TODO temporary
         wandb.log(data={'test_accuracy': epoch_test_accuracy, 'test_loss': epoch_test_loss}, step=training_step)
 
@@ -442,10 +417,10 @@ def train_model(model, dataloaders, num_epochs, device, criterion, optimizer, sc
 
         epoch_time_elapsed = epoch_accumulator.get_time()
         total_time += epoch_time_elapsed
-        epochs_left = num_epochs - (epoch + 1)
+        epochs_left = args.opt.epochs - (epoch + 1)
         avg_epoch_time = total_time / (epoch + 1)
         time_left = avg_epoch_time * epochs_left
-        logger.info(f'Epoch {epoch + 1:0>3d}/{num_epochs:0>3d} '
+        logger.info(f'Epoch {epoch + 1:0>3d}/{args.opt.epochs:0>3d} '
                     f'({str(timedelta(seconds=epoch_time_elapsed)).split(".")[0]}) | '
                     f'ETA {str(timedelta(seconds=time_left)).split(".")[0]} | '
                     f'Train '
@@ -509,37 +484,28 @@ def calc_mean_patch(dataloader,
     return mean
 
 
-def calc_whitening(dataloader,
-                   patch_size,
-                   whitening_regularization_factor,
-                   existing_model: Optional[nn.Module] = None,
-                   device: Optional[torch.device] = None) -> np.ndarray:
+def calc_whitening(args: Args, dataloader, existing_model: Optional[nn.Module] = None) -> np.ndarray:
     logger.info('Performing a first pass over the dataset to calculate the mean patch.')
-    mean_patch = calc_mean_patch(dataloader, patch_size,
+    mean_patch = calc_mean_patch(dataloader, args.arch.patch_size,
                                  agg_func=partial(torch.mean, dim=1),
-                                 existing_model=existing_model, device=device)
+                                 existing_model=existing_model, device=args.env.device)
     logger.info('Performing a second pass over the dataset to calculate the covariance.')
-    covariance = calc_mean_patch(dataloader, patch_size,
+    covariance = calc_mean_patch(dataloader, args.arch.patch_size,
                                  agg_func=partial(calc_covariance, mean=torch.unsqueeze(mean_patch, dim=-1)),
-                                 existing_model=existing_model, device=device)
+                                 existing_model=existing_model, device=args.env.device)
 
     eigenvalues, eigenvectors = np.linalg.eigh(covariance.cpu().numpy())
 
-    inv_sqrt_eigenvalues = np.diag(1. / np.sqrt(eigenvalues + whitening_regularization_factor))
+    inv_sqrt_eigenvalues = np.diag(1. / np.sqrt(eigenvalues + args.arch.whitening_regularization_factor))
     whitening_matrix = eigenvectors.dot(inv_sqrt_eigenvalues)
     whitening_matrix = whitening_matrix.astype(np.float32)
 
     return whitening_matrix
 
 
-def get_conv_kernel_and_bias(batch_size: int,
-                             n_patches: int,
-                             patch_size: int,
-                             use_whitening: bool = False,
-                             whitening_regularization_factor: float = 0.,
-                             existing_model: Optional[nn.Module] = None,
-                             device: Optional[torch.device] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-    clean_dataloaders = get_dataloaders(batch_size,
+def get_conv_kernel_and_bias(args: Args,
+                             existing_model: Optional[nn.Module] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    clean_dataloaders = get_dataloaders(args.opt.batch_size,
                                         normalize_to_unit_gaussian=False,
                                         normalize_to_plus_minus_one=False,
                                         random_crop=False,
@@ -547,13 +513,11 @@ def get_conv_kernel_and_bias(batch_size: int,
                                         random_erasing=False,
                                         random_resized_crop=False)
 
-    patches = sample_random_patches(clean_dataloaders['train'], n_patches, patch_size, existing_model, device,
-                                    visualize=False)
+    patches = sample_random_patches(args, clean_dataloaders['train'], existing_model, visualize=False)
     patches_flattened = patches.reshape(patches.shape[0], -1)
 
-    if use_whitening:
-        whitening_matrix = calc_whitening(clean_dataloaders['train'], patch_size, whitening_regularization_factor,
-                                          existing_model, device)
+    if args.arch.use_whitening:
+        whitening_matrix = calc_whitening(args, clean_dataloaders['train'], existing_model)
 
         kernel = np.linalg.multi_dot([patches_flattened, whitening_matrix, whitening_matrix.T]).reshape(patches.shape)
         bias = np.linalg.norm(patches_flattened.dot(whitening_matrix), axis=1) ** 2
@@ -584,61 +548,78 @@ def get_model_output_shape(model: nn.Module, device: torch.device):
     return channels, height, width
 
 
-def train_patch_based_model(args, existing_model: Optional[nn.Module] = None):
-    device = torch.device(args.device)
+def train_patch_based_model(args: Args, existing_model: Optional[nn.Module] = None):
+    device = torch.device(args.env.device)
     _, height, width = (3, 32, 32) if (existing_model is None) else get_model_output_shape(existing_model, device)
     input_image_spatial_size = height
 
-    kernel, bias = get_conv_kernel_and_bias(args.batch_size, args.n_patches, args.patch_size, args.use_whitening,
-                                            args.whitening_regularization_factor, existing_model, device)
+    kernel, bias = get_conv_kernel_and_bias(args, existing_model)
 
-    model = ClassifierOnPatchBasedEmbedding(
-        kernel_convolution=kernel, bias_convolution=bias,
-        k_neighbors=int(args.k_neighbors_fraction * args.n_patches),
-        n_channels=args.n_channels, add_flipped_patches=args.add_flipped_patches,
-        add_negative_patches_as_network_branch=args.add_negative_patches_as_network_branch,
-        add_negative_patches_as_more_patches=args.add_negative_patches_as_more_patches,
-        use_batch_norm=args.use_batch_norm,
-        conv_kernel_size=args.conv_kernel_size,
-        use_avg_pool=args.use_avg_pool,
-        pool_size=args.pool_size,
-        pool_stride=args.pool_stride,
-        use_adaptive_avg_pool=args.use_adaptive_avg_pool,
-        use_relu_after_bottleneck=args.use_relu_after_bottleneck,
-        input_image_spatial_size=input_image_spatial_size
-    ).to(device)
+    model = ClassifierOnPatchBasedEmbedding(args.arch, kernel, bias, input_image_spatial_size).to(device)
 
-    wandb.init(project='thesis', config=args)
+    # Initialize the args to wandb without the category prefix
+    wandb.init(project='thesis', config=args.flattened_dict())
     wandb.watch(model)
 
-    optimizer = torch.optim.SGD(model.parameters(), args.learning_rate, args.momentum, weight_decay=args.weight_decay)
+    optimizer = torch.optim.SGD(model.parameters(), args.opt.learning_rate, args.opt.momentum,
+                                weight_decay=args.opt.weight_decay)
     criterion = torch.nn.CrossEntropyLoss().to(device)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                     milestones=args.learning_rate_decay_steps,
-                                                     gamma=args.learning_rate_decay_gamma)
+                                                     milestones=args.opt.learning_rate_decay_steps,
+                                                     gamma=args.opt.learning_rate_decay_gamma)
     augmented_dataloaders = get_dataloaders(
-        args.batch_size,
-        normalize_to_unit_gaussian=not args.disable_normalization_to_unit_gaussian,
-        normalize_to_plus_minus_one=args.enable_normalization_to_plus_minus_one,
-        random_crop=not args.disable_random_crop,
-        random_horizontal_flip=not args.disable_random_horizontal_flip,
-        random_erasing=args.enable_random_erasing,
-        random_resized_crop=args.enable_random_resized_crop
+        args.opt.batch_size,
+        normalize_to_unit_gaussian=args.data.normalization_to_unit_gaussian,
+        normalize_to_plus_minus_one=args.data.normalization_to_plus_minus_one,
+        random_crop=args.data.random_crop,
+        random_horizontal_flip=args.data.random_horizontal_flip
     )
 
-    best_model = train_model(model, augmented_dataloaders, args.epochs, device, criterion, optimizer, scheduler,
-                             args.log_interval, inputs_preprocessing_function=existing_model)
+    best_model = train_model(args, model, augmented_dataloaders, criterion, optimizer, scheduler,
+                             inputs_preprocessing_function=existing_model)
 
     return best_model
 
 
+def get_args() -> Args:
+    known_args, unknown_args = parse_args()
+    with open(known_args.yaml_path, 'r') as f:
+        args_dict = yaml.load(f, Loader=yaml.FullLoader)
+
+    while len(unknown_args) > 0:
+        arg_name = unknown_args.pop(0).replace('--', '')
+        values = list()
+        while (len(unknown_args) > 0) and (not unknown_args[0].startswith('--')):
+            values.append(unknown_args.pop(0))
+        if len(values) == 0:
+            raise ValueError(f'Argument {arg_name} given in command line has no corresponding value.')
+        value = values[0] if len(values) == 1 else values
+
+        categories = list(Args.__fields__.keys())
+        found = False
+        for category in categories:
+            category_args = list(Args.__fields__[category].default.__fields__.keys())
+            if arg_name in category_args:
+                if category not in args_dict:
+                    args_dict[category] = dict()
+                args_dict[category][arg_name] = value
+                found = True
+
+        if not found:
+            raise ValueError(f'Argument {arg_name} is not recognized.')
+
+    args = Args.parse_obj(args_dict)
+
+    return args
+
+
 def main():
-    args = parse_args()
-    out_dir = create_out_dir(args.path)
-    configure_logger(out_dir)
+    args = get_args()
+
+    configure_logger(args.env.path)
 
     logger.info(f'Starting to train patch-based-classifier with the following arguments:')
-    for arg_name, value in sorted(vars(args).items()):
+    for arg_name, value in args.flattened_dict():
         logger.info(f'{f"{arg_name} ":-<50} {value}')
 
     model = train_patch_based_model(args)
@@ -653,93 +634,13 @@ def main():
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Main script for running the experiments for patches-based learning.'
-                    'The experiments results are outputted to a log-file and to wandb.',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+                    'The experiments results are outputted to a log-file and to wandb.'
     )
 
-    # Arguments defining the model.
-    parser.add_argument('--n_channels', type=int, default=128,
-                        help=f'Number of channels in the convolution layer which comes after the embedding')
+    parser.add_argument('yaml_path', help=f'Path to a YAML file with the arguments according to the pydantic schema')
 
-    # Arguments defining the training-process
-    parser.add_argument('--device', type=str, default='cpu', choices=['cpu'] + [f'cuda:{i}' for i in range(8)],
-                        help=f'On which device to train')
-    parser.add_argument('--epochs', type=int, default=80,
-                        help=f'Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=128,
-                        help=f'Batch size')
-    parser.add_argument('--learning_rate', type=float, default=0.003,
-                        help=f'Learning-rate')
-    parser.add_argument('--learning_rate_decay_steps', type=int, nargs='+', default=[50, 75],
-                        help=f'Decay the learning-rate at these steps by a factor of gamma '
-                             f'(given as another argument)')
-    parser.add_argument('--learning_rate_decay_gamma', type=float, default=0.1,
-                        help=f'The factor gamma to multiply the learning-rate at the decay steps')
-    parser.add_argument('--momentum', type=float, default=0.9,
-                        help=f'Momentum')
-    parser.add_argument('--weight_decay', type=float, default=0,
-                        help=f'Weight decay')
-
-    parser.add_argument('--depth', type=int, default=1, choices=[1, 2],
-                        help=f'How many modules to stack on top of one another')
-    parser.add_argument('--n_patches', type=int, default=2048,
-                        help=f'The number of patches')
-    parser.add_argument('--patch_size', type=int, default=6,
-                        help=f'The size of the patches')
-    parser.add_argument('--use_avg_pool', action='store_true',
-                        help='If true, use whitening on the patches')
-    parser.add_argument('--conv_kernel_size', type=int, default=1,
-                        help=f'The size of the kernel in the convolution layer after the patch-based-embedding '
-                             f'(a.k.a. \"bottle-neck\" layer)')
-    parser.add_argument('--pool_size', type=int, default=5,
-                        help=f'The size of the average-pooling layer after the patch-based-embedding')
-    parser.add_argument('--pool_stride', type=int, default=3,
-                        help=f'The stride of the average-pooling layer after the patch-based-embedding')
-    parser.add_argument('--k_neighbors_fraction', type=float, default=0.4,
-                        help=f'which k to use in the k-nearest-neighbors, as a fraction of the total number of patches')
-    parser.add_argument('--use_whitening', action='store_true',
-                        help='If true, use whitening on the patches')
-    parser.add_argument('--whitening_regularization_factor', type=float, default=0.001,
-                        help=f'The regularization factor (a.k.a. lambda) of the whitening matrix')
-    parser.add_argument('--use_batch_norm', action='store_true',
-                        help=f'Whether to use batch normalization after the patch-based-embedding')
-    parser.add_argument('--use_relu_after_bottleneck', action='store_true',
-                        help=f'Whether to use ReLU after the bottleneck layer')
-    parser.add_argument('--add_negative_patches_as_network_branch', action='store_true',
-                        help=f'Whether to use the negative patches as well (i.e. original patches multiplied by -1). '
-                             f'These patches are being used as a separate network branch, as the original paper.')
-    parser.add_argument('--add_negative_patches_as_more_patches', action='store_true',
-                        help=f'Whether to use the negative patches as well (i.e. original patches multiplied by -1). '
-                             f'These patches are being concatenated to the original patches so the dictionary size is '
-                             f'multiplied by two')
-    parser.add_argument('--add_flipped_patches', action='store_true',
-                        help=f'Whether to use the negative patches as well (i.e. original patches multiplied by -1)')
-    parser.add_argument('--use_adaptive_avg_pool', action='store_true',
-                        help=f'Whether to use the adaptive avg-pooling on the embedding output to get spatial size 6')
-
-    # Arguments for logging the training process.
-    parser.add_argument('--path', type=str, default='./experiments',
-                        help=f'Output path for the experiment - '
-                             f'a sub-directory named with the data and time will be created within')
-    parser.add_argument('--log_interval', type=int, default=100,
-                        help=f'How many iterations between each training log')
-
-    # Arguments for the data augmentations.
-    # These refer to data augmentations that are enabled by default (that's way they are prefixed with 'disable').
-    parser.add_argument('--disable_normalization_to_unit_gaussian', action='store_true',
-                        help='If true, enable normalization of the values to a unit gaussian')
-    parser.add_argument('--disable_random_crop', action='store_true',
-                        help='If true, disable random cropping which is padding of 4 followed by random crop')
-    parser.add_argument('--disable_random_horizontal_flip', action='store_true',
-                        help='If true, disable random horizontal flip')
-    # These refer to data augmentations that can be enabled (that's way they are prefixed with 'enable').
-    parser.add_argument('--enable_normalization_to_plus_minus_one', action='store_true',
-                        help='If true, disable normalization of the values to the range [-1,1] (instead of [0,1])')
-    parser.add_argument('--enable_random_resized_crop', action='store_true',
-                        help='If true, enable random resized cropping')
-    parser.add_argument('--enable_random_erasing', action='store_true',
-                        help='If true, performs erase a random rectangle in the image')
-
+    return parser.parse_known_args()
+    return parser.parse_args()
     return parser.parse_args()
 
 
