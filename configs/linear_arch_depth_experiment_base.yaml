@@ -2,8 +2,9 @@ opt:
   epochs: 80
   learning_rate_decay_steps: [50, 75]
 arch:
-  n_channels: 128
-  pool_size: 5
-  pool_stride: 3
+  n_channels: 16
+  pool_size: 2
+  pool_stride: 2
   conv_kernel_size: 1
+  use_adaptive_avg_pool: False
   use_relu_after_bottleneck: False

@@ -613,17 +613,21 @@ def get_args() -> Args:
     return args
 
 
+def log_args(args):
+    logger.info(f'Starting to train patch-based-classifier with the following arguments:')
+    for arg_name, value in args.flattened_dict().items():
+        logger.info(f'{f"{arg_name} ":-<50} {value}')
+
+
 def main():
     args = get_args()
 
     configure_logger(args.env.path)
-
-    logger.info(f'Starting to train patch-based-classifier with the following arguments:')
-    for arg_name, value in args.flattened_dict().items():
-        logger.info(f'{f"{arg_name} ":-<50} {value}')
+    log_args(args)
+    
     model = train_patch_based_model(args)
 
-    if args.depth == 2:
+    if args.arch.depth == 2:
         model.eval()
         model.prediction_mode_off()
         # TODO remove gradients from the model computational-graph since they are no longer needed.
@@ -639,8 +643,6 @@ def parse_args():
     parser.add_argument('yaml_path', help=f'Path to a YAML file with the arguments according to the pydantic schema')
 
     return parser.parse_known_args()
-    return parser.parse_args()
-    return parser.parse_args()
 
 
 if __name__ == '__main__':

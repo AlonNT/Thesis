@@ -115,11 +115,19 @@ class ArchitectureArgs(ImmutableArgs):
     #: Whether to use the adaptive avg-pooling on the embedding output to get spatial size 6.
     use_adaptive_avg_pool: bool = True
 
+    #: The depth of the neural-network, if greater than 1 then multiple base networks will be stacked together.
+    depth: PositiveInt = 1
+
     @validator('k_neighbors', always=True, pre=True)
     def calculate_k_neighbors(cls, v, values):
         assert v is None, 'The argument k_neighbors should not be given, ' \
                           'it will be calculated automatically from k_neighbors_fraction and n_patches.'
         return int(values['k_neighbors_fraction'] * float(values['n_patches']))
+    
+    @validator('depth', always=True)
+    def validate_depth(cls, v):
+        assert v in {1, 2}, "Currently only depth 1 or 2 is supported."
+        return v
 
 
 class EnvironmentArgs(ImmutableArgs):
