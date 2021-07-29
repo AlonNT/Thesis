@@ -351,7 +351,8 @@ def visualize_patches_weights(model):
     bottleneck_weight = model.bottle_neck_conv_1.weight.data.squeeze(dim=3).squeeze(dim=2)
     for norm_ord in [1, 2, np.inf]:
         norms = torch.linalg.norm(bottleneck_weight, ord=norm_ord, dim=0)
-        wandb.log({f'L{norm_ord}_norm_patches_weights': wandb.Histogram(norms)}, step=training_step)
+        norms_numpy = norms.cpu().numpy()
+        wandb.log({f'L{norm_ord}_norm_patches_weights': wandb.Histogram(norms_numpy)}, step=training_step)
 
 
 # class VisualizePatchesWeights:
