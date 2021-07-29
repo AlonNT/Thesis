@@ -118,6 +118,12 @@ class ArchitectureArgs(ImmutableArgs):
     #: The depth of the neural-network, if greater than 1 then multiple base networks will be stacked together.
     depth: PositiveInt = 1
 
+    survival_of_the_fittest_enabled: bool = False
+
+    survival_of_the_fittest_fraction_of_survivals: ProperFraction = 0.25
+
+    survival_of_the_fittest_rate_of_evolution_in_epochs: PositiveInt = 50
+
     @validator('k_neighbors', always=True, pre=True)
     def calculate_k_neighbors(cls, v, values):
         assert v is None, 'The argument k_neighbors should not be given, ' \

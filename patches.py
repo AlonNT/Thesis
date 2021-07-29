@@ -270,7 +270,9 @@ class PatchBasedEmbedding(nn.Module):
 
 
 @torch.no_grad()
-def sample_random_patches(args: Args,
+def sample_random_patches(n_patches: int,
+                          patch_size: int,
+                          device: torch.device,
                           data_loader,
                           existing_model: Optional[nn.Module] = None,
                           visualize: bool = False):
@@ -284,14 +286,14 @@ def sample_random_patches(args: Args,
     batch_size = data_loader.batch_size
     n_images, height, width, channels = data_loader.dataset.data.shape
     if existing_model is not None:
-        channels, height, width = get_model_output_shape(existing_model, args.env.device)
+        channels, height, width = get_model_output_shape(existing_model, device)
 
     spatial_size = height
-    n_patches_per_row_or_col = spatial_size - args.arch.patch_size + 1
+    n_patches_per_row_or_col = spatial_size - patch_size + 1
     n_patches_per_image = n_patches_per_row_or_col ** 2
     n_patches_in_dataset = n_images * n_patches_per_image
 
-    patches_indices_in_dataset = np.sort(rng.choice(n_patches_in_dataset, size=args.arch.n_patches, replace=False))
+    patches_indices_in_dataset = np.sort(rng.choice(n_patches_in_dataset, size=n_patches, replace=False))
 
     images_indices = patches_indices_in_dataset % n_images
     patches_indices_in_images = patches_indices_in_dataset // n_images
@@ -301,7 +303,7 @@ def sample_random_patches(args: Args,
     batches_indices = images_indices // batch_size
     images_indices_in_batches = images_indices % batch_size
 
-    patches = np.empty(shape=(args.arch.n_patches, channels, args.arch.patch_size, args.arch.patch_size),
+    patches = np.empty(shape=(n_patches, channels, patch_size, patch_size),
                        dtype=np.float32)
 
     for batch_index, (inputs, _) in enumerate(data_loader):
@@ -312,7 +314,7 @@ def sample_random_patches(args: Args,
         relevant_patches_indices = np.where(relevant_patches_mask)[0]
 
         if existing_model is not None:
-            inputs = inputs.to(args.env.device)
+            inputs = inputs.to(device)
             inputs = existing_model(inputs)
         inputs = inputs.cpu().numpy()
 
@@ -320,8 +322,8 @@ def sample_random_patches(args: Args,
             image_index_in_batch = images_indices_in_batches[i]
             patch_x_start = patches_x_indices_in_images[i]
             patch_y_start = patches_y_indices_in_images[i]
-            patch_x_slice = slice(patch_x_start, patch_x_start + args.arch.patch_size)
-            patch_y_slice = slice(patch_y_start, patch_y_start + args.arch.patch_size)
+            patch_x_slice = slice(patch_x_start, patch_x_start + patch_size)
+            patch_y_slice = slice(patch_y_start, patch_y_start + patch_size)
 
             patches[i] = inputs[image_index_in_batch, :, patch_x_slice, patch_y_slice]
 
@@ -347,32 +349,40 @@ def visualize_image_patch_pair(image, patch, patch_x_start, patch_y_start):
     plt.show()
 
 
-def visualize_patches_weights(model):
+def visualize_patches_weights(model: ClassifierOnPatchBasedEmbedding):
     bottleneck_weight = model.bottle_neck_conv_1.weight.data.squeeze(dim=3).squeeze(dim=2)
     for norm_ord in [1, 2, np.inf]:
         norms = torch.linalg.norm(bottleneck_weight, ord=norm_ord, dim=0)
         norms_numpy = norms.cpu().numpy()
         wandb.log({f'L{norm_ord}_norm_patches_weights': wandb.Histogram(norms_numpy)}, step=training_step)
+        # TODO visualize best & worst patches
+        # import ipdb
+        # ipdb.set_trace()
+        # stop = 'here'
 
 
-# class VisualizePatchesWeights:
-#     def __init__(self, interval: Optional[int] = 100):
-#         self.interval: int = interval
-#
-#     def at_interval(self):
-#         global training_step
-#         return training_step % self.interval == 0
-#
-#     def visualize(self, model: ClassifierOnPatchBasedEmbedding):
-#         if self.at_interval():
-#             visualize_patches_weights(model)
+@torch.no_grad()
+def kill_weak_patches(model: ClassifierOnPatchBasedEmbedding, args: Args) -> ClassifierOnPatchBasedEmbedding:
+    bottleneck_weight = model.bottle_neck_conv_1.weight.data.squeeze(dim=3).squeeze(dim=2)
+    norms = torch.linalg.norm(bottleneck_weight, ord=1, dim=0)
+    quantile = torch.quantile(norms, 1 - args.arch.survival_of_the_fittest_fraction_of_survivals)
+    strong_patches_mask = torch.greater(norms, quantile)
+    weak_patches_mask = torch.logical_not(strong_patches_mask)
+    n_weak_patches = torch.sum(weak_patches_mask).cpu().numpy().item()
+    kernel, bias = get_conv_kernel_and_bias(n_weak_patches, args.arch.patch_size, args)  # TODO existing model=?
+
+    model.patch_based_embedding.kernel_convolution[weak_patches_mask, :, :, :] = kernel.to(args.env.device)
+    model.patch_based_embedding.bias_convolution[:, weak_patches_mask, :, :] = bias.view(
+        (1, n_weak_patches, 1, 1)).to(args.env.device)
+
+    return model
 
 
 training_step = 0
 
 
 def train_model(args: Args,
-                model: nn.Module,
+                model: ClassifierOnPatchBasedEmbedding,
                 dataloaders,
                 criterion: nn.CrossEntropyLoss,
                 optimizer: torch.optim.Optimizer,
@@ -392,6 +402,11 @@ def train_model(args: Args,
         # model_state = copy.deepcopy(model.state_dict())
         model.train()
         epoch_accumulator.reset()
+
+        if (args.arch.survival_of_the_fittest_enabled and
+                (epoch != 0) and
+                (epoch % args.arch.survival_of_the_fittest_rate_of_evolution_in_epochs == 0)):
+            model = kill_weak_patches(model, args)
 
         for inputs, labels in dataloaders['train']:
             # if training_step > 1:  # TODO temporary
@@ -446,25 +461,32 @@ def train_model(args: Args,
 
         scheduler.step()
 
-        epoch_time_elapsed = epoch_accumulator.get_time()
-        total_time += epoch_time_elapsed
-        epochs_left = args.opt.epochs - (epoch + 1)
-        avg_epoch_time = total_time / (epoch + 1)
-        time_left = avg_epoch_time * epochs_left
-        logger.info(f'Epoch {epoch + 1:0>3d}/{args.opt.epochs:0>3d} '
-                    f'({str(timedelta(seconds=epoch_time_elapsed)).split(".")[0]}) | '
-                    f'ETA {str(timedelta(seconds=time_left)).split(".")[0]} | '
-                    f'Train '
-                    f'loss={epoch_accumulator.get_mean_loss():.4f} '
-                    f'acc={epoch_accumulator.get_accuracy():.2f}% | '
-                    f'Test '
-                    f'loss={epoch_test_loss:.4f} '
-                    f'acc={epoch_test_accuracy:.2f}%')
+        total_time = log_epoch_end(epoch_accumulator, total_time, args.opt.epochs, epoch,
+                                   epoch_test_loss, epoch_test_accuracy)
 
     logger.info(f'Best test accuracy: {best_accuracy:.2f}%')
 
     model.load_state_dict(best_weights)  # load best model weights
     return model
+
+
+def log_epoch_end(epoch_accumulator, total_time, total_epochs, current_epoch, epoch_test_loss, epoch_test_accuracy):
+    epoch_time_elapsed = epoch_accumulator.get_time()
+    updated_total_time = total_time + epoch_time_elapsed
+    epochs_left = total_epochs - (current_epoch + 1)
+    avg_epoch_time = updated_total_time / (current_epoch + 1)
+    time_left = avg_epoch_time * epochs_left
+    logger.info(f'Epoch {current_epoch + 1:0>3d}/{total_epochs:0>3d} '
+                f'({str(timedelta(seconds=epoch_time_elapsed)).split(".")[0]}) | '
+                f'ETA {str(timedelta(seconds=time_left)).split(".")[0]} | '
+                f'Train '
+                f'loss={epoch_accumulator.get_mean_loss():.4f} '
+                f'acc={epoch_accumulator.get_accuracy():.2f}% | '
+                f'Test '
+                f'loss={epoch_test_loss:.4f} '
+                f'acc={epoch_test_accuracy:.2f}%')
+
+    return updated_total_time
 
 
 def calc_covariance(tensor, mean):
@@ -534,7 +556,9 @@ def calc_whitening(args: Args, dataloader, existing_model: Optional[nn.Module] =
     return whitening_matrix
 
 
-def get_conv_kernel_and_bias(args: Args,
+def get_conv_kernel_and_bias(n_patches: int,
+                             patch_size: int,
+                             args: Args,
                              existing_model: Optional[nn.Module] = None) -> Tuple[torch.Tensor, torch.Tensor]:
     clean_dataloaders = get_dataloaders(args.opt.batch_size,
                                         normalize_to_unit_gaussian=False,
@@ -544,7 +568,8 @@ def get_conv_kernel_and_bias(args: Args,
                                         random_erasing=False,
                                         random_resized_crop=False)
 
-    patches = sample_random_patches(args, clean_dataloaders['train'], existing_model, visualize=False)
+    patches = sample_random_patches(n_patches, patch_size, args.env.device,
+                                    clean_dataloaders['train'], existing_model, visualize=False)
     patches_flattened = patches.reshape(patches.shape[0], -1)
 
     if args.arch.use_whitening:
@@ -584,7 +609,7 @@ def train_patch_based_model(args: Args, existing_model: Optional[nn.Module] = No
     _, height, width = (3, 32, 32) if (existing_model is None) else get_model_output_shape(existing_model, device)
     input_image_spatial_size = height
 
-    kernel, bias = get_conv_kernel_and_bias(args, existing_model)
+    kernel, bias = get_conv_kernel_and_bias(args.arch.n_patches, args.arch.patch_size, args, existing_model)
 
     model = ClassifierOnPatchBasedEmbedding(args.arch, kernel, bias, input_image_spatial_size).to(device)
 

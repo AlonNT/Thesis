@@ -1,0 +1,12 @@
+opt:
+  epochs: 10
+  learning_rate_decay_steps: []
+arch:
+  n_channels: 128
+  pool_size: 5
+  pool_stride: 3
+  conv_kernel_size: 1
+  use_relu_after_bottleneck: False
+
+  survival_of_the_fittest_enabled: True
+  survival_of_the_fittest_rate_of_evolution_in_epochs: 2
