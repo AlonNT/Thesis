@@ -1,6 +1,7 @@
 opt:
   epochs: 2
   learning_rate_decay_steps: [1]
+  batch_size: 16
 arch:
   n_channels: 128
   pool_size: 5

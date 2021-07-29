@@ -346,9 +346,37 @@ def visualize_image_patch_pair(image, patch, patch_x_start, patch_y_start):
     ax.imshow(np.transpose(patch, axes=(1, 2, 0)))
     plt.show()
 
+
+def visualize_patches_weights(model):
+    bottleneck_weight = model.bottle_neck_conv_1.weight.data.squeeze(dim=3).squeeze(dim=2)
+    for norm_ord in [1, 2, np.inf]:
+        norms = torch.linalg.norm(bottleneck_weight, ord=norm_ord, dim=0)
+        wandb.log({f'L{norm_ord}_norm_patches_weights': wandb.Histogram(norms)}, step=training_step)
+
+
+# class VisualizePatchesWeights:
+#     def __init__(self, interval: Optional[int] = 100):
+#         self.interval: int = interval
+#
+#     def at_interval(self):
+#         global training_step
+#         return training_step % self.interval == 0
+#
+#     def visualize(self, model: ClassifierOnPatchBasedEmbedding):
+#         if self.at_interval():
+#             visualize_patches_weights(model)
+
+
 training_step = 0
 
-def train_model(args: Args, model, dataloaders, criterion, optimizer, scheduler, inputs_preprocessing_function=None):
+
+def train_model(args: Args,
+                model: nn.Module,
+                dataloaders,
+                criterion: nn.CrossEntropyLoss,
+                optimizer: torch.optim.Optimizer,
+                scheduler: torch.optim.lr_scheduler.MultiStepLR,
+                inputs_preprocessing_function: Optional[Callable] = None):
     best_weights = copy.deepcopy(model.state_dict())
     best_accuracy = 0.0
 
@@ -392,6 +420,7 @@ def train_model(args: Args, model, dataloaders, criterion, optimizer, scheduler,
                 #             f'loss={interval_accumulator.get_mean_loss():.4f} '
                 #             f'acc={interval_accumulator.get_accuracy():.2f}%')
                 interval_accumulator.reset()
+                visualize_patches_weights(model)
 
         # # For debugging purposes - verify that the weights of the model changed.
         # new_model_state = copy.deepcopy(model.state_dict())
@@ -404,7 +433,8 @@ def train_model(args: Args, model, dataloaders, criterion, optimizer, scheduler,
         #         logger.debug(f'Weight \'{weight_name}\' of shape {list(new_weight.size())} changed.')
         # model_state = copy.deepcopy(new_model_state)
 
-        epoch_test_loss, epoch_test_accuracy = evaluate_model(model, criterion, dataloaders['test'], args.env.device, inputs_preprocessing_function)
+        epoch_test_loss, epoch_test_accuracy = evaluate_model(model, criterion, dataloaders['test'], args.env.device,
+                                                              inputs_preprocessing_function)
         # epoch_test_loss, epoch_test_accuracy = 0.5, 90  # TODO temporary
         wandb.log(data={'test_accuracy': epoch_test_accuracy, 'test_loss': epoch_test_loss}, step=training_step)
 
@@ -624,7 +654,7 @@ def main():
 
     configure_logger(args.env.path)
     log_args(args)
-    
+
     model = train_patch_based_model(args)
 
     if args.arch.depth == 2:
