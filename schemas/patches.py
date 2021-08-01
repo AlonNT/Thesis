@@ -1,4 +1,6 @@
 import datetime
+
+import numpy as np
 import torch
 import flatten_dict
 
@@ -176,15 +178,26 @@ class DataArgs(ImmutableArgs):
     normalization_to_plus_minus_one: bool = False
 
 
+class RunTimeArgs(BaseModel):
+    whitening_matrix: Optional[np.ndarray] = None
+    wwt: Optional[np.ndarray] = None
+    wwt_inv: Optional[np.ndarray] = None
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
 class Args(BaseModel):
     opt = OptimizationArgs()
     arch = ArchitectureArgs()
     env = EnvironmentArgs()
     data = DataArgs()
+    runtime = RunTimeArgs()
 
-    def flattened_dict(self):
+    def flattened_dict(self, include_runtime_args: bool = False):
         """
         Returns the arguments as a flattened dictionary, without the category name (i.e. opt, arch, env, data).
         It's assumed that there is no field with the same name among different categories.
         """
-        return {k[1]: v for k, v in flatten_dict.flatten(self.dict()).items()}
+        exclude_set = set() if include_runtime_args else {'runtime'}
+        return {k[1]: v for k, v in flatten_dict.flatten(self.dict(exclude=exclude_set)).items()}
