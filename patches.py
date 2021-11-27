@@ -15,7 +15,6 @@ from math import ceil
 import yaml
 from torchvision.transforms.functional import hflip
 
-import schemas.patches
 import wandb
 
 import numpy as np
@@ -32,11 +31,14 @@ from datetime import timedelta
 from consts import CIFAR10_IMAGE_SIZE, N_CLASSES
 from schemas.patches import Args, ArchitectureArgs
 from utils import (configure_logger,
-                   create_out_dir,
                    get_dataloaders,
                    Accumulator,
                    perform_train_step_regular,
-                   evaluate_model, get_args, log_args, get_model_device, get_model_output_shape)
+                   evaluate_model, 
+                   get_args, 
+                   log_args, 
+                   get_model_device, 
+                   get_model_output_shape)
 
 """
 Ideas
@@ -350,31 +352,96 @@ def visualize_image_patch_pair(image, patch, patch_x_start, patch_y_start):
     plt.show()
 
 
-def visualize_patches_weights(model):
+def unwhiten_patches(patches: np.ndarray, args: Args) -> np.ndarray:
+    assert args.runtime.wwt_inv is not None, \
+        "How did we reach the function 'unwhiten_patches' if the whitening matrix wasn't calculated yet?"
+
+    patches_flattened = patches.reshape(patches.shape[0], -1)
+    patches_orig_flattened = np.dot(patches_flattened, args.runtime.wwt_inv)
+    patches_orig = patches_orig_flattened.reshape(patches.shape)
+
+    return patches_orig
+
+
+def get_extreme_patches_indices(norms_numpy, number_of_extreme_patches_to_show):
+    partitioned_indices = np.argpartition(norms_numpy, number_of_extreme_patches_to_show)
+    worst_patches_indices = partitioned_indices[:number_of_extreme_patches_to_show]
+    partitioned_indices = np.argpartition(norms_numpy, len(norms_numpy) - number_of_extreme_patches_to_show)
+    best_patches_indices = partitioned_indices[-number_of_extreme_patches_to_show:]
+
+    return worst_patches_indices, best_patches_indices
+
+
+def get_extreme_patches_unwhitened(model, args, worst_patches_indices, best_patches_indices):
+    all_patches = model.patch_based_embedding.kernel_convolution.cpu().numpy()
+    worst_patches = all_patches[worst_patches_indices]
+    best_patches = all_patches[best_patches_indices]
+
+    both_patches = np.concatenate([worst_patches, best_patches])
+    both_patches_unwhitened = unwhiten_patches(both_patches, args)
+
+    worst_patches_unwhitened = both_patches_unwhitened[:len(worst_patches)]
+    best_patches_unwhitened = both_patches_unwhitened[len(best_patches):]
+
+    return worst_patches_unwhitened, best_patches_unwhitened
+
+
+def visualize_patches(model: ClassifierOnPatchBasedEmbedding, args: Args, n: int = 3):
     bottleneck_weight = model.bottle_neck_conv_1.weight.data.squeeze(dim=3).squeeze(dim=2)
     for norm_ord in [1, 2, np.inf]:
         norms = torch.linalg.norm(bottleneck_weight, ord=norm_ord, dim=0)
-        wandb.log({f'L{norm_ord}_norm_patches_weights': wandb.Histogram(norms)}, step=training_step)
+        norms_numpy = norms.cpu().numpy()
+        wandb.log({f'L{norm_ord}_norm_patches_weights': wandb.Histogram(norms_numpy)}, step=training_step)
 
+        worst_patches_indices, best_patches_indices = get_extreme_patches_indices(norms_numpy, n ** 2)
+        worst_patches_unwhitened, best_patches_unwhitened = get_extreme_patches_unwhitened(
+            model, args, worst_patches_indices, best_patches_indices)
 
-# class VisualizePatchesWeights:
-#     def __init__(self, interval: Optional[int] = 100):
-#         self.interval: int = interval
-#
-#     def at_interval(self):
-#         global training_step
-#         return training_step % self.interval == 0
-#
-#     def visualize(self, model: ClassifierOnPatchBasedEmbedding):
-#         if self.at_interval():
-#             visualize_patches_weights(model)
+        # Due to numerical issues sometimes the values are slightly outside [0,1] which causes annoying plt warning
+        worst_patches_unwhitened = np.clip(worst_patches_unwhitened, 0, 1)
+        best_patches_unwhitened = np.clip(best_patches_unwhitened, 0, 1)
+
+        worst_patches_fig, worst_patches_axs = plt.subplots(n, n)
+        best_patches_fig, best_patches_axs = plt.subplots(n, n)
+
+        best_patches_fig.suptitle('Best patches (i.e. high norm)')
+        worst_patches_fig.suptitle('Worst patches (i.e. low norm)')
+
+        for i in range(n ** 2):
+            row_index = i // n
+            col_index = i % n
+            best_patches_axs[row_index, col_index].imshow(best_patches_unwhitened[i].transpose(1, 2, 0),
+                                                          vmin=0, vmax=1)
+            worst_patches_axs[row_index, col_index].imshow(worst_patches_unwhitened[i].transpose(1, 2, 0),
+                                                           vmin=0, vmax=1)
+            best_patches_axs[row_index, col_index].axis('off')
+            worst_patches_axs[row_index, col_index].axis('off')
+
+        wandb.log({'best_patches': best_patches_fig, 'worst_patches': worst_patches_fig}, step=training_step)
+        plt.close('all')  # Avoid memory consumption
+
+@torch.no_grad()
+def kill_weak_patches(model: ClassifierOnPatchBasedEmbedding, args: Args) -> ClassifierOnPatchBasedEmbedding:
+    bottleneck_weight = model.bottle_neck_conv_1.weight.data.squeeze(dim=3).squeeze(dim=2)
+    norms = torch.linalg.norm(bottleneck_weight, ord=1, dim=0)
+    quantile = torch.quantile(norms, 1 - args.arch.survival_of_the_fittest_fraction_of_survivals)
+    strong_patches_mask = torch.greater(norms, quantile)
+    weak_patches_mask = torch.logical_not(strong_patches_mask)
+    n_weak_patches = torch.sum(weak_patches_mask).cpu().numpy().item()
+    kernel, bias = get_conv_kernel_and_bias(n_weak_patches, args.arch.patch_size, args)  # TODO existing model=?
+
+    model.patch_based_embedding.kernel_convolution[weak_patches_mask, :, :, :] = kernel.to(args.env.device)
+    model.patch_based_embedding.bias_convolution[:, weak_patches_mask, :, :] = bias.view(
+        (1, n_weak_patches, 1, 1)).to(args.env.device)
+
+    return model
 
 
 training_step = 0
 
 
 def train_model(args: Args,
-                model: nn.Module,
+                model: ClassifierOnPatchBasedEmbedding,
                 dataloaders,
                 criterion: nn.CrossEntropyLoss,
                 optimizer: torch.optim.Optimizer,
@@ -395,8 +462,13 @@ def train_model(args: Args,
         model.train()
         epoch_accumulator.reset()
 
+        if (args.arch.survival_of_the_fittest_enabled and
+                (epoch != 0) and
+                (epoch % args.arch.survival_of_the_fittest_rate_of_evolution_in_epochs == 0)):
+            model = kill_weak_patches(model, args)
+
         for inputs, labels in dataloaders['train']:
-            # if training_step > 1:  # TODO temporary
+            # if np.random.binomial(n=1, p=0.1) == 1:  # TODO temporary
             #     break
             training_step += 1
 
@@ -423,7 +495,7 @@ def train_model(args: Args,
                 #             f'loss={interval_accumulator.get_mean_loss():.4f} '
                 #             f'acc={interval_accumulator.get_accuracy():.2f}%')
                 interval_accumulator.reset()
-                visualize_patches_weights(model)
+                visualize_patches(model, args)
 
         # # For debugging purposes - verify that the weights of the model changed.
         # new_model_state = copy.deepcopy(model.state_dict())
@@ -549,10 +621,13 @@ def get_conv_kernel_and_bias(args: Args,
     patches_flattened = patches.reshape(patches.shape[0], -1)
 
     if args.arch.use_whitening:
-        whitening_matrix = calc_whitening(args, clean_dataloaders['train'], existing_model)
+        if args.runtime.whitening_matrix is None:
+            args.runtime.whitening_matrix = calc_whitening(args, clean_dataloaders['train'], existing_model)
+            args.runtime.wwt = np.dot(args.runtime.whitening_matrix, np.transpose(args.runtime.whitening_matrix))
+            args.runtime.wwt_inv = np.linalg.inv(args.runtime.wwt)  # Might be used later for un-whitening
 
-        kernel = np.linalg.multi_dot([patches_flattened, whitening_matrix, whitening_matrix.T]).reshape(patches.shape)
-        bias = np.linalg.norm(patches_flattened.dot(whitening_matrix), axis=1) ** 2
+        kernel = np.dot(patches_flattened, args.runtime.wwt).reshape(patches.shape)
+        bias = np.linalg.norm(patches_flattened.dot(args.runtime.whitening_matrix), axis=1) ** 2
     else:
         kernel = patches
         bias = np.linalg.norm(patches_flattened, axis=1) ** 2
@@ -597,7 +672,7 @@ def train_patch_based_model(args: Args, existing_model: Optional[nn.Module] = No
 
 
 def main():
-    args = get_args(args_class=schemas.patches.Args)
+    args = get_args(args_class=Args)
 
     configure_logger(args.env.path)
     log_args(args)

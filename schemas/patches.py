@@ -1,6 +1,7 @@
-from typing import Optional
-
 import flatten_dict
+import numpy as np
+
+from typing import Optional
 from pydantic import BaseModel, validator
 from pydantic.types import PositiveInt
 
@@ -69,6 +70,12 @@ class ArchitectureArgs(ImmutableArgs):
     #: The depth of the neural-network, if greater than 1 then multiple base networks will be stacked together.
     depth: PositiveInt = 1
 
+    survival_of_the_fittest_enabled: bool = False
+
+    survival_of_the_fittest_fraction_of_survivals: ProperFraction = 0.25
+
+    survival_of_the_fittest_rate_of_evolution_in_epochs: PositiveInt = 50
+
     @validator('k_neighbors', always=True, pre=True)
     def calculate_k_neighbors(cls, v, values):
         assert v is None, 'The argument k_neighbors should not be given, ' \
@@ -81,15 +88,26 @@ class ArchitectureArgs(ImmutableArgs):
         return v
 
 
+class RunTimeArgs(BaseModel):
+    whitening_matrix: Optional[np.ndarray] = None
+    wwt: Optional[np.ndarray] = None
+    wwt_inv: Optional[np.ndarray] = None
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
 class Args(BaseModel):
     opt = OptimizationArgs()
     arch = ArchitectureArgs()
     env = EnvironmentArgs()
     data = DataArgs()
+    runtime = RunTimeArgs()
 
-    def flattened_dict(self):
+    def flattened_dict(self, include_runtime_args: bool = False):
         """
         Returns the arguments as a flattened dictionary, without the category name (i.e. opt, arch, env, data).
         It's assumed that there is no field with the same name among different categories.
         """
-        return {k[1]: v for k, v in flatten_dict.flatten(self.dict()).items()}
+        exclude_set = set() if include_runtime_args else {'runtime'}
+        return {k[1]: v for k, v in flatten_dict.flatten(self.dict(exclude=exclude_set)).items()}
