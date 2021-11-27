@@ -14,7 +14,7 @@ from vgg import configs
 class ArchitectureArgs(ImmutableArgs):
 
     #: The model name for the network architecture.
-    model_name: str = 'VGGs'
+    model_name: str = 'VGG11c'
 
     #: How many hidden layers the final MLP at the end of the convolution blocks.
     final_mlp_n_hidden_layers: NonNegativeInt = 1
@@ -29,11 +29,11 @@ class ArchitectureArgs(ImmutableArgs):
     padding_mode: Literal['zeros', 'circular'] = 'zeros'
 
     #: Number of patches to sample uniformly at random to estimate the intrinsic dimension.
-    n_patches: PositiveInt = 16
+    n_patches: PositiveInt = 16384
 
     #: The minimal and maximal values of k to average the intrinsic-dimension estimate and get $\\hat(m)$ (see paper)
-    k1: PositiveInt = 4
-    k2: PositiveInt = 8
+    k1: PositiveInt = 10
+    k2: PositiveInt = 20
 
     @root_validator
     def validate_k1_and_k2(cls, values):

@@ -14,6 +14,7 @@ def initialize(args: Args):
                 final_mlp_hidden_dim=args.arch.final_mlp_hidden_dim,
                 dropout_prob=args.arch.dropout_prob,
                 padding_mode=args.arch.padding_mode)
+    model.to(args.env.device)
 
     wandb.init(project='thesis', config=args.flattened_dict())
     wandb.watch(model)
@@ -99,10 +100,10 @@ def calc_intrinsic_dimension_per_layer(model,
         extrinsic_dimension = patches_flattened.shape[1]
         intrinsic_dimension = calc_intrinsic_dimension(patches_flattened, k1, k2)
         dimensions_ratio = intrinsic_dimension / extrinsic_dimension
-        logger.info(f'Block {i}: '
-                    f'Intrinsic-dimension = {intrinsic_dimension:.2f}; '
-                    f'Extrinsic-dimension = {extrinsic_dimension}; '
-                    f'Ratio = {dimensions_ratio}')
+        logger.info(f'Block {i}')
+        logger.info(f'\tIntrinsic-dimension = {intrinsic_dimension:.2f}; ')
+        logger.info(f'\tExtrinsic-dimension = {extrinsic_dimension}; ')
+        logger.info(f'\tRatio               = {dimensions_ratio:.4f}')
 
 
 def main():
