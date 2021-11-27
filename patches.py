@@ -15,6 +15,7 @@ from math import ceil
 import yaml
 from torchvision.transforms.functional import hflip
 
+import schemas.patches
 import wandb
 
 import numpy as np
@@ -35,7 +36,7 @@ from utils import (configure_logger,
                    get_dataloaders,
                    Accumulator,
                    perform_train_step_regular,
-                   evaluate_model)
+                   evaluate_model, get_args, log_args, get_model_device, get_model_output_shape)
 
 """
 Ideas
@@ -270,8 +271,9 @@ class PatchBasedEmbedding(nn.Module):
 
 
 @torch.no_grad()
-def sample_random_patches(args: Args,
-                          data_loader,
+def sample_random_patches(data_loader,
+                          n_patches,
+                          patch_size,
                           existing_model: Optional[nn.Module] = None,
                           visualize: bool = False):
     """
@@ -284,14 +286,15 @@ def sample_random_patches(args: Args,
     batch_size = data_loader.batch_size
     n_images, height, width, channels = data_loader.dataset.data.shape
     if existing_model is not None:
-        channels, height, width = get_model_output_shape(existing_model, args.env.device)
+        device = get_model_device(existing_model)
+        channels, height, width = get_model_output_shape(existing_model)
 
     spatial_size = height
-    n_patches_per_row_or_col = spatial_size - args.arch.patch_size + 1
+    n_patches_per_row_or_col = spatial_size - patch_size + 1
     n_patches_per_image = n_patches_per_row_or_col ** 2
     n_patches_in_dataset = n_images * n_patches_per_image
 
-    patches_indices_in_dataset = np.sort(rng.choice(n_patches_in_dataset, size=args.arch.n_patches, replace=False))
+    patches_indices_in_dataset = np.sort(rng.choice(n_patches_in_dataset, size=n_patches, replace=False))
 
     images_indices = patches_indices_in_dataset % n_images
     patches_indices_in_images = patches_indices_in_dataset // n_images
@@ -301,7 +304,7 @@ def sample_random_patches(args: Args,
     batches_indices = images_indices // batch_size
     images_indices_in_batches = images_indices % batch_size
 
-    patches = np.empty(shape=(args.arch.n_patches, channels, args.arch.patch_size, args.arch.patch_size),
+    patches = np.empty(shape=(n_patches, channels, patch_size, patch_size),
                        dtype=np.float32)
 
     for batch_index, (inputs, _) in enumerate(data_loader):
@@ -312,7 +315,7 @@ def sample_random_patches(args: Args,
         relevant_patches_indices = np.where(relevant_patches_mask)[0]
 
         if existing_model is not None:
-            inputs = inputs.to(args.env.device)
+            inputs = inputs.to(device)
             inputs = existing_model(inputs)
         inputs = inputs.cpu().numpy()
 
@@ -320,8 +323,8 @@ def sample_random_patches(args: Args,
             image_index_in_batch = images_indices_in_batches[i]
             patch_x_start = patches_x_indices_in_images[i]
             patch_y_start = patches_y_indices_in_images[i]
-            patch_x_slice = slice(patch_x_start, patch_x_start + args.arch.patch_size)
-            patch_y_slice = slice(patch_y_start, patch_y_start + args.arch.patch_size)
+            patch_x_slice = slice(patch_x_start, patch_x_start + patch_size)
+            patch_y_slice = slice(patch_y_start, patch_y_start + patch_size)
 
             patches[i] = inputs[image_index_in_batch, :, patch_x_slice, patch_y_slice]
 
@@ -536,14 +539,13 @@ def calc_whitening(args: Args, dataloader, existing_model: Optional[nn.Module] =
 def get_conv_kernel_and_bias(args: Args,
                              existing_model: Optional[nn.Module] = None) -> Tuple[torch.Tensor, torch.Tensor]:
     clean_dataloaders = get_dataloaders(args.opt.batch_size,
-                                        normalize_to_unit_gaussian=False,
-                                        normalize_to_plus_minus_one=False,
-                                        random_crop=False,
-                                        random_horizontal_flip=False,
-                                        random_erasing=False,
-                                        random_resized_crop=False)
+                                        normalize_to_unit_gaussian=args.data.normalization_to_unit_gaussian,
+                                        normalize_to_plus_minus_one=args.data.normalization_to_plus_minus_one)
 
-    patches = sample_random_patches(args, clean_dataloaders['train'], existing_model, visualize=False)
+    patches = sample_random_patches(clean_dataloaders['train'],
+                                    args.arch.n_patches,
+                                    args.arch.patch_size,
+                                    existing_model)
     patches_flattened = patches.reshape(patches.shape[0], -1)
 
     if args.arch.use_whitening:
@@ -561,26 +563,9 @@ def get_conv_kernel_and_bias(args: Args,
     return kernel, bias
 
 
-@torch.no_grad()
-def get_model_output_shape(model: nn.Module, device: torch.device):
-    clean_dataloaders = get_dataloaders(batch_size=1,
-                                        normalize_to_unit_gaussian=False,
-                                        normalize_to_plus_minus_one=False,
-                                        random_crop=False,
-                                        random_horizontal_flip=False,
-                                        random_erasing=False,
-                                        random_resized_crop=False)
-    inputs, _ = next(iter(clean_dataloaders["train"]))
-    inputs = inputs.to(device)
-    outputs = model(inputs)
-    outputs = outputs.cpu().numpy()
-    _, channels, height, width = outputs.shape
-    return channels, height, width
-
-
 def train_patch_based_model(args: Args, existing_model: Optional[nn.Module] = None):
     device = torch.device(args.env.device)
-    _, height, width = (3, 32, 32) if (existing_model is None) else get_model_output_shape(existing_model, device)
+    _, height, width = (3, 32, 32) if (existing_model is None) else get_model_output_shape(existing_model)
     input_image_spatial_size = height
 
     kernel, bias = get_conv_kernel_and_bias(args, existing_model)
@@ -611,46 +596,8 @@ def train_patch_based_model(args: Args, existing_model: Optional[nn.Module] = No
     return best_model
 
 
-def get_args() -> Args:
-    known_args, unknown_args = parse_args()
-    with open(known_args.yaml_path, 'r') as f:
-        args_dict = yaml.load(f, Loader=yaml.FullLoader)
-
-    while len(unknown_args) > 0:
-        arg_name = unknown_args.pop(0).replace('--', '')
-        values = list()
-        while (len(unknown_args) > 0) and (not unknown_args[0].startswith('--')):
-            values.append(unknown_args.pop(0))
-        if len(values) == 0:
-            raise ValueError(f'Argument {arg_name} given in command line has no corresponding value.')
-        value = values[0] if len(values) == 1 else values
-
-        categories = list(Args.__fields__.keys())
-        found = False
-        for category in categories:
-            category_args = list(Args.__fields__[category].default.__fields__.keys())
-            if arg_name in category_args:
-                if category not in args_dict:
-                    args_dict[category] = dict()
-                args_dict[category][arg_name] = value
-                found = True
-
-        if not found:
-            raise ValueError(f'Argument {arg_name} is not recognized.')
-
-    args = Args.parse_obj(args_dict)
-
-    return args
-
-
-def log_args(args):
-    logger.info(f'Starting to train patch-based-classifier with the following arguments:')
-    for arg_name, value in args.flattened_dict().items():
-        logger.info(f'{f"{arg_name} ":-<50} {value}')
-
-
 def main():
-    args = get_args()
+    args = get_args(args_class=schemas.patches.Args)
 
     configure_logger(args.env.path)
     log_args(args)
@@ -662,17 +609,6 @@ def main():
         model.prediction_mode_off()
         # TODO remove gradients from the model computational-graph since they are no longer needed.
         model2 = train_patch_based_model(args, existing_model=model)
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description='Main script for running the experiments for patches-based learning.'
-                    'The experiments results are outputted to a log-file and to wandb.'
-    )
-
-    parser.add_argument('yaml_path', help=f'Path to a YAML file with the arguments according to the pydantic schema')
-
-    return parser.parse_known_args()
 
 
 if __name__ == '__main__':

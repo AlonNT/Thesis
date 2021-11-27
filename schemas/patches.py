@@ -1,62 +1,13 @@
-import datetime
-import torch
+from typing import Optional
+
 import flatten_dict
+from pydantic import BaseModel, validator
+from pydantic.types import PositiveInt
 
-from pathlib import Path
-from typing import List, Literal, Optional
-from pydantic import BaseModel, Extra, validator
-from pydantic.types import PositiveInt, ConstrainedFloat, DirectoryPath
-
-from consts import DATETIME_STRING_FORMAT
-
-
-class NonNegativeFloat(ConstrainedFloat):
-    ge = 0
-
-
-class ProperFraction(ConstrainedFloat):
-    gt = 0
-    lt = 1
-
-
-class ImmutableArgs(BaseModel):
-    class Config:
-        allow_mutation = True
-        extra = Extra.forbid
-
-
-class OptimizationArgs(ImmutableArgs):
-
-    #: Number of epochs to train.
-    epochs: PositiveInt = 80
-
-    #: Mini batch size to use in each training-step.
-    batch_size: PositiveInt = 128
-
-    #: Momentum to use in SGD optimizer.
-    momentum: ProperFraction = 0.9
-
-    #: Amount of weight decay (regularization).
-    weight_decay: NonNegativeFloat = 0
-
-    # The initial learning-rate which might later be decayed.
-    learning_rate: ProperFraction = 0.003
-
-    #: Decay the learning-rate at these steps by a factor of `learning_rate_decay_gamma`.
-    learning_rate_decay_steps: List[PositiveInt] = [50, 75]
-
-    #: The factor gamma to multiply the learning-rate at the decay steps.
-    learning_rate_decay_gamma: ProperFraction = 0.1
-
-    @validator('learning_rate_decay_steps', each_item=True)
-    def validate_learning_rate_decay_steps_below_epochs(cls, v, values):
-        assert v < values['epochs'], "Each decay step must be lower than the total number of epoch."
-        return v
-
-    @validator('learning_rate_decay_steps')
-    def validate_learning_rate_decay_steps_are_ascending(cls, v):
-        assert all(v[i] <= v[i+1] for i in range(len(v)-1)), "Decay steps should be ascending."
-        return v
+from schemas.data import DataArgs
+from schemas.environment import EnvironmentArgs
+from schemas.optimization import OptimizationArgs
+from schemas.utils import ImmutableArgs, ProperFraction, NonNegativeFloat
 
 
 class ArchitectureArgs(ImmutableArgs):
@@ -128,46 +79,6 @@ class ArchitectureArgs(ImmutableArgs):
     def validate_depth(cls, v):
         assert v in {1, 2}, "Currently only depth 1 or 2 is supported."
         return v
-
-
-class EnvironmentArgs(ImmutableArgs):
-
-    #: On which device to train.
-    device: Literal['cpu', 'cuda:0', 'cuda:1', 'cuda:2', 'cuda:3', 'cuda:4', 'cuda:5', 'cuda:6', 'cuda:7'] = 'cpu'
-
-    #: Output path for the experiment - a sub-directory named with the data and time will be created within.
-    path: DirectoryPath = './experiments'
-
-    #: How many iterations between each training log.
-    log_interval: PositiveInt = 100
-
-    @validator('path', always=True)
-    def create_out_dir(cls, v: Path):
-        datetime_string = datetime.datetime.now().strftime(DATETIME_STRING_FORMAT)
-        out_dir = v / datetime_string
-        out_dir.mkdir(exist_ok=True)  # exist_ok because this validator is being called multiple times (I think)
-        return out_dir
-
-    @validator('device')
-    def validate_device_exists(cls, v):
-        if v.startswith('cuda:'):
-            assert torch.cuda.is_available(), f"CUDA is not available, so can't use device {v}"
-            assert int(v[-1]) < torch.cuda.device_count(), f"GPU index {v[-1]} is higher than the number of GPUS."
-        return v
-
-
-class DataArgs(ImmutableArgs):
-    #: Whether to normalize of the values to a unit gaussian.
-    normalization_to_unit_gaussian: bool = True
-
-    #: Whether to use random cropping which is padding of 4 followed by random crop.
-    random_crop: bool = True
-
-    #: Whether to use random horizontal flipping (with probability 0.5).
-    random_horizontal_flip: bool = True
-
-    #: Whether to normalize of the values to the interval [-1,+1].
-    normalization_to_plus_minus_one: bool = False
 
 
 class Args(BaseModel):

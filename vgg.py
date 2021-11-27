@@ -188,6 +188,23 @@ class VGG(nn.Module):
         return outputs
 
 
+def get_vgg_model_kernel_size(model: VGG, block_index: int):
+    if not (0 <= block_index < len(model.features)):
+        raise IndexError(f"block_index {block_index} is out-of-bounds (len={len(model.features)})")
+
+    block = model.features[block_index]
+
+    if not isinstance(block, nn.Sequential):
+        raise ValueError(f"block_index {block_index} is not a sequential module (i.e. \'block\'), it's {type(block)}.")
+
+    conv_layer = block[0]
+
+    if not isinstance(conv_layer, nn.Conv2d):
+        raise ValueError(f"first layer of the block is not a conv layer, it's {type(conv_layer)}")
+
+    return conv_layer.kernel_size
+
+
 class VGGwDGL(nn.Module):
     def __init__(self,
                  vgg_name: str,

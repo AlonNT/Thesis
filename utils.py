@@ -1,19 +1,21 @@
+import argparse
 import copy
 import datetime
 import os
 import sys
 import time
+import itertools
+import yaml
 
 import torch
-import torch.nn as nn
 import torchvision
-import itertools
 import wandb
 
+import torch.nn as nn
 import numpy as np
 
 from torchvision.transforms.functional import resize
-from typing import List, Union, Optional, Dict
+from typing import List, Optional, Dict
 from loguru import logger
 from datetime import timedelta
 
@@ -208,8 +210,7 @@ def get_dataloaders(batch_size: int = 64,
     :param normalize_to_plus_minus_one: If true, normalize the values to be in the range [-1,1] (instead of [0,1]).
     :param random_crop: If true, performs padding of 4 followed by random crop.
     :param random_horizontal_flip: If true, performs random horizontal flip.
-    :param random_erasing: If true, performs erase a random rectangle in the image.
-                           See https://arxiv.org/pdf/1708.04896.pdf.
+    :param random_erasing: If true, erase a random rectangle in the image. See https://arxiv.org/pdf/1708.04896.pdf.
     :param random_resized_crop: If true, performs random resized crop.
     :return: A dictionary mapping "train"/"test" to its dataloader.
     """
@@ -229,10 +230,10 @@ def get_dataloaders(batch_size: int = 64,
         # For the different normalization values see:
         # https://discuss.pytorch.org/t/normalization-in-the-mnist-example/457/7
         if normalize_to_unit_gaussian:
-            # These noramlization values are taken from https://github.com/kuangliu/pytorch-cifar/issues/19
+            # These normalization values are taken from https://github.com/kuangliu/pytorch-cifar/issues/19
             # normalization_values = [(0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)]
 
-            # These noramlization values are taken from https://github.com/louity/patches
+            # These normalization values are taken from https://github.com/louity/patches
             # and also https://stackoverflow.com/questions/50710493/cifar-10-meaningless-normalization-values
             normalization_values = [(0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)]
         else:
@@ -255,7 +256,8 @@ def get_dataloaders(batch_size: int = 64,
     return dataloaders
 
 
-def evaluate_model_with_last_gradient(model, criterion, dataloader, device, training_step=None, log_to_wandb: bool = True):
+def evaluate_model_with_last_gradient(model, criterion, dataloader, device, training_step=None,
+                                      log_to_wandb: bool = True):
     """
     Evaluate the given model on the test set.
     In addition to returning the final test loss & accuracy,
@@ -284,10 +286,10 @@ def evaluate_model_with_last_gradient(model, criterion, dataloader, device, trai
                                for outputs in aux_nets_outputs]
             aux_nets_predictions = [torch.max(outputs, dim=1)[1] if (outputs is not None) else None
                                     for outputs in aux_nets_outputs]
-            
+
             # Update the corresponding accumulators to visualize the performance of each module.
             for i in range(len(model.blocks)):
-                if model.auxiliary_nets[i] is not None:        
+                if model.auxiliary_nets[i] is not None:
                     modules_accumulators[i].update(
                         mean_loss=aux_nets_losses[i].item(),
                         num_corrects=torch.sum(torch.eq(aux_nets_predictions[i], labels.data)).item(),
@@ -610,12 +612,12 @@ def bdot(a, b):
     """
     batch_size = a.shape[0]
     dimension = a.shape[1]
-    return torch.bmm(a.view(batch_size, 1, dimension), 
+    return torch.bmm(a.view(batch_size, 1, dimension),
                      b.view(batch_size, dimension, 1)).reshape(-1)
 
 
 def perform_train_step_last_gradient(model, inputs, labels, criterion, optimizer,
-                                     training_step, modules_accumulators, 
+                                     training_step, modules_accumulators,
                                      last_gradient_weight: float = 0.5, log_interval: int = 100):
     """
     Perform a train-step for a model trained with the last gradient in each intermediate module.
@@ -644,13 +646,13 @@ def perform_train_step_last_gradient(model, inputs, labels, criterion, optimizer
     last_logits = aux_nets_outputs[-2]  # minus 2 because the last block is a pooling layer
     last_loss = aux_nets_losses[-2]
     last_gradient = (1 / minibatch_size) * cross_entropy_gradient(last_logits, labels).detach()
-    
+
     dummy_losses = [torch.mean(bdot(last_gradient, aux_net_outputs))
                     for aux_net_outputs in aux_nets_outputs[:-2]
                     if aux_net_outputs is not None]
 
-    loss = (last_loss + 
-            (1 - last_gradient_weight) * torch.sum(torch.stack([l for l in aux_nets_losses if l is not None])) + 
+    loss = (last_loss +
+            (1 - last_gradient_weight) * torch.sum(torch.stack([l for l in aux_nets_losses if l is not None])) +
             last_gradient_weight * torch.sum(torch.stack(dummy_losses)))
 
     # This line (instead of the above loss definition) gives DGL equivalent implementation. 
@@ -661,7 +663,7 @@ def perform_train_step_last_gradient(model, inputs, labels, criterion, optimizer
 
     # Update the corresponding accumulators to visualize the performance of each module.
     for i in range(len(model.blocks)):
-        if model.auxiliary_nets[i] is not None:        
+        if model.auxiliary_nets[i] is not None:
             modules_accumulators[i].update(
                 mean_loss=aux_nets_losses[i].item(),
                 num_corrects=torch.sum(torch.eq(aux_nets_predictions[i], labels.data)).item(),
@@ -737,7 +739,7 @@ def perform_train_step(model, inputs, labels, criterion, optim,
             return perform_train_step_direct_global(*mutual_args, training_step, modules_accumulators,
                                                     last_gradient_weight)
         elif use_last_gradient:
-            return perform_train_step_last_gradient(*mutual_args, training_step, modules_accumulators, 
+            return perform_train_step_last_gradient(*mutual_args, training_step, modules_accumulators,
                                                     last_gradient_weight)
         elif ssl:
             return perform_train_step_ssl(*mutual_args, training_step, ssl_criterion, pred_loss_weight, ssl_loss_weight,
@@ -768,7 +770,7 @@ def get_optim(model, optimizer_params, is_dgl, use_last_gradient=False):
         optimizer_constuctor = torch.optim.SGD
     else:
         raise ValueError(f'optimizer_type {optimizer_type} should be \'Adam\' or \'SGD\'.')
-    
+
     if use_last_gradient:
         return optimizer_constuctor(model.parameters(), **optimizer_params)
     if is_dgl:
@@ -792,24 +794,24 @@ def get_optim(model, optimizer_params, is_dgl, use_last_gradient=False):
         return optimizer_constuctor(model.parameters(), **optimizer_params)
 
 
-def train_model(model, criterion, optimizer_params, dataloaders, device,
-                num_epochs=25, log_interval=100, is_dgl=False, 
-                is_ssl=False, ssl_criterion=None, pred_loss_weight=1, ssl_loss_weight=0.1,
-                first_trainable_block=0, shift_ssl_labels=False,
-                is_direct_global=False, last_gradient_weight: float = 0.5,
-                use_last_gradient=False):
+def train_local_model(model, dataloaders, criterion, optimizer, device,
+                      num_epochs=25, log_interval=100,
+                      is_dgl=False, is_ssl=False,
+                      ssl_criterion=None, pred_loss_weight=1, ssl_loss_weight=0.1,
+                      first_trainable_block=0, shift_ssl_labels=False,
+                      is_direct_global=False, last_gradient_weight: float = 0.5,
+                      use_last_gradient=False):
     """
     A general function to train a model and return the best model found.
 
     :param model: the model to train
     :param criterion: which loss to train on
-    :param optimizer_params: the optimizer to train with
+    :param optimizer: the optimizer to train with
     :param dataloaders: the dataloaders to feed the model
     :param device: which device to train on
     :param num_epochs: how many epochs to train
     :param log_interval: How many training/testing steps between each logging (to wandb).
     :param is_dgl: Whether this model is trained using DGL (affects the optimizer and the train-step functionality).
-    :param is_cdni: Whether this model is trained using DNI with context or not (affects the train-step functionality).
     :param is_ssl: Whether this model is trained using self-supervised local loss (predicting the shifted image).
     :param ssl_criterion:
     :param pred_loss_weight: When combining with DGL, the weight for the scores' prediction loss.
@@ -826,21 +828,14 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
     best_weights = copy.deepcopy(model.state_dict())
     best_accuracy = 0.0
 
-    optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]] = get_optim(model, optimizer_params, is_dgl, use_last_gradient)
-
-    total_time = 0
     training_step = 0
+    total_time = 0
     interval_accumulator = Accumulator()
     epoch_accumulator = Accumulator()
-
-    if is_dgl:
-        modules_accumulators = [Accumulator() if (aux_net is not None) else None for aux_net in model.auxiliary_nets]
-    else:
-        modules_accumulators = None
+    modules_accumulators = None if (not is_dgl) else [Accumulator() if (aux_net is not None) else None
+                                                      for aux_net in model.auxiliary_nets]
 
     for epoch in range(num_epochs):
-        # For debugging purposes later - verify weights change.
-        # model_state = copy.deepcopy(model.state_dict())
         model.train()
         epoch_accumulator.reset()
 
@@ -850,7 +845,7 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
             inputs = inputs.to(device)
             labels = labels.to(device)
 
-            train_step_result = perform_train_step(model, inputs, labels, criterion, optim, training_step,
+            train_step_result = perform_train_step(model, inputs, labels, criterion, optimizer, training_step,
                                                    is_dgl, is_ssl, ssl_criterion, pred_loss_weight, ssl_loss_weight,
                                                    first_trainable_block, shift_ssl_labels, is_direct_global,
                                                    modules_accumulators, last_gradient_weight, use_last_gradient)
@@ -875,7 +870,8 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
                 interval_accumulator.reset()
 
         if use_last_gradient:
-            epoch_test_loss, epoch_test_accuracy = evaluate_model_with_last_gradient(model, criterion, dataloaders['test'], device,
+            epoch_test_loss, epoch_test_accuracy = evaluate_model_with_last_gradient(model, criterion,
+                                                                                     dataloaders['test'], device,
                                                                                      training_step)
         elif is_dgl:
             epoch_test_loss, epoch_test_accuracy = evaluate_local_model(model, criterion, dataloaders['test'], device,
@@ -890,36 +886,78 @@ def train_model(model, criterion, optimizer_params, dataloaders, device,
             best_accuracy = epoch_test_accuracy
             best_weights = copy.deepcopy(model.state_dict())
 
-        epoch_time_elapsed = epoch_accumulator.get_time()
-        total_time += epoch_time_elapsed
-        epochs_left = num_epochs - (epoch + 1)
-        avg_epoch_time = total_time / (epoch + 1)
-        time_left = avg_epoch_time * epochs_left
-        logger.info(f'Epoch {epoch + 1:0>3d}/{num_epochs:0>3d} '
-                    f'({str(timedelta(seconds=epoch_time_elapsed)).split(".")[0]}) | '
-                    f'ETA {str(timedelta(seconds=time_left)).split(".")[0]} | '
-                    f'Train '
-                    f'loss={epoch_accumulator.get_mean_loss():.4f} '
-                    f'acc={epoch_accumulator.get_accuracy():.2f}% | '
-                    f'Test '
-                    f'loss={epoch_test_loss:.4f} '
-                    f'acc={epoch_test_accuracy:.2f}%')
-
-        # # For debugging purposes - verify that the weights of the model changed.
-        # new_model_state = copy.deepcopy(model.state_dict())
-        # for weight_name in new_model_state.keys():
-        #     old_weight = model_state[weight_name]
-        #     new_weight = new_model_state[weight_name]
-        #     if torch.allclose(old_weight, new_weight):
-        #         logger.warning(f'Weight \'{weight_name}\' of shape {list(new_weight.size())} did not change.')
-        #     else:
-        #         logger.debug(f'Weight \'{weight_name}\' of shape {list(new_weight.size())} changed.')
-        # model_state = copy.deepcopy(new_model_state)
+        epoch_time = epoch_accumulator.get_time()
+        total_time += epoch_time
+        log_epoch_end(epoch, epoch_time, num_epochs, total_time,
+                      epoch_accumulator.get_mean_loss(), epoch_accumulator.get_accuracy(),
+                      epoch_test_loss, epoch_test_accuracy)
 
     logger.info(f'Best test accuracy: {best_accuracy:.2f}%')
 
     model.load_state_dict(best_weights)  # load best model weights
     return model
+
+
+def train_model(model: nn.Module,
+                dataloaders: Dict[str, torch.utils.data.DataLoader],
+                criterion: nn.CrossEntropyLoss,
+                optimizer: torch.optim.Optimizer,
+                scheduler: torch.optim.lr_scheduler._LRScheduler,
+                epochs: int,
+                log_interval: int):
+    best_weights = copy.deepcopy(model.state_dict())
+    best_accuracy = 0.0
+
+    training_step = 0
+    total_time = 0
+    interval_accumulator = Accumulator()
+    epoch_accumulator = Accumulator()
+    device = get_model_device(model)
+
+    for epoch in range(epochs):
+        model.train()
+        epoch_accumulator.reset()
+
+        for inputs, labels in dataloaders['train']:
+            training_step += 1
+
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+
+            loss, predictions = perform_train_step_regular(model, inputs, labels, criterion, optimizer)
+
+            accumulator_kwargs = dict(mean_loss=loss,
+                                      num_corrects=torch.sum(torch.eq(predictions, labels.data)).item(),
+                                      n_samples=inputs.size(0))  # This equals the batch-size, except in the last batch
+
+            epoch_accumulator.update(**accumulator_kwargs)
+            interval_accumulator.update(**accumulator_kwargs)
+
+            if training_step % log_interval == 0:
+                wandb.log(data=interval_accumulator.get_dict(prefix='train'), step=training_step)
+                # logger.info(f'{training_step=:10d} '
+                #             f'loss={interval_accumulator.get_mean_loss():.4f} '
+                #             f'acc={interval_accumulator.get_accuracy():.2f}%')
+                interval_accumulator.reset()
+
+        epoch_test_loss, epoch_test_accuracy = evaluate_model(model, criterion, dataloaders['test'], device)
+        wandb.log(data={'test_accuracy': epoch_test_accuracy, 'test_loss': epoch_test_loss}, step=training_step)
+
+        # if the current model reached the best results so far, deep copy the weights of the model.
+        if epoch_test_accuracy > best_accuracy:
+            best_accuracy = epoch_test_accuracy
+            best_weights = copy.deepcopy(model.state_dict())
+
+        scheduler.step()
+
+        epoch_time = epoch_accumulator.get_time()
+        total_time += epoch_time
+        log_epoch_end(epoch, epoch_time, epochs, total_time,
+                      epoch_accumulator.get_mean_loss(), epoch_accumulator.get_accuracy(),
+                      epoch_test_loss, epoch_test_accuracy)
+
+    logger.info(f'Best test accuracy: {best_accuracy:.2f}%')
+    model.load_state_dict(best_weights)  # load best model weights
 
 
 def create_out_dir(parent_out_dir: str) -> str:
@@ -944,3 +982,97 @@ def configure_logger(out_dir: str):
     logger.remove()
     logger.add(sink=sys.stdout, format=LOGGER_FORMAT)
     logger.add(sink=os.path.join(out_dir, 'run.log'), format=LOGGER_FORMAT)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Main script for running the experiments with arguments from the corresponding pydantic schema'
+    )
+
+    parser.add_argument('yaml_path', help=f'Path to a YAML file with the arguments')
+
+    return parser.parse_known_args()
+
+
+def get_args(args_class):
+    known_args, unknown_args = parse_args()
+    with open(known_args.yaml_path, 'r') as f:
+        args_dict = yaml.load(f, Loader=yaml.FullLoader)
+
+    while len(unknown_args) > 0:
+        arg_name = unknown_args.pop(0).replace('--', '')
+        values = list()
+        while (len(unknown_args) > 0) and (not unknown_args[0].startswith('--')):
+            values.append(unknown_args.pop(0))
+        if len(values) == 0:
+            raise ValueError(f'Argument {arg_name} given in command line has no corresponding value.')
+        value = values[0] if len(values) == 1 else values
+
+        categories = list(args_class.__fields__.keys())
+        found = False
+        for category in categories:
+            category_args = list(args_class.__fields__[category].default.__fields__.keys())
+            if arg_name in category_args:
+                if category not in args_dict:
+                    args_dict[category] = dict()
+                args_dict[category][arg_name] = value
+                found = True
+
+        if not found:
+            raise ValueError(f'Argument {arg_name} is not recognized.')
+
+    args = args_class.parse_obj(args_dict)
+
+    return args
+
+
+def log_args(args):
+    logger.info(f'Starting to train with the following arguments:')
+    longest_arg_name_length = max(len(k) for k in args.flattened_dict().keys())
+    pad_length = longest_arg_name_length + 4
+    for arg_name, value in args.flattened_dict().items():
+        logger.info(f'{f"{arg_name} ":-<{pad_length}} {value}')
+
+
+def log_epoch_end(epoch, epoch_time_elapsed, total_epochs, total_time,
+                  epoch_train_loss, epoch_train_accuracy,
+                  epoch_test_loss, epoch_test_accuracy):
+    total_time += epoch_time_elapsed
+    epochs_left = total_epochs - (epoch + 1)
+    avg_epoch_time = total_time / (epoch + 1)
+    time_left = avg_epoch_time * epochs_left
+    total_epochs_n_digits = len(str(total_epochs))
+    logger.info(f'Epoch {epoch+1:0>{total_epochs_n_digits}d}/{total_epochs:0>{total_epochs_n_digits}d} '
+                f'({str(timedelta(seconds=epoch_time_elapsed)).split(".")[0]}) | '
+                f'ETA {str(timedelta(seconds=time_left)).split(".")[0]} | '
+                f'Train '
+                f'loss={epoch_train_loss:.4f} '
+                f'acc={epoch_train_accuracy:.2f}% | '
+                f'Test '
+                f'loss={epoch_test_loss:.4f} '
+                f'acc={epoch_test_accuracy:.2f}%')
+
+
+def get_model_device(model: torch.nn.Module):
+    try:
+        device = next(model.parameters()).device
+    except StopIteration:  # If the model has no parameters, assume the model's device is cpu.
+        device = torch.device('cpu')
+
+    return device
+
+
+def power_minus_1(a: torch.Tensor):
+    return torch.divide(torch.ones_like(a), a)
+
+
+@torch.no_grad()
+def get_model_output_shape(model: nn.Module):
+    device = get_model_device(model)
+    clean_dataloaders = get_dataloaders(batch_size=1)
+    inputs, _ = next(iter(clean_dataloaders["train"]))
+    inputs = inputs.to(device)
+    outputs = model(inputs)
+    outputs = outputs.cpu().numpy()
+    _, channels, height, width = outputs.shape
+    return channels, height, width

@@ -5,7 +5,7 @@ import torch
 from loguru import logger
 
 from vgg import VGG, VGGwDGL, VGGwLG, configs
-from utils import get_dataloaders, train_model, configure_logger, create_out_dir
+from utils import get_dataloaders, train_local_model, configure_logger, create_out_dir, get_optim
 
 
 def get_model(args):
@@ -109,11 +109,10 @@ def main():
 
     optimizer_params = dict(optimizer_type=args.optimizer_type, lr=args.learning_rate,
                             weight_decay=args.weight_decay, momentum=args.momentum)
-    train_model(model, criterion, optimizer_params, dataloaders, device,
-                args.epochs, args.log_interval, args.dgl,
-                args.ssl, ssl_criterion, args.pred_loss_weight, args.ssl_loss_weight,
-                args.first_trainable_block, args.shift_ssl_labels,
-                args.is_direct_global, args.last_gradient_weight, args.use_last_gradient)
+    optimizer = get_optim(model, optimizer_params, args.is_dgl, args.use_last_gradient)
+    train_local_model(model, dataloaders, criterion, optimizer, device, args.epochs, args.log_interval, args.dgl,
+                      args.ssl, ssl_criterion, args.pred_loss_weight, args.ssl_loss_weight, args.first_trainable_block,
+                      args.shift_ssl_labels, args.is_direct_global, args.last_gradient_weight, args.use_last_gradient)
 
 
 def parse_args():

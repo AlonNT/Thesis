@@ -38,7 +38,7 @@ def test_cross_entropy_gradient():
 def test_cross_entropy_gradient_in_vgg():
     """
     Test the function cross_entropy_gradient performing one train step in a VGG model,
-    using hooks to validate the calculcated gradient versus the actual one.
+    using hooks to validate the calculated gradient versus the actual one.
     """
     batch_size = 64
     dataloaders = get_dataloaders(batch_size)
@@ -79,5 +79,6 @@ def test_cross_entropy_gradient_in_vgg():
                                                                                 momentum=0.9), 
                                                           is_dgl=True),
                                      training_step=1, 
-                                     modules_accumulators=[Accumulator() if (aux_net is not None) else None for aux_net in model.auxiliary_nets], 
+                                     modules_accumulators=[Accumulator() if (aux_net is not None) else None
+                                                           for aux_net in model.auxiliary_nets],
                                      last_gradient_weight=0)
