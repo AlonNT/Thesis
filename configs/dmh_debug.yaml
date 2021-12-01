@@ -1,0 +1,7 @@
+opt:
+  epochs: 2
+  learning_rate_decay_steps: [1]
+  batch_size: 4
+arch:
+  model_name: "VGGs"
+  final_mlp_hidden_dim: 64

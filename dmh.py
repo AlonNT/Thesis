@@ -1,7 +1,12 @@
+import math
 import torch
 import wandb
+
+import numpy as np
 import torch.nn.functional as F
+
 from loguru import logger
+
 from patches import sample_random_patches
 from schemas.dmh import Args
 from utils import configure_logger, get_dataloaders, get_args, log_args, power_minus_1, train_model, get_model_device
@@ -75,6 +80,50 @@ def calc_intrinsic_dimension(data: torch.Tensor, k1: int, k2: int) -> float:
     return estimate_mean_over_k1_to_k2.item()
 
 
+def indices_to_mask(n, indices, negate=False):
+    mask = torch.scatter(torch.zeros(n, dtype=torch.bool), dim=0, index=indices, value=1)
+    if negate:
+        mask = torch.bitwise_not(mask)
+    return mask
+
+
+def get_flattened_patches(data_loader, n_patches, kernel_size, sub_model, visualize,
+                          ratio_to_extend_n_patches=1.25):
+    # Sample a little bit more patches than requested, because later
+    # we remove patches that are really close to one another
+    # and we want our final number of patches to be the desired one.
+    n_patches_extended = math.ceil(n_patches * ratio_to_extend_n_patches)
+
+    patches = sample_random_patches(data_loader, n_patches_extended, kernel_size, sub_model, visualize)
+    patches = patches.astype(np.float64)  # Increase accuracy of calculations.
+    patches = torch.from_numpy(patches)
+    patches = torch.flatten(patches, start_dim=1)
+
+    return patches
+
+
+def get_patches_to_keep_mask(patches,
+                             minimal_distance_between_patches=0.001):
+    distance_matrix = torch.cdist(patches, patches)
+    small_distances_indices = torch.nonzero(torch.less(distance_matrix, minimal_distance_between_patches))
+    different_patches_mask = small_distances_indices[:, 0] != small_distances_indices[:, 1]
+    different_patches_close_to_one_another_indices_pairs = small_distances_indices[different_patches_mask]
+    different_patches_close_to_one_another_indices = different_patches_close_to_one_another_indices_pairs.unique()
+    patches_to_keep_mask = indices_to_mask(len(patches), different_patches_close_to_one_another_indices, negate=True)
+
+    return patches_to_keep_mask
+
+
+def get_patches_not_too_close_to_one_another(data_loader, n_patches, kernel_size, sub_model, visualize):
+    patches = get_flattened_patches(data_loader, n_patches, kernel_size, sub_model, visualize)
+    patches_to_keep_mask = get_patches_to_keep_mask(patches)
+    patches = patches[patches_to_keep_mask]
+    assert patches.shape[0] >= n_patches, "There are less patches than requested (after removing similar patches)"
+    patches = patches[:n_patches]  # This is done to get exactly n_patches like the user requested.
+
+    return patches
+
+
 def calc_intrinsic_dimension_per_layer(model,
                                        data_loader,
                                        n_patches,
@@ -94,11 +143,9 @@ def calc_intrinsic_dimension_per_layer(model,
         sub_model = model.features[:i]
 
         logger.info(f'Calculating intrinsic-dimension for block {i}...')
-        patches = sample_random_patches(data_loader, n_patches, kernel_size, sub_model, visualize)
-        patches_tensor = torch.from_numpy(patches)
-        patches_flattened = torch.flatten(patches_tensor, start_dim=1)
-        extrinsic_dimension = patches_flattened.shape[1]
-        intrinsic_dimension = calc_intrinsic_dimension(patches_flattened, k1, k2)
+        patches = get_patches_not_too_close_to_one_another(data_loader, n_patches, kernel_size, sub_model, visualize)
+        extrinsic_dimension = patches.shape[1]
+        intrinsic_dimension = calc_intrinsic_dimension(patches, k1, k2)
         dimensions_ratio = intrinsic_dimension / extrinsic_dimension
         logger.info(f'Block {i}')
         logger.info(f'\tIntrinsic-dimension = {intrinsic_dimension:.2f}; ')
