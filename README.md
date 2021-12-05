@@ -5,7 +5,7 @@
 - [Experiments](#experiments)
   - [Getting Started](#getting-started)
     - [Creating The Environment](#creating-the-environment)
-      - [CUDA >= 10.2](#cuda--102)
+      - [CUDA >= 11](#cuda--11)
       - [CUDA 9](#cuda-9)
     - [wandb](#wandb)
     - [Clone The Repo](#clone-the-repo)
@@ -76,22 +76,22 @@ layers
 We use [conda](https://docs.conda.io/en/latest/) and [mamba](https://github.com/mamba-org/mamba) for creating the environments.  
 mamba is a used to install packages in conda environment, and it works much faster than conda.
 
-#### CUDA >= 10.2
+#### CUDA >= 11
 
-For training on GPUs having CUDA 10.2, we can use the newest version of PyTorch (currently 1.7.1). 
+For training on GPUs having CUDA 11, we can use the newest version of PyTorch (currently 1.10.0). 
 
-Create the environment named *torch-cuda10*
+Create the environment named *ENV-NAME*
 
 ```shell
-mamba create --name torch-cuda10 python=3.8
-```
-Install some useful packages for logging and visualizations
-```shell
-mamba install --name torch-cuda10 loguru wandb -c conda-forge
+mamba create --name ENV-NAME python=3.8
 ```
 Install PyTorch and torchvision. 
 ```shell
-mamba install --name torch-cuda10 pytorch torchvision cudatoolkit=10.2 -c pytorch
+mamba install pytorch torchvision --name ENV-NAME -c pytorch
+```
+Install some useful packages for logging and visualizations
+```shell
+mamba install loguru wandb matplotlib pydantic flatten-dict pytorch-lightning --name ENV-NAME -c conda-forge
 ```
 
 #### CUDA 9
