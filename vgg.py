@@ -188,7 +188,7 @@ class VGG(nn.Module):
         return outputs
 
 
-def get_vgg_model_kernel_size(model: VGG, block_index: int):
+def get_vgg_model_kernel_size(model, block_index: int):
     if not (0 <= block_index < len(model.features)):
         raise IndexError(f"block_index {block_index} is out-of-bounds (len={len(model.features)})")
 
