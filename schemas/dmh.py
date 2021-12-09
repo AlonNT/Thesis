@@ -35,6 +35,8 @@ class ArchitectureArgs(ImmutableArgs):
     k1: PositiveInt = 10
     k2: PositiveInt = 20
 
+    plot_graphs: bool = False
+
     @root_validator
     def validate_k1_and_k2(cls, values):
         assert values['k1'] < values['k2'] <= values['n_patches']

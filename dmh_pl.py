@@ -168,7 +168,11 @@ def get_estimates_matrix(data: torch.Tensor, k: int):
     <https://papers.nips.cc/paper/2004/file/74934548253bcab8490ebd74afed7031-Paper.pdf>`_
     """
     assert data.ndim == 2, f"data has shape {tuple(data.shape)}, expected (n, d) i.e. n d-dimensional vectors. "
-    assert k <= data.shape[0], f"Number of data-points is {data.shape[0]} and k={k} should be smaller. "
+
+    if k > data.shape[0]:
+        print(f"Number of data-points is {data.shape[0]} and k={k} should be smaller. ")
+        k = data.shape[0] - 1
+        print(f"k was changed to {k}")
 
     distance_matrix = torch.cdist(data, data)
 
@@ -206,7 +210,8 @@ def indices_to_mask(n, indices, negate=False):
 
 class IntrinsicDimensionCalculator(Callback):
 
-    def __init__(self, n_patches: int, k1: int, k2: int, minimal_distance_between_patches: float = 1e-05):
+    def __init__(self, n_patches: int, k1: int, k2: int, plot_graphs: bool,
+                 minimal_distance_between_patches: float = 1e-05):
         """
         Since the intrinsic-dimension calculation takes logarithm of the distances,
         if they are zero (or very small) it can cause numerical issues (NaN).
@@ -215,6 +220,7 @@ class IntrinsicDimensionCalculator(Callback):
         self.k1: int = k1
         self.k2: int = k2
         self.k3: int = 4 * k2  # This will be used to plot a graph of the intrinsic-dimension per k (until k3)
+        self.plot_graphs: bool = plot_graphs
         self.minimal_distance_between_patches = minimal_distance_between_patches
 
         # Sample a little bit more patches than requested, because later
@@ -240,6 +246,18 @@ class IntrinsicDimensionCalculator(Callback):
             self.calc_int_dim_per_layer_on_dataloader(trainer, pl_module, dataloader, name)
         pl_module.train(mode=in_training_mode)
 
+    @staticmethod
+    def plot_dim_per_k_graph(trainer, block_name, estimate_mean_over_data_points):
+        x_axis_name: str = 'k'
+        y_axis_name: str = f'{block_name} k-th int-dim'
+        values = torch.stack([torch.arange(start=1, end=len(estimate_mean_over_data_points) + 1),
+                              estimate_mean_over_data_points], dim=1)
+        wandb_table = wandb.Table(columns=[x_axis_name, y_axis_name],
+                                  data=values.cpu().tolist())
+        line = wandb.plot.line(wandb_table, x_axis_name, y_axis_name,
+                               title=f'{block_name} k-th int-dim per k')
+        trainer.logger.experiment.log({f'{block_name}_ks_estimates': line})
+
     def calc_int_dim_per_layer_on_dataloader(self, trainer, pl_module, dataloader, name):
         """
         Given a VGG model, go over each block in it and calculates the intrinsic dimension of its input data.
@@ -249,35 +267,29 @@ class IntrinsicDimensionCalculator(Callback):
                 continue
 
             block_name = f'{name}_block_{i}'
-            pl_module.print(f'Calculating intrinsic-dimension for {block_name}...')
             patches = self.get_patches_not_too_close_to_one_another(dataloader,  self.kernel_sizes[i],
                                                                     sub_model=pl_module.features[:i])
 
-            extrinsic_dimension = patches.shape[1]
-
             estimates = get_estimates_matrix(patches, self.k3)
             estimate_mean_over_data_points = torch.mean(estimates, dim=0)
-            x_axis_name: str = 'k'
-            y_axis_name: str = 'k-th estimate'
-            values = torch.stack([torch.arange(start=1, end=len(estimate_mean_over_data_points) + 1),
-                                  estimate_mean_over_data_points], dim=1)
-            wandb_table = wandb.Table(columns=[x_axis_name, y_axis_name],
-                                      data=values.cpu().tolist())
-            line = wandb.plot.line(wandb_table, x_axis_name, y_axis_name,
-                                   title='k\'th intrinsic dimension for different k\'s')
-            trainer.logger.experiment.log({'ks_estimates': line})
-            estimate_mean_over_k1_to_k2 = torch.mean(estimate_mean_over_data_points[self.k1:self.k2 + 1])
 
+            if self.plot_graphs:
+                IntrinsicDimensionCalculator.plot_dim_per_k_graph(trainer, block_name, estimate_mean_over_data_points)
+
+            estimate_mean_over_k1_to_k2 = torch.mean(estimate_mean_over_data_points[self.k1:self.k2 + 1])
+            extrinsic_dimension = patches.shape[1]
             intrinsic_dimension = estimate_mean_over_k1_to_k2.item()
             dimensions_ratio = intrinsic_dimension / extrinsic_dimension
 
-            trainer.logger.log_metrics({f'{block_name}_int_dim': intrinsic_dimension})
-            trainer.logger.log_metrics({f'{block_name}_ext_dim': extrinsic_dimension})
-            trainer.logger.log_metrics({f'{block_name}_dim_ratio': dimensions_ratio})
+            # TODO consider using `pl_module.log` to avoid wandb error "There's no data for the selected runs"
+            trainer.logger.log_metrics({f'{block_name}_int_dim': intrinsic_dimension,
+                                        f'{block_name}_ext_dim': extrinsic_dimension,
+                                        f'{block_name}_dim_ratio': dimensions_ratio},
+                                       step=trainer.global_step)
 
             pl_module.print(block_name)
-            pl_module.print(f'\tIntrinsic-dimension = {intrinsic_dimension:.2f}; ')
-            pl_module.print(f'\tExtrinsic-dimension = {extrinsic_dimension}; ')
+            pl_module.print(f'\tIntrinsic-dimension = {intrinsic_dimension:.2f}')
+            pl_module.print(f'\tExtrinsic-dimension = {extrinsic_dimension}')
             pl_module.print(f'\tRatio               = {dimensions_ratio:.4f}')
 
     def get_patches_not_too_close_to_one_another(self, dataloader, patch_size, sub_model):
@@ -334,8 +346,8 @@ class IntrinsicDimensionCalculator(Callback):
 
             self.kernel_sizes.append(kernel_size)
 
-        # Calculate intrinsic dimension at initialization
-        self.calc_int_dim_per_layer_all_stages(trainer, pl_module)
+        # # Calculate intrinsic dimension at initialization
+        # self.calc_int_dim_per_layer_all_stages(trainer, pl_module)
 
 
 def initialize(args: Args):
@@ -345,11 +357,13 @@ def initialize(args: Args):
     wandb_logger.watch(model)
     trainer = pl.Trainer(
         logger=wandb_logger,
-        callbacks=[IntrinsicDimensionCalculator(args.arch.n_patches, args.arch.k1, args.arch.k2)],
+        callbacks=[IntrinsicDimensionCalculator(args.arch.n_patches,
+                                                args.arch.k1, args.arch.k2,
+                                                args.arch.plot_graphs)],
         max_epochs=args.opt.epochs,
-        limit_train_batches=5,  # TODO for debugging purposes
-        limit_val_batches=5,    # TODO for debugging purposes
-        limit_test_batches=5,   # TODO for debugging purposes
+        # limit_train_batches=5,  # TODO for debugging purposes
+        # limit_val_batches=5,    # TODO for debugging purposes
+        # limit_test_batches=5,   # TODO for debugging purposes
     )
 
     return model, trainer, datamodule

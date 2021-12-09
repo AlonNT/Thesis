@@ -306,6 +306,9 @@ def sample_random_patches(data_loader,
     batches_indices = images_indices // batch_size
     images_indices_in_batches = images_indices % batch_size
 
+    # # TODO For debugging purposes
+    # return rng.standard_normal(size=(n_patches, channels, patch_size, patch_size), dtype=np.float32)
+
     patches = np.empty(shape=(n_patches, channels, patch_size, patch_size),
                        dtype=np.float32)
 
