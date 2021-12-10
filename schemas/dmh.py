@@ -35,7 +35,11 @@ class ArchitectureArgs(ImmutableArgs):
     k1: PositiveInt = 10
     k2: PositiveInt = 20
 
+    #: Indicator to plot graphs of the k-th intrinsic-dimension estimate for different k's.
     plot_graphs: bool = False
+
+    #: Indicator to shuffle the patches before calculating the intrinsic-dimension
+    shuffle_patches: bool = False
 
     @root_validator
     def validate_k1_and_k2(cls, values):

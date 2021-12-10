@@ -22,6 +22,20 @@ from utils import configure_logger, get_args, log_args, power_minus_1, get_mlp
 from vgg import get_vgg_model_kernel_size, get_blocks, configs
 
 
+class ShufflePixels:
+    def __init__(self, keep_rgb_triplets_intact: bool = True):
+        self.keep_rgb_triplets_intact = keep_rgb_triplets_intact
+
+    def __call__(self, img):
+        assert img.shape == (3, 32, 32), "WTF is the shape of the input images?"
+        start_dim = 1 if self.keep_rgb_triplets_intact else 0
+        img_flat = torch.flatten(img, start_dim=start_dim)
+        permutation = torch.randperm(img_flat.shape[-1])  # TODO should we add argument `device=img_flat.device` ?
+        permuted_img_flat = img_flat[..., permutation]
+        permuted_img = torch.reshape(permuted_img_flat, shape=img.shape)
+        return permuted_img
+
+
 class CIFAR10DataModule(LightningDataModule):
     @staticmethod
     def get_normalization_transform(plus_minus_one: bool = False, unit_gaussian: bool = False):
@@ -51,12 +65,13 @@ class CIFAR10DataModule(LightningDataModule):
         normalizations = CIFAR10DataModule.get_normalization_transform(args.normalization_to_plus_minus_one,
                                                                        args.normalization_to_unit_gaussian)
 
-        transforms_list_no_aug = [ToTensor()] + normalizations
-        transforms_list_with_aug = augmentations + [ToTensor()] + normalizations
+        post_transforms = [ShufflePixels(args.keep_rgb_triplets_intact)] if args.shuffle_images else list()
+        transforms_list_no_aug = [ToTensor()] + normalizations + post_transforms
+        transforms_list_with_aug = augmentations + [ToTensor()] + normalizations + post_transforms
 
         return transforms_list_no_aug, transforms_list_with_aug
 
-    def __init__(self, args: DataArgs, batch_size: int = 64, data_dir: str = "./data"):
+    def __init__(self, args: DataArgs, batch_size: int, data_dir: str = "./data"):
         super().__init__()
         transforms_list_no_aug, transforms_list_with_aug = CIFAR10DataModule.get_transforms_lists(args)
         self.transforms = {'aug': Compose(transforms_list_with_aug), 'no_aug': Compose(transforms_list_no_aug)}
@@ -210,7 +225,8 @@ def indices_to_mask(n, indices, negate=False):
 
 class IntrinsicDimensionCalculator(Callback):
 
-    def __init__(self, n_patches: int, k1: int, k2: int, plot_graphs: bool,
+    def __init__(self, n_patches: int, k1: int, k2: int,
+                 plot_graphs: bool, shuffle_patches: bool,
                  minimal_distance_between_patches: float = 1e-05):
         """
         Since the intrinsic-dimension calculation takes logarithm of the distances,
@@ -221,6 +237,7 @@ class IntrinsicDimensionCalculator(Callback):
         self.k2: int = k2
         self.k3: int = 4 * k2  # This will be used to plot a graph of the intrinsic-dimension per k (until k3)
         self.plot_graphs: bool = plot_graphs
+        self.should_shuffle_patches: bool = shuffle_patches
         self.minimal_distance_between_patches = minimal_distance_between_patches
 
         # Sample a little bit more patches than requested, because later
@@ -303,6 +320,19 @@ class IntrinsicDimensionCalculator(Callback):
 
         return patches
 
+    def get_flattened_patches(self, dataloader, kernel_size, sub_model):
+        patches = sample_random_patches(dataloader, self.n_patches_extended, kernel_size, sub_model)
+
+        if self.should_shuffle_patches:
+            rng = np.random.default_rng()
+            patches = rng.permuted(patches, axis=1, out=patches)
+
+        patches = patches.astype(np.float64)  # Increase accuracy of calculations.
+        patches = torch.from_numpy(patches)
+        patches = torch.flatten(patches, start_dim=1)
+
+        return patches
+
     def get_patches_to_keep_mask(self, patches):
         distance_matrix = torch.cdist(patches, patches)
         small_distances_indices = torch.nonzero(torch.less(distance_matrix, self.minimal_distance_between_patches))
@@ -312,14 +342,6 @@ class IntrinsicDimensionCalculator(Callback):
         patches_to_keep_mask = indices_to_mask(len(patches), different_patches_close_indices, negate=True)
 
         return patches_to_keep_mask
-
-    def get_flattened_patches(self, dataloader, kernel_size, sub_model):
-        patches = sample_random_patches(dataloader, self.n_patches_extended, kernel_size, sub_model)
-        patches = patches.astype(np.float64)  # Increase accuracy of calculations.
-        patches = torch.from_numpy(patches)
-        patches = torch.flatten(patches, start_dim=1)
-
-        return patches
 
     def on_validation_epoch_end(self, trainer, pl_module):
         """
@@ -346,9 +368,6 @@ class IntrinsicDimensionCalculator(Callback):
 
             self.kernel_sizes.append(kernel_size)
 
-        # # Calculate intrinsic dimension at initialization
-        # self.calc_int_dim_per_layer_all_stages(trainer, pl_module)
-
 
 def initialize(args: Args):
     model = LitVGG(args)
@@ -357,9 +376,8 @@ def initialize(args: Args):
     wandb_logger.watch(model)
     trainer = pl.Trainer(
         logger=wandb_logger,
-        callbacks=[IntrinsicDimensionCalculator(args.arch.n_patches,
-                                                args.arch.k1, args.arch.k2,
-                                                args.arch.plot_graphs)],
+        callbacks=[IntrinsicDimensionCalculator(args.arch.n_patches, args.arch.k1, args.arch.k2,
+                                                args.arch.plot_graphs, args.arch.shuffle_patches)],
         max_epochs=args.opt.epochs,
         # limit_train_batches=5,  # TODO for debugging purposes
         # limit_val_batches=5,    # TODO for debugging purposes
