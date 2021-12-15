@@ -999,6 +999,9 @@ def get_args(args_class):
     with open(known_args.yaml_path, 'r') as f:
         args_dict = yaml.load(f, Loader=yaml.FullLoader)
 
+    if args_dict is None:  # This happens when the yaml file is empty
+        args_dict = dict()
+
     while len(unknown_args) > 0:
         arg_name = unknown_args.pop(0).replace('--', '')
         values = list()

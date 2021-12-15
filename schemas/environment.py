@@ -1,6 +1,6 @@
 import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 import torch
 from pydantic import validator
@@ -18,6 +18,9 @@ class EnvironmentArgs(ImmutableArgs):
     #: Output path for the experiment - a sub-directory named with the date & time will be created within.
     path: DirectoryPath = './experiments'
 
+    #: The name to give the run in wandb
+    wandb_run_name: Optional[str] = None
+
     #: How many iterations between each training log.
     log_interval: PositiveInt = 100
 
@@ -34,3 +37,12 @@ class EnvironmentArgs(ImmutableArgs):
             assert torch.cuda.is_available(), f"CUDA is not available, so can't use device {v}"
             assert int(v[-1]) < torch.cuda.device_count(), f"GPU index {v[-1]} is higher than the number of GPUs."
         return v
+
+    @property
+    def is_cuda(self) -> bool:
+        return self.device.startswith('cuda:')
+
+    @property
+    def device_num(self) -> int:
+        assert self.is_cuda, "When asking for device_num it must be on CUDA and not CPU."
+        return int(self.device.replace('cuda:', ''))
