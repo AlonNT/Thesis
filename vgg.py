@@ -194,6 +194,10 @@ def get_vgg_model_kernel_size(model, block_index: int):
 
     block = model.features[block_index]
 
+    if isinstance(block, nn.MaxPool2d):
+        pool_layer = block
+        return pool_layer.kernel_size
+
     if not isinstance(block, nn.Sequential):
         raise ValueError(f"block_index {block_index} is not a sequential module (i.e. \'block\'), it's {type(block)}.")
 

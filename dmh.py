@@ -196,13 +196,10 @@ class LitVGG(pl.LightningModule):
     def get_kernel_sizes(self):
         kernel_sizes = list()
         for i in range(len(self.features)):
-            try:
-                kernel_size_tuple = get_vgg_model_kernel_size(self, block_index=i)
-                assert kernel_size_tuple[0] == kernel_size_tuple[1], "Only square patches are supported"
-                kernel_size = kernel_size_tuple[0]
-            except ValueError:
-                kernel_size = None
-
+            kernel_size = get_vgg_model_kernel_size(self, i)
+            if isinstance(kernel_size, tuple):
+                assert kernel_size[0] == kernel_size[1], "Only square patches are supported"
+                kernel_size = kernel_size[0]
             kernel_sizes.append(kernel_size)
         return kernel_sizes
 
@@ -350,8 +347,9 @@ class IntrinsicDimensionCalculator(Callback):
     def log_dim_per_k_graph(trainer, block_name, estimate_mean_over_data_points):
         x_axis_name: str = 'k'
         y_axis_name: str = f'{block_name} k-th int-dim'
-        values = torch.stack([torch.arange(start=1, end=len(estimate_mean_over_data_points) + 1),
-                              estimate_mean_over_data_points], dim=1)
+        start_k = 5
+        values = torch.stack([torch.arange(start=start_k, end=len(estimate_mean_over_data_points) + 1),
+                              estimate_mean_over_data_points[start_k-1:]], dim=1)
         wandb_table = wandb.Table(columns=[x_axis_name, y_axis_name],
                                   data=values.cpu().tolist())
         line = wandb.plot.line(wandb_table, x_axis_name, y_axis_name,
@@ -374,7 +372,10 @@ class IntrinsicDimensionCalculator(Callback):
         """
         for i in range(pl_module.num_blocks):
             block_name = f'{name}-block_{i}' if len(name) > 0 else f'block_{i}'
-            patch_size = pl_module.kernel_sizes[i] if self.estimate_dim_on_patches else -1
+            if self.estimate_dim_on_images or (i >= len(pl_module.kernel_sizes)):
+                patch_size = -1
+            else:
+                patch_size = pl_module.kernel_sizes[i]
             patches = self.get_patches_not_too_close_to_one_another(dataloader, patch_size, pl_module.get_sub_model(i))
 
             estimates = get_estimates_matrix(patches, self.k3 if self.log_graphs else self.k2)

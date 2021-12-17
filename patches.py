@@ -300,12 +300,14 @@ def sample_random_patches(data_loader,
         n_patches_per_row_or_col = spatial_size - patch_size + 1
         patch_shape = (patch_shape[0],) + 2 * (patch_size,)
     else:
-        assert patch_size == -1, "When working with fully-connected layers the patch 'size' must be the whole size."
+        assert patch_size == -1, "When working with fully-connected the patch 'size' must be -1 i.e. the whole size."
         n_patches_per_row_or_col = 1
 
     n_patches_per_image = n_patches_per_row_or_col ** 2
     n_patches_in_dataset = n_images * n_patches_per_image
 
+    if n_patches >= n_patches_in_dataset:
+        n_patches = n_patches_in_dataset
     patches_indices_in_dataset = np.sort(rng.choice(n_patches_in_dataset, size=n_patches, replace=False))
 
     images_indices = patches_indices_in_dataset % n_images
