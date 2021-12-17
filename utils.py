@@ -128,7 +128,8 @@ class Flatten(nn.Module):
         )
 
 
-def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_dim: int = 0) -> torch.nn.Sequential:
+def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_dim: int = 0,
+            use_batch_norm: bool = False, organize_as_blocks: bool = False) -> torch.nn.Sequential:
     """
     This function builds a MLP (i.e. Multi-Layer-Perceptron) and return it as a PyTorch's sequential model.
 
@@ -136,18 +137,39 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_di
     :param output_dim: The dimension of the output tensor.
     :param n_hidden_layers: Number of hidden layers.
     :param hidden_dim: The dimension of each hidden layer.
+    :param use_batch_norm: Whether to use BatchNormalization after each layer or not.
+    :param organize_as_blocks: Whether to organize the model as blocks of Linear->(BatchNorm)->ReLU.
     :return: A sequential model which is the constructed MLP.
     """
-    # Begins with a flatten layer. It's useful when the input is 4D from a conv layer, and harmless otherwise..
-    layers: List[torch.nn.Module] = [Flatten()]
+    layers: List[torch.nn.Module] = list()
 
     for i in range(n_hidden_layers):
-        layers.append(torch.nn.Linear(in_features=input_dim if i == 0 else hidden_dim,
-                                      out_features=hidden_dim))
-        layers.append(torch.nn.ReLU())
+        current_layers: List[torch.nn.Module] = list()
 
-    layers.append(torch.nn.Linear(in_features=input_dim if n_hidden_layers == 0 else hidden_dim,
-                                  out_features=output_dim))
+        in_features = input_dim if i == 0 else hidden_dim
+        out_features = hidden_dim
+
+        # Begins with a flatten layer. It's useful when the input is 4D from a conv layer, and harmless otherwise..
+        if i == 0:
+            current_layers.append(Flatten())
+
+        current_layers.append(torch.nn.Linear(in_features, out_features))
+        if use_batch_norm:
+            current_layers.append(torch.nn.BatchNorm1d(hidden_dim))
+        current_layers.append(torch.nn.ReLU())
+
+        if organize_as_blocks:
+            block = torch.nn.Sequential(*current_layers)
+            layers.append(block)
+        else:
+            layers.extend(current_layers)
+
+    final_layer = torch.nn.Linear(in_features=input_dim if n_hidden_layers == 0 else hidden_dim,
+                                  out_features=output_dim)
+    if organize_as_blocks:
+        final_layer = torch.nn.Sequential(final_layer)
+
+    layers.append(final_layer)
 
     return torch.nn.Sequential(*layers)
 
@@ -989,17 +1011,19 @@ def parse_args():
         description='Main script for running the experiments with arguments from the corresponding pydantic schema'
     )
 
-    parser.add_argument('yaml_path', help=f'Path to a YAML file with the arguments')
+    parser.add_argument('--yaml_path', help=f'(Optional) path to a YAML file with the arguments')
 
     return parser.parse_known_args()
 
 
 def get_args(args_class):
     known_args, unknown_args = parse_args()
-    with open(known_args.yaml_path, 'r') as f:
-        args_dict = yaml.load(f, Loader=yaml.FullLoader)
+    args_dict = None
+    if known_args.yaml_path is not None:
+        with open(known_args.yaml_path, 'r') as f:
+            args_dict = yaml.load(f, Loader=yaml.FullLoader)
 
-    if args_dict is None:  # This happens when the yaml file is empty
+    if args_dict is None:  # This happens when the yaml file is empty, or no yaml file was given.
         args_dict = dict()
 
     while len(unknown_args) > 0:
@@ -1077,5 +1101,4 @@ def get_model_output_shape(model: nn.Module):
     inputs = inputs.to(device)
     outputs = model(inputs)
     outputs = outputs.cpu().numpy()
-    _, channels, height, width = outputs.shape
-    return channels, height, width
+    return outputs.shape[1:]  # Remove the first dimension corresponding to the batch

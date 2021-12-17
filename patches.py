@@ -286,13 +286,23 @@ def sample_random_patches(data_loader,
     rng = np.random.default_rng()
 
     batch_size = data_loader.batch_size
-    n_images, height, width, channels = data_loader.dataset.data.shape
+    n_images = data_loader.dataset.data.shape[0]
+    patch_shape = data_loader.dataset.data.shape[1:]
     if existing_model is not None:
         device = get_model_device(existing_model)
-        channels, height, width = get_model_output_shape(existing_model)
+        patch_shape = get_model_output_shape(existing_model)
 
-    spatial_size = height
-    n_patches_per_row_or_col = spatial_size - patch_size + 1
+    if len(patch_shape) > 1:
+        assert len(patch_shape) == 3 and (patch_shape[1] == patch_shape[2]), "Should be C x H x W where H = W"
+        spatial_size = patch_shape[-1]
+        if patch_size == -1:  # -1 means the patch size is the whole size of the image (or down-sampled activation)
+            patch_size = spatial_size
+        n_patches_per_row_or_col = spatial_size - patch_size + 1
+        patch_shape = (patch_shape[0],) + 2 * (patch_size,)
+    else:
+        assert patch_size == -1, "When working with fully-connected layers the patch 'size' must be the whole size."
+        n_patches_per_row_or_col = 1
+
     n_patches_per_image = n_patches_per_row_or_col ** 2
     n_patches_in_dataset = n_images * n_patches_per_image
 
@@ -306,11 +316,7 @@ def sample_random_patches(data_loader,
     batches_indices = images_indices // batch_size
     images_indices_in_batches = images_indices % batch_size
 
-    # # TODO For debugging purposes
-    # return rng.standard_normal(size=(n_patches, channels, patch_size, patch_size), dtype=np.float32)
-
-    patches = np.empty(shape=(n_patches, channels, patch_size, patch_size),
-                       dtype=np.float32)
+    patches = np.empty(shape=(n_patches, ) + patch_shape, dtype=np.float32)
 
     for batch_index, (inputs, _) in enumerate(data_loader):
         if batch_index not in batches_indices:
@@ -326,22 +332,25 @@ def sample_random_patches(data_loader,
 
         for i in relevant_patches_indices:
             image_index_in_batch = images_indices_in_batches[i]
-            patch_x_start = patches_x_indices_in_images[i]
-            patch_y_start = patches_y_indices_in_images[i]
-            patch_x_slice = slice(patch_x_start, patch_x_start + patch_size)
-            patch_y_slice = slice(patch_y_start, patch_y_start + patch_size)
+            if len(patch_shape) > 1:
+                patch_x_start = patches_x_indices_in_images[i]
+                patch_y_start = patches_y_indices_in_images[i]
+                patch_x_slice = slice(patch_x_start, patch_x_start + patch_size)
+                patch_y_slice = slice(patch_y_start, patch_y_start + patch_size)
 
-            patches[i] = inputs[image_index_in_batch, :, patch_x_slice, patch_y_slice]
+                patches[i] = inputs[image_index_in_batch, :, patch_x_slice, patch_y_slice]
 
-            if visualize:
-                visualize_image_patch_pair(image=inputs[image_index_in_batch], patch=patches[i],
-                                           patch_x_start=patch_x_start, patch_y_start=patch_y_start)
+                if visualize:
+                    visualize_image_patch_pair(image=inputs[image_index_in_batch], patch=patches[i],
+                                               patch_x_start=patch_x_start, patch_y_start=patch_y_start)
+            else:
+                patches[i] = inputs[image_index_in_batch]
 
     return patches
 
 
 def visualize_image_patch_pair(image, patch, patch_x_start, patch_y_start):
-    patch_size = patch.shape[0]
+    patch_size = patch.shape[-1]
     rect = Rectangle(xy=(patch_y_start, patch_x_start),  # x and y are reversed on purpose...
                      width=patch_size, height=patch_size,
                      linewidth=1, edgecolor='red', facecolor='none')

@@ -1,0 +1,10 @@
+opt:
+  epochs: 100
+  learning_rate_decay_steps: [50, 90]
+  batch_size: 64
+arch:
+  model_name: "mlp"
+  estimate_dim_on_images: True
+  estimate_dim_on_patches: False
+  final_mlp_n_hidden_layers: 9  # Same number of layers as VGG11
+  final_mlp_hidden_dim: 1024  # Resulting in approximately same overall number of parameters as VGG11

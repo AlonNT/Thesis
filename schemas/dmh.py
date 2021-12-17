@@ -28,27 +28,38 @@ class ArchitectureArgs(ImmutableArgs):
     #: Padding mode for the convolution layers.
     padding_mode: Literal['zeros', 'circular'] = 'zeros'
 
-    #: Number of patches to sample uniformly at random to estimate the intrinsic dimension.
-    n_patches: PositiveInt = 16384
+    #: Number of patches/images to sample uniformly at random to estimate the intrinsic dimension.
+    n: PositiveInt = 8192
+
+    #: Whether to estimate the intrinsic-dimension on the patches or on the images.
+    estimate_dim_on_patches: bool = True
+    estimate_dim_on_images: bool = False
 
     #: The minimal and maximal values of k to average the intrinsic-dimension estimate and get $\\hat(m)$ (see paper)
     k1: PositiveInt = 10
     k2: PositiveInt = 20
 
     #: Indicator to plot graphs of the k-th intrinsic-dimension estimate for different k's.
-    plot_graphs: bool = False
+    log_graphs: bool = False
 
-    #: Indicator to shuffle the patches before calculating the intrinsic-dimension
-    shuffle_patches: bool = False
+    #: Indicator to shuffle the patches/images before calculating the intrinsic-dimension.
+    shuffle_before_estimate: bool = False
+
+    @root_validator
+    def validate_estimate_dim_on_images_or_patches(cls, values):
+        assert values['estimate_dim_on_patches'] != values['estimate_dim_on_images'], "Exactly one should be given."
+        return values
 
     @root_validator
     def validate_k1_and_k2(cls, values):
-        assert values['k1'] < values['k2'] <= values['n_patches']
+        assert values['k1'] < values['k2'] <= values['n']
         return values
 
     @validator('model_name', always=True)
     def validate_model_name(cls, v):
-        assert v in configs.keys(), f"model_name {v} is not supported, should be one of {list(configs.keys())}"
+
+        assert v == 'mlp' or v in configs.keys(), f"model_name {v} is not supported, " \
+                                                  f"should be 'mlp' or one of {list(configs.keys())}"
         return v
 
 
