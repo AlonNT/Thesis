@@ -40,7 +40,7 @@ class ArchitectureArgs(ImmutableArgs):
     k2: PositiveInt = 20
 
     #: Indicator to plot graphs of the k-th intrinsic-dimension estimate for different k's.
-    log_graphs: bool = False
+    log_graphs: bool = True
 
     #: Indicator to shuffle the patches/images before calculating the intrinsic-dimension.
     shuffle_before_estimate: bool = False

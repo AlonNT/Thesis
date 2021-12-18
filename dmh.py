@@ -1,13 +1,13 @@
 import math
-
-import wandb
 import torch
 
 import numpy as np
-import torch.nn as nn
-import torch.nn.functional as F
+import pandas as pd
+import plotly.express as px
 import torchmetrics as tm
 import pytorch_lightning as pl
+import torch.nn as nn
+import torch.nn.functional as F
 
 from typing import Optional, List
 from torch.utils.data import DataLoader
@@ -328,7 +328,7 @@ class IntrinsicDimensionCalculator(Callback):
         self.n: int = args.n
         self.k1: int = args.k1
         self.k2: int = args.k2
-        self.k3: int = 4 * self.k2  # This will be used to plot a graph of the intrinsic-dimension per k (until k3)
+        self.k3: int = 8 * self.k2  # This will be used to plot a graph of the intrinsic-dimension per k (until k3)
         self.estimate_dim_on_patches: bool = args.estimate_dim_on_patches
         self.estimate_dim_on_images: bool = args.estimate_dim_on_images
         self.log_graphs: bool = args.log_graphs
@@ -344,32 +344,28 @@ class IntrinsicDimensionCalculator(Callback):
         self.n_extended = math.ceil(self.n * ratio_to_extend_n)
 
     @staticmethod
-    def log_dim_per_k_graph(trainer, block_name, estimate_mean_over_data_points):
-        x_axis_name: str = 'k'
-        y_axis_name: str = f'{block_name} k-th int-dim'
-        start_k = 5
-        values = torch.stack([torch.arange(start=start_k, end=len(estimate_mean_over_data_points) + 1),
-                              estimate_mean_over_data_points[start_k-1:]], dim=1)
-        wandb_table = wandb.Table(columns=[x_axis_name, y_axis_name],
-                                  data=values.cpu().tolist())
-        line = wandb.plot.line(wandb_table, x_axis_name, y_axis_name,
-                               title=f'{block_name} k-th int-dim per k')
-        trainer.logger.experiment.log({f'{block_name}_ks_estimates': line})
+    def log_dim_per_k_graph(metrics, block_name, estimates):
+        min_k = 5
+        max_k = len(estimates) + 1
+        df = pd.DataFrame(estimates[min_k - 1:], index=np.arange(min_k, max_k), columns=['k-th intrinsic-dimension'])
+        df.index.name = 'k'
+        fig = px.line(df, title=f'{block_name} k-th intrinsic-dimension estiamte per k')
+        metrics[f'{block_name}-int_dim_per_k'] = fig
 
-    def log_metrics(self, trainer, estimate_mean_over_data_points, extrinsic_dimension, block_name):
-        estimate_mean_over_k1_to_k2 = torch.mean(estimate_mean_over_data_points[self.k1:self.k2 + 1])
+    def log_final_estimate(self, metrics, estimates, extrinsic_dimension, block_name):
+        estimate_mean_over_k1_to_k2 = torch.mean(estimates[self.k1:self.k2 + 1])
         intrinsic_dimension = estimate_mean_over_k1_to_k2.item()
         dimensions_ratio = intrinsic_dimension / extrinsic_dimension
 
         block_name = f'{block_name}-ext_dim_{extrinsic_dimension}'
-        trainer.logger.log_metrics({f'{block_name}-int_dim': intrinsic_dimension,
-                                    f'{block_name}-dim_ratio': dimensions_ratio},
-                                   step=trainer.global_step)
+        metrics.update({f'{block_name}-int_dim': intrinsic_dimension,
+                        f'{block_name}-dim_ratio': dimensions_ratio})
 
     def calc_int_dim_per_layer_on_dataloader(self, trainer, pl_module, dataloader, name: str = ''):
         """
         Given a VGG model, go over each block in it and calculates the intrinsic dimension of its input data.
         """
+        metrics = dict()
         for i in range(pl_module.num_blocks):
             block_name = f'{name}-block_{i}' if len(name) > 0 else f'block_{i}'
             if self.estimate_dim_on_images or (i >= len(pl_module.kernel_sizes)):
@@ -378,12 +374,13 @@ class IntrinsicDimensionCalculator(Callback):
                 patch_size = pl_module.kernel_sizes[i]
             patches = self.get_patches_not_too_close_to_one_another(dataloader, patch_size, pl_module.get_sub_model(i))
 
-            estimates = get_estimates_matrix(patches, self.k3 if self.log_graphs else self.k2)
-            estimate_mean_over_data_points = torch.mean(estimates, dim=0)
+            estimates_matrix = get_estimates_matrix(patches, self.k3 if self.log_graphs else self.k2)
+            estimates = torch.mean(estimates_matrix, dim=0)
 
             if self.log_graphs:
-                IntrinsicDimensionCalculator.log_dim_per_k_graph(trainer, block_name, estimate_mean_over_data_points)
-            self.log_metrics(trainer, estimate_mean_over_data_points, patches.shape[1], block_name)
+                IntrinsicDimensionCalculator.log_dim_per_k_graph(metrics, block_name, estimates)
+            self.log_final_estimate(metrics, estimates, patches.shape[1], block_name)
+        trainer.logger.experiment.log(metrics, step=trainer.global_step, commit=False)
 
     def get_patches_not_too_close_to_one_another(self, dataloader, patch_size, sub_model):
         patches = self.get_flattened_patches(dataloader, patch_size, sub_model)
@@ -396,13 +393,13 @@ class IntrinsicDimensionCalculator(Callback):
 
     def get_flattened_patches(self, dataloader, kernel_size, sub_model):
         patches = sample_random_patches(dataloader, self.n_extended, kernel_size, sub_model)
+        patches = patches.reshape(patches.shape[0], -1)  # a.k.a. flatten in NumPy
 
         if self.shuffle_before_estimate:
             patches = np.random.default_rng().permuted(patches, axis=1, out=patches)
 
         patches = patches.astype(np.float64)  # Increase accuracy of calculations.
         patches = torch.from_numpy(patches)
-        patches = torch.flatten(patches, start_dim=1)
 
         return patches
 
