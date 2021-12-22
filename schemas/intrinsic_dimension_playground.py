@@ -12,7 +12,6 @@ class Args(BaseModel):
     env = EnvironmentArgs()
     data = DataArgs()
 
-    gaussian_playground: bool = True
     extrinsic_dimension: List[PositiveInt] = [3, 100, 1000]
     gaussian_dimension: List[PositiveInt] = [2, 10, 20]
     noise_std: List[float] = [0, 0.01, 0.1, 1]

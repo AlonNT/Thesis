@@ -42,6 +42,9 @@ class ArchitectureArgs(ImmutableArgs):
     #: Indicator to plot graphs of the k-th intrinsic-dimension estimate for different k's.
     log_graphs: bool = True
 
+    #: Number of components to calculate when plotting the PCA singular values.
+    pca_n_components: PositiveInt = 100
+
     #: Indicator to shuffle the patches/images before calculating the intrinsic-dimension.
     shuffle_before_estimate: bool = False
 

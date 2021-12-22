@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from typing import Optional, List
+from sklearn.decomposition import PCA
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
 from torchvision.transforms import ToTensor, RandomCrop, RandomHorizontalFlip, Normalize, Compose
@@ -312,7 +313,9 @@ def calc_intrinsic_dimension(data: torch.Tensor, k1: int, k2: int) -> float:
 
 
 def indices_to_mask(n, indices, negate=False):
-    mask = torch.scatter(torch.zeros(n, dtype=torch.bool), dim=0, index=indices, value=1)
+    # TODO Report PyTorch BUG when indices is empty :(
+    # mask = torch.scatter(torch.zeros(n, dtype=torch.bool), dim=0, index=indices, value=1)
+    mask = torch.zeros(n, dtype=torch.bool).scatter_(dim=0, index=indices, value=1)
     if negate:
         mask = torch.bitwise_not(mask)
     return mask
@@ -333,6 +336,7 @@ class IntrinsicDimensionCalculator(Callback):
         self.estimate_dim_on_images: bool = args.estimate_dim_on_images
         self.log_graphs: bool = args.log_graphs
         self.shuffle_before_estimate: bool = args.shuffle_before_estimate
+        self.pca_n_components: int = args.pca_n_components
         self.minimal_distance = minimal_distance
 
         # Since the intrinsic-dimension calculation takes logarithm of the distances,
@@ -349,8 +353,16 @@ class IntrinsicDimensionCalculator(Callback):
         max_k = len(estimates) + 1
         df = pd.DataFrame(estimates[min_k - 1:], index=np.arange(min_k, max_k), columns=['k-th intrinsic-dimension'])
         df.index.name = 'k'
-        fig = px.line(df, title=f'{block_name} k-th intrinsic-dimension estiamte per k')
+        fig = px.line(df)
         metrics[f'{block_name}-int_dim_per_k'] = fig
+
+    def log_singular_values(self, metrics, block_name, data):
+        pca = PCA(n_components=min(self.pca_n_components, *data.shape))
+        pca.fit(data)
+        singular_values = pca.singular_values_
+        df = pd.DataFrame(singular_values.T, columns=['i-th_singular_value'])
+        fig = px.line(df, markers=True)
+        metrics[f'{block_name}-singular_values'] = fig
 
     def log_final_estimate(self, metrics, estimates, extrinsic_dimension, block_name):
         estimate_mean_over_k1_to_k2 = torch.mean(estimates[self.k1:self.k2 + 1])
@@ -378,7 +390,9 @@ class IntrinsicDimensionCalculator(Callback):
             estimates = torch.mean(estimates_matrix, dim=0)
 
             if self.log_graphs:
-                IntrinsicDimensionCalculator.log_dim_per_k_graph(metrics, block_name, estimates)
+                self.log_dim_per_k_graph(metrics, block_name, estimates)
+                self.log_singular_values(metrics, block_name, patches)
+
             self.log_final_estimate(metrics, estimates, patches.shape[1], block_name)
         trainer.logger.experiment.log(metrics, step=trainer.global_step, commit=False)
 
