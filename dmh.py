@@ -9,6 +9,7 @@ import pytorch_lightning as pl
 import torch.nn as nn
 import torch.nn.functional as F
 
+from loguru import logger
 from typing import Optional, List
 from sklearn.decomposition import PCA
 from torch.utils.data import DataLoader
@@ -281,9 +282,11 @@ def get_estimates_matrix(data: torch.Tensor, k: int):
     assert data.ndim == 2, f"data has shape {tuple(data.shape)}, expected (n, d) i.e. n d-dimensional vectors. "
 
     if k > data.shape[0]:
-        print(f"Number of data-points is {data.shape[0]} and k={k} should be smaller. ")
+        # print(f"Number of data-points is {data.shape[0]} and k={k} should be smaller. ")
+        logger.info(f"Number of data-points is {data.shape[0]} and k={k} should be smaller. ")
         k = data.shape[0] - 1
-        print(f"k was changed to {k}")
+        # print(f"k was changed to {k}")
+        logger.info(f"k was changed to {k}")
 
     distance_matrix = torch.cdist(data, data)
 
@@ -372,6 +375,7 @@ class IntrinsicDimensionCalculator(Callback):
         block_name = f'{block_name}-ext_dim_{extrinsic_dimension}'
         metrics.update({f'{block_name}-int_dim': intrinsic_dimension,
                         f'{block_name}-dim_ratio': dimensions_ratio})
+        return intrinsic_dimension, dimensions_ratio
 
     def calc_int_dim_per_layer_on_dataloader(self, trainer, pl_module, dataloader, name: str = ''):
         """
@@ -391,9 +395,14 @@ class IntrinsicDimensionCalculator(Callback):
 
             if self.log_graphs:
                 self.log_dim_per_k_graph(metrics, block_name, estimates)
-                self.log_singular_values(metrics, block_name, patches)
+                # self.log_singular_values(metrics, block_name, patches)
 
-            self.log_final_estimate(metrics, estimates, patches.shape[1], block_name)
+            int_dim, ratio = self.log_final_estimate(metrics, estimates, patches.shape[1], block_name)
+            logger.info(f'epoch {trainer.current_epoch:0>2d} '
+                        f'block {i:0>2d} '
+                        f'int-dim {int_dim:.2f} '
+                        f'({100*ratio:.2f}% of '
+                        f'ext-sim {patches.shape[1]})')
         trainer.logger.experiment.log(metrics, step=trainer.global_step, commit=False)
 
     def get_patches_not_too_close_to_one_another(self, dataloader, patch_size, sub_model):
@@ -463,12 +472,12 @@ def initialize_trainer(args: Args, model: nn.Module):
 def main():
     args = get_args(args_class=Args)
 
-    configure_logger(args.env.path)
-    log_args(args)
-
     model = initialize_model(args)
     trainer = initialize_trainer(args, model)
     datamodule = CIFAR10DataModule(args.data, args.opt.batch_size)
+
+    configure_logger(args.env.path, print_sink=model.print)
+    # log_args(args)
 
     trainer.fit(model, datamodule=datamodule)
 

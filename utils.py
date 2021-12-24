@@ -994,15 +994,17 @@ def create_out_dir(parent_out_dir: str) -> str:
     return out_dir
 
 
-def configure_logger(out_dir: str):
+def configure_logger(out_dir: str, print_sink=None):
     """
     Configure the logger:
     (1) Remove the default logger (to stdout) and use a one with a custom format.
     (2) Adds a log file named `run.log` in the given output directory.
     """
+    if print_sink is None:
+        print_sink = sys.stdout
     logger.remove()
     logger.remove()
-    logger.add(sink=sys.stdout, format=LOGGER_FORMAT)
+    logger.add(sink=print_sink, format=LOGGER_FORMAT)
     logger.add(sink=os.path.join(out_dir, 'run.log'), format=LOGGER_FORMAT)
 
 

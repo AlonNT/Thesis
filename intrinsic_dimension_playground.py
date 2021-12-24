@@ -97,7 +97,7 @@ def gaussian_playground_main(args: Args):
     m = args.gaussian_dimension[-1]
     k = f'singular_values_{m}_gauss_in_{n}_different_sizes'
     figures[k] = get_figure_int_dim_different_dataset_sizes(n, m, noise_std=0, base_n_points=args.n_points,
-                                                            start_k=args.start_k, powers=range(5))
+                                                            start_k=args.start_k, powers=range(3))
 
     wandb.log(figures)
 
