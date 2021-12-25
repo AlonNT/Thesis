@@ -11,7 +11,6 @@ import torch.nn.functional as F
 
 from loguru import logger
 from typing import Optional, List
-from sklearn.decomposition import PCA
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
 from torchvision.transforms import ToTensor, RandomCrop, RandomHorizontalFlip, Normalize, Compose
@@ -22,8 +21,8 @@ from pytorch_lightning.trainer.states import RunningStage
 from consts import CIFAR10_IMAGE_SIZE, N_CLASSES
 from patches import sample_random_patches
 from schemas.data import DataArgs
-from schemas.dmh import Args, ArchitectureArgs
-from utils import configure_logger, get_args, log_args, power_minus_1, get_mlp
+from schemas.dmh import Args, IntDimEstArgs
+from utils import configure_logger, get_args, power_minus_1, get_mlp
 from vgg import get_vgg_model_kernel_size, get_blocks, configs
 
 
@@ -107,12 +106,12 @@ class CIFAR10DataModule(LightningDataModule):
 
     def train_dataloader(self):
         return DataLoader(self.datasets[f'{RunningStage.TRAINING}_aug'], shuffle=True,
-                          batch_size=self.batch_size, num_workers=3)
+                          batch_size=self.batch_size, num_workers=4)
 
     def val_dataloader(self):
         return [
-            DataLoader(self.datasets[f'{RunningStage.VALIDATING}_aug'], batch_size=self.batch_size, num_workers=3),
-            DataLoader(self.datasets[f'{RunningStage.VALIDATING}_no_aug'], batch_size=self.batch_size, num_workers=3)
+            DataLoader(self.datasets[f'{RunningStage.VALIDATING}_aug'], batch_size=self.batch_size, num_workers=4),
+            DataLoader(self.datasets[f'{RunningStage.VALIDATING}_no_aug'], batch_size=self.batch_size, num_workers=4)
         ]
 
 
@@ -282,11 +281,9 @@ def get_estimates_matrix(data: torch.Tensor, k: int):
     assert data.ndim == 2, f"data has shape {tuple(data.shape)}, expected (n, d) i.e. n d-dimensional vectors. "
 
     if k > data.shape[0]:
-        # print(f"Number of data-points is {data.shape[0]} and k={k} should be smaller. ")
-        logger.info(f"Number of data-points is {data.shape[0]} and k={k} should be smaller. ")
+        logger.debug(f"Number of data-points is {data.shape[0]} and k={k} should be smaller. ")
         k = data.shape[0] - 1
-        # print(f"k was changed to {k}")
-        logger.info(f"k was changed to {k}")
+        logger.debug(f"k was changed to {k}")
 
     distance_matrix = torch.cdist(data, data)
 
@@ -294,7 +291,9 @@ def get_estimates_matrix(data: torch.Tensor, k: int):
     distances = distances[:, 1:]  # Remove the 1st column corresponding to the (zero) distance between item and itself.
     log_distances = torch.log(distances)
     log_distances_cumsum = torch.cumsum(log_distances, dim=1)
-    log_distances_cummean = torch.divide(log_distances_cumsum, torch.arange(start=1, end=log_distances.shape[1] + 1))
+    log_distances_cummean = torch.divide(log_distances_cumsum,
+                                         torch.arange(start=1, end=log_distances.shape[1] + 1,
+                                                      device=log_distances.device))
     log_distances_cummean_shifted = F.pad(log_distances_cummean[:, :-1], (1, 0))
     log_distances_minus_means = log_distances - log_distances_cummean_shifted
     estimates = power_minus_1(log_distances_minus_means)
@@ -318,7 +317,7 @@ def calc_intrinsic_dimension(data: torch.Tensor, k1: int, k2: int) -> float:
 def indices_to_mask(n, indices, negate=False):
     # TODO Report PyTorch BUG when indices is empty :(
     # mask = torch.scatter(torch.zeros(n, dtype=torch.bool), dim=0, index=indices, value=1)
-    mask = torch.zeros(n, dtype=torch.bool).scatter_(dim=0, index=indices, value=1)
+    mask = torch.zeros(n, dtype=torch.bool, device=indices.device).scatter_(dim=0, index=indices, value=1)
     if negate:
         mask = torch.bitwise_not(mask)
     return mask
@@ -326,7 +325,7 @@ def indices_to_mask(n, indices, negate=False):
 
 class IntrinsicDimensionCalculator(Callback):
 
-    def __init__(self, args: ArchitectureArgs, minimal_distance: float = 1e-05):
+    def __init__(self, args: IntDimEstArgs, minimal_distance: float = 1e-05):
         """
         Since the intrinsic-dimension calculation takes logarithm of the distances,
         if they are zero (or very small) it can cause numerical issues (NaN).
@@ -339,13 +338,12 @@ class IntrinsicDimensionCalculator(Callback):
         self.estimate_dim_on_images: bool = args.estimate_dim_on_images
         self.log_graphs: bool = args.log_graphs
         self.shuffle_before_estimate: bool = args.shuffle_before_estimate
-        self.pca_n_components: int = args.pca_n_components
         self.minimal_distance = minimal_distance
 
         # Since the intrinsic-dimension calculation takes logarithm of the distances,
         # if they are zero (or very small) it can cause numerical issues (NaN).
-        # The solution is to sample a little bit more patches than requested,
-        # and later we remove patches that are really close to one another
+        # The solution is to sample a bit more patches than requested,
+        # and later we remove patches that are really close to one another,
         # and we want our final number of patches to be the desired one.
         ratio_to_extend_n = 1.5 if self.estimate_dim_on_patches else 1.01  # Lower probability to get similar images.
         self.n_extended = math.ceil(self.n * ratio_to_extend_n)
@@ -356,16 +354,45 @@ class IntrinsicDimensionCalculator(Callback):
         max_k = len(estimates) + 1
         df = pd.DataFrame(estimates[min_k - 1:], index=np.arange(min_k, max_k), columns=['k-th intrinsic-dimension'])
         df.index.name = 'k'
-        fig = px.line(df)
-        metrics[f'{block_name}-int_dim_per_k'] = fig
+        metrics[f'{block_name}-int_dim_per_k'] = px.line(df)
+
+    @staticmethod
+    def normalize_data(data, epsilon=1e-05):
+        centered_data = data - data.mean(axis=0)
+        normalized_data = centered_data / (centered_data.std(axis=0) + epsilon)
+        return normalized_data
+
+    @staticmethod
+    def whiten_data(data, epsilon=1e-05):
+        centered_data = data - data.mean(axis=0)
+        covariance_matrix = (1 / centered_data.shape[0]) * (centered_data.T @ centered_data)
+        u, s, v = np.linalg.svd(covariance_matrix, hermitian=True)
+        rotated_data = centered_data @ u
+        whitened_data = rotated_data / (np.sqrt(s) + epsilon)
+        return whitened_data
 
     def log_singular_values(self, metrics, block_name, data):
-        pca = PCA(n_components=min(self.pca_n_components, *data.shape))
-        pca.fit(data)
-        singular_values = pca.singular_values_
-        df = pd.DataFrame(singular_values.T, columns=['i-th_singular_value'])
-        fig = px.line(df, markers=True)
-        metrics[f'{block_name}-singular_values'] = fig
+        n_samples, n_features = data.shape
+        data_dict = {'original_data': data,
+                     'normalized_data': self.normalize_data(data),
+                     'whitened_data': self.whiten_data(data),
+                     'random_data': np.random.default_rng().multivariate_normal(mean=np.zeros(n_features),
+                                                                                cov=np.eye(n_features),
+                                                                                size=n_samples)}
+
+        singular_values = {k: np.linalg.svd(data_dict[k], compute_uv=False) for k in data_dict.keys()}
+        singular_values_ratio = {k: (singular_values[k] / singular_values[k][0]) for k in data_dict.keys()}
+
+        # Inspiration taken from sklearn.decomposition._pca.PCA._fit_full
+        explained_variance_ratio = dict()
+        for k in data_dict.keys():
+            explained_variance = (singular_values[k] ** 2) / (n_samples - 1)
+            explained_variance_ratio[k] = explained_variance / explained_variance.sum()
+
+        fig_args = dict(markers=True)
+        metrics[f'{block_name}-singular_values'] = px.line(pd.DataFrame(singular_values), **fig_args)
+        metrics[f'{block_name}-singular_values_ratio'] = px.line(pd.DataFrame(singular_values_ratio), **fig_args)
+        metrics[f'{block_name}-explained_variance_ratio'] = px.line(pd.DataFrame(explained_variance_ratio), **fig_args)
 
     def log_final_estimate(self, metrics, estimates, extrinsic_dimension, block_name):
         estimate_mean_over_k1_to_k2 = torch.mean(estimates[self.k1:self.k2 + 1])
@@ -394,19 +421,16 @@ class IntrinsicDimensionCalculator(Callback):
             estimates = torch.mean(estimates_matrix, dim=0)
 
             if self.log_graphs:
-                self.log_dim_per_k_graph(metrics, block_name, estimates)
-                # self.log_singular_values(metrics, block_name, patches)
+                self.log_dim_per_k_graph(metrics, block_name, estimates.cpu().numpy())
+                self.log_singular_values(metrics, block_name, patches.cpu().numpy())
 
             int_dim, ratio = self.log_final_estimate(metrics, estimates, patches.shape[1], block_name)
-            logger.info(f'epoch {trainer.current_epoch:0>2d} '
-                        f'block {i:0>2d} '
-                        f'int-dim {int_dim:.2f} '
-                        f'({100*ratio:.2f}% of '
-                        f'ext-sim {patches.shape[1]})')
+            logger.debug(f'epoch {trainer.current_epoch:0>2d} block {i:0>2d} '
+                         f'int-dim {int_dim:.2f} ({100 * ratio:.2f}% of ext-sim {patches.shape[1]})')
         trainer.logger.experiment.log(metrics, step=trainer.global_step, commit=False)
 
-    def get_patches_not_too_close_to_one_another(self, dataloader, patch_size, sub_model):
-        patches = self.get_flattened_patches(dataloader, patch_size, sub_model)
+    def get_patches_not_too_close_to_one_another(self, dataloader, patch_size, sub_model, device=None):
+        patches = self.get_flattened_patches(dataloader, patch_size, sub_model, device)
         patches_to_keep_mask = self.get_patches_to_keep_mask(patches)
         patches = patches[patches_to_keep_mask]
 
@@ -414,7 +438,7 @@ class IntrinsicDimensionCalculator(Callback):
 
         return patches
 
-    def get_flattened_patches(self, dataloader, kernel_size, sub_model):
+    def get_flattened_patches(self, dataloader, kernel_size, sub_model, device=None):
         patches = sample_random_patches(dataloader, self.n_extended, kernel_size, sub_model)
         patches = patches.reshape(patches.shape[0], -1)  # a.k.a. flatten in NumPy
 
@@ -423,6 +447,9 @@ class IntrinsicDimensionCalculator(Callback):
 
         patches = patches.astype(np.float64)  # Increase accuracy of calculations.
         patches = torch.from_numpy(patches)
+
+        if device is not None:
+            patches = patches.to(device)
 
         return patches
 
@@ -461,10 +488,13 @@ def initialize_wandb_logger(args: Args, model: nn.Module):
 
 def initialize_trainer(args: Args, model: nn.Module):
     wandb_logger = initialize_wandb_logger(args, model)
-    intrinsic_dimension_calculator = IntrinsicDimensionCalculator(args.arch)
+    callbacks = list()
     trainer_kwargs = dict(gpus=[args.env.device_num]) if args.env.is_cuda else dict()
-    trainer = pl.Trainer(logger=wandb_logger, callbacks=[intrinsic_dimension_calculator], max_epochs=args.opt.epochs,
-                         # limit_train_batches=5, limit_val_batches=5,  # TODO for debugging purposes
+    if args.env.debug:
+        trainer_kwargs.update({f'limit_{t}_batches': 5 for t in ['train', 'val']})
+    if args.int_dim_est.estimate_intrinsic_dimension:
+        callbacks.append(IntrinsicDimensionCalculator(args.int_dim_est))
+    trainer = pl.Trainer(logger=wandb_logger, callbacks=callbacks, max_epochs=args.opt.epochs,
                          **trainer_kwargs)
     return trainer
 
@@ -476,8 +506,8 @@ def main():
     trainer = initialize_trainer(args, model)
     datamodule = CIFAR10DataModule(args.data, args.opt.batch_size)
 
-    configure_logger(args.env.path, print_sink=model.print)
-    # log_args(args)
+    logger_kwargs = dict(level='DEBUG') if args.env.debug else dict()
+    configure_logger(args.env.path, print_sink=model.print, **logger_kwargs)
 
     trainer.fit(model, datamodule=datamodule)
 

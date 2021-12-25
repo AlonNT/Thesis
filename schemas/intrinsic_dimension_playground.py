@@ -1,14 +1,13 @@
 from typing import List
 
-from flatten_dict import flatten_dict
-from pydantic import BaseModel
 from pydantic.types import PositiveInt
 
 from schemas.environment import EnvironmentArgs
 from schemas.data import DataArgs
+from schemas.utils import MyBaseModel
 
 
-class Args(BaseModel):
+class Args(MyBaseModel):
     env = EnvironmentArgs()
     data = DataArgs()
 
@@ -19,10 +18,3 @@ class Args(BaseModel):
     start_k: PositiveInt = 5
     k1: PositiveInt = 10
     k2: PositiveInt = 20
-
-    def flattened_dict(self):
-        """
-        Returns the arguments as a flattened dictionary, without the category name (i.e. opt, arch, env, data).
-        It's assumed that there is no field with the same name among different categories.
-        """
-        return {k[-1]: v for k, v in flatten_dict.flatten(self.dict()).items()}

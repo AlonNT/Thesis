@@ -1,4 +1,0 @@
-opt:
-  epochs: 100
-  learning_rate_decay_steps: [50, 90]
-  batch_size: 64

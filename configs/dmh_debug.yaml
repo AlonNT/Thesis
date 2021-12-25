@@ -5,6 +5,3 @@ opt:
 arch:
   model_name: "VGGs"
   final_mlp_hidden_dim: 64
-#  shuffle_patches: True
-#data:
-#  shuffle_images: True

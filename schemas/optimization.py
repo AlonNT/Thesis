@@ -7,10 +7,10 @@ from schemas.utils import ImmutableArgs, ProperFraction, NonNegativeFloat
 class OptimizationArgs(ImmutableArgs):
 
     #: Number of epochs to train.
-    epochs: PositiveInt = 80
+    epochs: PositiveInt = 100
 
     #: Mini batch size to use in each training-step.
-    batch_size: PositiveInt = 128
+    batch_size: PositiveInt = 64
 
     #: Momentum to use in SGD optimizer.
     momentum: ProperFraction = 0.9
@@ -22,7 +22,7 @@ class OptimizationArgs(ImmutableArgs):
     learning_rate: ProperFraction = 0.003
 
     #: Decay the learning-rate at these steps by a factor of `learning_rate_decay_gamma`.
-    learning_rate_decay_steps: List[PositiveInt] = [50, 75]
+    learning_rate_decay_steps: List[PositiveInt] = [50, 90]
 
     #: The factor gamma to multiply the learning-rate at the decay steps.
     learning_rate_decay_gamma: ProperFraction = 0.1

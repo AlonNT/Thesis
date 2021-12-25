@@ -24,6 +24,9 @@ class EnvironmentArgs(ImmutableArgs):
     #: How many iterations between each training log.
     log_interval: PositiveInt = 100
 
+    #: Debug mode means limiting the number of batches during training, etc.
+    debug: bool = False
+
     @validator('path', always=True)
     def create_out_dir(cls, v: Path):
         datetime_string = datetime.datetime.now().strftime(DATETIME_STRING_FORMAT)
