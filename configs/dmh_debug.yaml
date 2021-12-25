@@ -1,7 +1,6 @@
 opt:
-  epochs: 10
-  learning_rate_decay_steps: [5, 9]
-  batch_size: 64
-arch:
-  model_name: "VGGs"
-  final_mlp_hidden_dim: 64
+  epochs: 3
+  learning_rate_decay_steps: [1, 2]
+env:
+  debug: True
+  wandb_run_name: "debug-run"

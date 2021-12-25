@@ -1,5 +1,6 @@
 import math
 import torch
+import faiss
 
 import numpy as np
 import pandas as pd
@@ -10,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from loguru import logger
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
 from torchvision.transforms import ToTensor, RandomCrop, RandomHorizontalFlip, Normalize, Compose
@@ -22,7 +23,7 @@ from consts import CIFAR10_IMAGE_SIZE, N_CLASSES
 from patches import sample_random_patches
 from schemas.data import DataArgs
 from schemas.dmh import Args, IntDimEstArgs
-from utils import configure_logger, get_args, power_minus_1, get_mlp
+from utils import configure_logger, get_args, power_minus_1, get_mlp, get_dataloaders
 from vgg import get_vgg_model_kernel_size, get_blocks, configs
 
 
@@ -143,9 +144,8 @@ class LitVGG(pl.LightningModule):
         self.accuracy = {RunningStage.TRAINING: [self.train_accuracy],
                          RunningStage.VALIDATING: [self.validate_accuracy, self.validate_no_aug_accuracy]}
 
-        # Will hold the kernel-sizes for each convolution-block,
-        # and None for blocks which are not convolution-block.
-        self.kernel_sizes: List[Optional[int]] = self.get_kernel_sizes()
+        self.kernel_sizes: List[int] = self.get_kernel_sizes()  # For each convolution/pooling block
+        self.shapes: List[tuple] = self.get_shapes()
 
     def forward(self, x: torch.Tensor):
         features = self.features(x)
@@ -203,6 +203,28 @@ class LitVGG(pl.LightningModule):
                 kernel_size = kernel_size[0]
             kernel_sizes.append(kernel_size)
         return kernel_sizes
+
+    @torch.no_grad()
+    def get_shapes(self):
+        shapes = list()
+
+        dataloader = get_dataloaders(batch_size=8)["train"]
+        x, _ = next(iter(dataloader))
+        x = x.to(self.device)
+
+        for block in self.features:
+            shapes.append(tuple(x.shape[1:]))
+            x = block(x)
+
+        x = x.flatten(start_dim=1)
+
+        for block in self.mlp:
+            shapes.append(tuple(x.shape[1:]))
+            x = block(x)
+
+        shapes.append(tuple(x.shape[1:]))  # This is the output shape
+
+        return shapes
 
 
 class LitMLP(pl.LightningModule):
@@ -467,9 +489,8 @@ class IntrinsicDimensionCalculator(Callback):
         """
         Calculates the intrinsic-dimension of the model, both on the training-data and test-data.
         """
-        assert not pl_module.training, "Model should not be in training mode during validation"
-        self.calc_int_dim_per_layer_on_dataloader(trainer, pl_module,
-                                                  dataloader=trainer.request_dataloader(RunningStage.VALIDATING)[1])
+        validation_data_without_augmentations = trainer.request_dataloader(RunningStage.VALIDATING)[1]
+        self.calc_int_dim_per_layer_on_dataloader(trainer, pl_module, dataloader=validation_data_without_augmentations)
 
 
 def initialize_model(args: Args):
@@ -492,11 +513,33 @@ def initialize_trainer(args: Args, model: nn.Module):
     trainer_kwargs = dict(gpus=[args.env.device_num]) if args.env.is_cuda else dict()
     if args.env.debug:
         trainer_kwargs.update({f'limit_{t}_batches': 5 for t in ['train', 'val']})
+        trainer_kwargs.update({'log_every_n_steps': 1})
     if args.int_dim_est.estimate_intrinsic_dimension:
         callbacks.append(IntrinsicDimensionCalculator(args.int_dim_est))
     trainer = pl.Trainer(logger=wandb_logger, callbacks=callbacks, max_epochs=args.opt.epochs,
                          **trainer_kwargs)
     return trainer
+
+
+class ImitatorKNN:
+    def __init__(self, teacher: LitVGG, datamodule: CIFAR10DataModule,
+                 n_patches: int = 8192, n_clusters: int = 512):
+        self.teacher = teacher
+        self.n_patches = n_patches
+        self.kmeans = list()
+
+        for i in range(len(teacher.features)):
+            patches = sample_random_patches(datamodule.val_dataloader()[1], n_patches,
+                                            teacher.kernel_sizes[i], teacher.get_sub_model(i))
+            patches_flat = patches.reshape(patches.shape[0], -1)
+            kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=n_clusters,  #, gpu=torch.cuda.is_available(),
+                                  verbose=True)  # TODO change to debug argument
+            kmeans.train(patches_flat)
+
+            self.kmeans.append(kmeans)
+
+        import ipdb; ipdb.set_trace()
+        stop = 'here'
 
 
 def main():
@@ -510,6 +553,10 @@ def main():
     configure_logger(args.env.path, print_sink=model.print, **logger_kwargs)
 
     trainer.fit(model, datamodule=datamodule)
+
+    imitator = ImitatorKNN(model, datamodule)
+
+    import ipdb; ipdb.set_trace()
 
 
 if __name__ == '__main__':
