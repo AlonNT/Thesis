@@ -522,24 +522,33 @@ def initialize_trainer(args: Args, model: nn.Module):
 
 
 class ImitatorKNN:
+    @torch.no_grad()
     def __init__(self, teacher: LitVGG, datamodule: CIFAR10DataModule,
                  n_patches: int = 8192, n_clusters: int = 512):
         self.teacher = teacher
         self.n_patches = n_patches
+        self.centroids_outputs = list()
         self.kmeans = list()
 
-        for i in range(len(teacher.features)):
+        for i, block in enumerate(teacher.features):
             patches = sample_random_patches(datamodule.val_dataloader()[1], n_patches,
                                             teacher.kernel_sizes[i], teacher.get_sub_model(i))
             patches_flat = patches.reshape(patches.shape[0], -1)
-            kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=n_clusters,  #, gpu=torch.cuda.is_available(),
-                                  verbose=True)  # TODO change to debug argument
+            kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=n_clusters, verbose=True)  # TODO change to debug argument
             kmeans.train(patches_flat)
+            centroids = kmeans.centroids.reshape(-1, *patches.shape[1:])
 
+            if isinstance(block, nn.Sequential):
+                conv_layer = block[0]
+                centroids = torch.from_numpy(centroids).to(teacher.device)
+                centroids_outputs = F.conv2d(
+                    centroids, conv_layer.weight.detach(), conv_layer.bias.detach()
+                ).squeeze(dim=-1).squeeze(dim=-1)
+            else:  # block is a MaxPool layer
+                centroids_outputs = centroids.max(axis=(-2, -1))
+
+            self.centroids_outputs.append(centroids_outputs)
             self.kmeans.append(kmeans)
-
-        import ipdb; ipdb.set_trace()
-        stop = 'here'
 
 
 def main():
