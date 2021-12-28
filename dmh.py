@@ -526,7 +526,10 @@ class ImitatorKNN:
     def __init__(self, teacher: LitVGG, datamodule: CIFAR10DataModule,
                  n_patches: int = 8192, n_clusters: int = 512):
         self.teacher = teacher
+        self.datamodule = datamodule
         self.n_patches = n_patches
+        self.n_clusters = n_clusters
+
         self.centroids_outputs = list()
         self.kmeans = list()
 
@@ -543,12 +546,92 @@ class ImitatorKNN:
                 centroids = torch.from_numpy(centroids).to(teacher.device)
                 centroids_outputs = F.conv2d(
                     centroids, conv_layer.weight.detach(), conv_layer.bias.detach()
-                ).squeeze(dim=-1).squeeze(dim=-1)
+                ).squeeze(dim=-1).squeeze(dim=-1).cpu().numpy()
             else:  # block is a MaxPool layer
                 centroids_outputs = centroids.max(axis=(-2, -1))
 
             self.centroids_outputs.append(centroids_outputs)
             self.kmeans.append(kmeans)
+
+    def forward(self, x: torch.Tensor):
+        """
+        Returns the output of all blocks
+        """
+        intermediate_errors: List[float] = list()
+        for i, block in enumerate(self.teacher.features):
+            if isinstance(block, nn.Sequential):
+                conv_layer = block[0]
+                conv_output = conv_layer(x)
+                conv_output_size = tuple(conv_output.shape[-2:])
+                conv_kwargs = {k: getattr(conv_layer, k) for k in ['kernel_size', 'dilation', 'padding', 'stride']}
+
+                x_unfolded = F.unfold(x, **conv_kwargs)
+                batch_size, patch_dim, n_patches = x_unfolded.shape
+
+                # Transpose to (N, M, C*H*W) and then reshape to (N*M, C*H*W) to have collection of vectors
+                # Also make contiguous in memory (required by function kmeans.search).
+                x_unfolded = x_unfolded.transpose(dim0=1, dim1=2).flatten(start_dim=0, end_dim=1).contiguous()
+
+                # ##########################################################################
+                # # This piece of code verifies the unfold mechanism by
+                # # simulating the conv layer using matrix multiplication.
+                # ##########################################################################
+                # conv_weight = conv_layer.weight.flatten(start_dim=1).T
+                # conv_output_mm = torch.mm(x_unfolded, conv_weight)
+                # conv_output_mm = conv_output_mm.reshape(batch_size, n_patches, -1)
+                # conv_output_mm = conv_output_mm.transpose(dim0=1, dim1=2)
+                # conv_output_mm = conv_output_mm.reshape(batch_size, -1, *conv_output_size)
+                # if not torch.allclose(conv_output, conv_output_mm):
+                #     print(f'mean = {torch.mean(torch.abs(conv_output - conv_output_mm))}')
+                #     print(f'max = {torch.max(torch.abs(conv_output - conv_output_mm))}')
+                # ##########################################################################
+
+                # Get the distances and the indices of the nearest-neighbors
+                distances, indices = self.kmeans[i].assign(x_unfolded.numpy())
+
+                # For each patch in the input tensor x get its output
+                x_unfolded_outputs = self.centroids_outputs[i][indices]
+
+                x_unfolded_outputs = torch.from_numpy(x_unfolded_outputs)
+
+                x_unfolded_outputs = x_unfolded_outputs.reshape(batch_size, n_patches, -1)
+                x_unfolded_outputs = x_unfolded_outputs.transpose(dim0=1, dim1=2)
+
+                x_output = x_unfolded_outputs.reshape(batch_size, -1, *conv_output_size)
+
+                intermediate_errors.append(torch.mean(torch.abs(x_output - conv_output)).item())
+
+                # Run the rest of the block (i.e. BatchNorm->ReLU) on the calculated output
+                x = block[1:](x_output)
+            else:  # block is a MaxPool layer
+                x = block(x)  # TODO Do we want to simulate MaxPool with kNN as well?
+
+        logits = self.teacher.mlp(x)
+
+        return logits, intermediate_errors
+
+    def __call__(self, x: torch.Tensor):
+        """
+        Returns the final prediction of the model (output of the last layer)
+        """
+        logits, intermediate_errors = self.forward(x)
+        return logits
+
+    @ torch.no_grad()
+    def evaluate(self, dataloader):
+        loss_sum = 0.0
+        corrects_sum = 0
+
+        for inputs, labels in dataloader:
+            prediction, intermediate_errors = self.forward(inputs)
+            _, predictions = torch.max(prediction, dim=1)
+
+            corrects_sum += torch.sum(torch.eq(predictions, labels.data)).item()
+
+        loss = loss_sum / len(dataloader.dataset)
+        accuracy = 100 * (corrects_sum / len(dataloader.dataset))
+
+        return loss, accuracy
 
 
 def main():
@@ -564,8 +647,7 @@ def main():
     trainer.fit(model, datamodule=datamodule)
 
     imitator = ImitatorKNN(model, datamodule)
-
-    import ipdb; ipdb.set_trace()
+    imitator.evaluate(dataloader=datamodule.val_dataloader()[1])
 
 
 if __name__ == '__main__':
