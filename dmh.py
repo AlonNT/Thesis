@@ -9,6 +9,7 @@ import torchmetrics as tm
 import pytorch_lightning as pl
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 
 from loguru import logger
 from typing import Optional, List, Tuple
@@ -625,7 +626,7 @@ class ImitatorKNN:
         for inputs, labels in dataloader:
             prediction, intermediate_errors = self.forward(inputs)
             _, predictions = torch.max(prediction, dim=1)
-
+            loss_sum += sum(intermediate_errors)
             corrects_sum += torch.sum(torch.eq(predictions, labels.data)).item()
 
         loss = loss_sum / len(dataloader.dataset)
@@ -647,7 +648,8 @@ def main():
     trainer.fit(model, datamodule=datamodule)
 
     imitator = ImitatorKNN(model, datamodule)
-    imitator.evaluate(dataloader=datamodule.val_dataloader()[1])
+    loss, accuracy = imitator.evaluate(dataloader=datamodule.val_dataloader()[1])
+    wandb.summary({'knn_imitator_loss': loss, 'knn_imitator_accuracy': accuracy})
 
 
 if __name__ == '__main__':
