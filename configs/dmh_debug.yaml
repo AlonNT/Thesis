@@ -4,3 +4,9 @@ opt:
 env:
   debug: True
   wandb_run_name: "debug-run"
+int_dim_est:
+  n: 512
+imitation:
+  n_patches: 512
+  n_clusters: 16
+  random_patches: True

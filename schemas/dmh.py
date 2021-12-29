@@ -9,6 +9,8 @@ from schemas.utils import ImmutableArgs, MyBaseModel
 
 
 class IntDimEstArgs(ImmutableArgs):
+
+    #: Whether to enable estimating intrinsic-dimension.
     estimate_intrinsic_dimension: bool = True
 
     #: Number of patches/images to sample uniformly at random to estimate the intrinsic dimension.
@@ -40,8 +42,19 @@ class IntDimEstArgs(ImmutableArgs):
 
 
 class ImitationArgs(ImmutableArgs):
+
+    #: Whether to imitate network performance using knn-estimator.
     imitate_with_knn: bool = False
+
+    #: Number of patches to uniformly sample to perform clustering.
+    n_patches: PositiveInt = 8192
+
+    #: How many clusters to have in the final patches dictionary.
     n_clusters: PositiveInt = 1024
+
+    #: If it's true, the patches will NOT be taken from the dataset,
+    #: they will be uniformly sampled from [-1,+1]
+    random_patches: bool = False
 
 
 class Args(MyBaseModel):

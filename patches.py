@@ -277,7 +277,8 @@ def sample_random_patches(data_loader,
                           n_patches,
                           patch_size,
                           existing_model: Optional[nn.Module] = None,
-                          visualize: bool = False):
+                          visualize: bool = False,
+                          random_patches: bool = False):
     """
     This function sample random patches from the data, given by the data-loader object.
     It samples random indices for the patches and then iterates over the dataset to extract them.
@@ -319,6 +320,9 @@ def sample_random_patches(data_loader,
     images_indices_in_batches = images_indices % batch_size
 
     patches = np.empty(shape=(n_patches, ) + patch_shape, dtype=np.float32)
+
+    if random_patches:
+        return np.random.default_rng().uniform(low=-1, high=+1, size=patches.shape).astype(np.float32)
 
     for batch_index, (inputs, _) in enumerate(data_loader):
         if batch_index not in batches_indices:

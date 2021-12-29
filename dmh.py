@@ -23,7 +23,7 @@ from pytorch_lightning.trainer.states import RunningStage
 from consts import CIFAR10_IMAGE_SIZE, N_CLASSES
 from patches import sample_random_patches
 from schemas.data import DataArgs
-from schemas.dmh import Args, IntDimEstArgs
+from schemas.dmh import Args, IntDimEstArgs, ImitationArgs
 from utils import configure_logger, get_args, power_minus_1, get_mlp, get_dataloaders
 from vgg import get_vgg_model_kernel_size, get_blocks, configs
 
@@ -513,7 +513,7 @@ def initialize_trainer(args: Args, model: nn.Module):
     callbacks = list()
     trainer_kwargs = dict(gpus=[args.env.device_num]) if args.env.is_cuda else dict()
     if args.env.debug:
-        trainer_kwargs.update({f'limit_{t}_batches': 5 for t in ['train', 'val']})
+        trainer_kwargs.update({f'limit_{t}_batches': 3 for t in ['train', 'val']})
         trainer_kwargs.update({'log_every_n_steps': 1})
     if args.int_dim_est.estimate_intrinsic_dimension:
         callbacks.append(IntrinsicDimensionCalculator(args.int_dim_est))
@@ -524,27 +524,28 @@ def initialize_trainer(args: Args, model: nn.Module):
 
 class ImitatorKNN:
     @torch.no_grad()
-    def __init__(self, teacher: LitVGG, datamodule: CIFAR10DataModule,
-                 n_patches: int = 8192, n_clusters: int = 512):
-        self.teacher = teacher
-        self.datamodule = datamodule
-        self.n_patches = n_patches
-        self.n_clusters = n_clusters
+    def __init__(self, teacher: LitVGG, dataloader: DataLoader, args: ImitationArgs):
+        self.teacher: LitVGG = teacher
+        self.dataloader: DataLoader = dataloader
+        self.n_patches: int = args.n_patches
+        self.n_clusters: int = args.n_clusters
+        self.random_patches: bool = args.random_patches
 
-        self.centroids_outputs = list()
-        self.kmeans = list()
+        self.centroids_outputs: List[np.ndarray] = list()
+        self.kmeans: List[faiss.Kmeans] = list()
 
         for i, block in enumerate(teacher.features):
-            patches = sample_random_patches(datamodule.val_dataloader()[1], n_patches,
-                                            teacher.kernel_sizes[i], teacher.get_sub_model(i))
+            patches = sample_random_patches(self.dataloader, self.n_patches,
+                                            self.teacher.kernel_sizes[i], self.teacher.get_sub_model(i),
+                                            random_patches=args.random_patches)
             patches_flat = patches.reshape(patches.shape[0], -1)
-            kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=n_clusters, verbose=True)  # TODO change to debug argument
+            kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=self.n_clusters, verbose=True)
             kmeans.train(patches_flat)
             centroids = kmeans.centroids.reshape(-1, *patches.shape[1:])
 
             if isinstance(block, nn.Sequential):
                 conv_layer = block[0]
-                centroids = torch.from_numpy(centroids).to(teacher.device)
+                centroids = torch.from_numpy(centroids).to(conv_layer.weight.device)
                 centroids_outputs = F.conv2d(
                     centroids, conv_layer.weight.detach(), conv_layer.bias.detach()
                 ).squeeze(dim=-1).squeeze(dim=-1).cpu().numpy()
@@ -561,12 +562,15 @@ class ImitatorKNN:
         intermediate_errors: List[float] = list()
         for i, block in enumerate(self.teacher.features):
             if isinstance(block, nn.Sequential):
+                # x might be on GPU, but our knn-imitator works on CPU only (since it requires more memory than on GPU)
+                x_cpu = x.cpu()
+
                 conv_layer = block[0]
                 conv_output = conv_layer(x)
                 conv_output_size = tuple(conv_output.shape[-2:])
                 conv_kwargs = {k: getattr(conv_layer, k) for k in ['kernel_size', 'dilation', 'padding', 'stride']}
 
-                x_unfolded = F.unfold(x, **conv_kwargs)
+                x_unfolded = F.unfold(x_cpu, **conv_kwargs)
                 batch_size, patch_dim, n_patches = x_unfolded.shape
 
                 # Transpose to (N, M, C*H*W) and then reshape to (N*M, C*H*W) to have collection of vectors
@@ -587,29 +591,26 @@ class ImitatorKNN:
                 #     print(f'max = {torch.max(torch.abs(conv_output - conv_output_mm))}')
                 # ##########################################################################
 
-                # Get the distances and the indices of the nearest-neighbors
                 distances, indices = self.kmeans[i].assign(x_unfolded.numpy())
-
-                # For each patch in the input tensor x get its output
                 x_unfolded_outputs = self.centroids_outputs[i][indices]
-
                 x_unfolded_outputs = torch.from_numpy(x_unfolded_outputs)
-
                 x_unfolded_outputs = x_unfolded_outputs.reshape(batch_size, n_patches, -1)
                 x_unfolded_outputs = x_unfolded_outputs.transpose(dim0=1, dim1=2)
-
                 x_output = x_unfolded_outputs.reshape(batch_size, -1, *conv_output_size)
+                x_output = x_output.to(conv_output.device)
 
                 intermediate_errors.append(torch.mean(torch.abs(x_output - conv_output)).item())
 
                 # Run the rest of the block (i.e. BatchNorm->ReLU) on the calculated output
                 x = block[1:](x_output)
             else:  # block is a MaxPool layer
-                x = block(x)  # TODO Do we want to simulate MaxPool with kNN as well?
+                # TODO Do we want to simulate MaxPool with kNN as well?
+                intermediate_errors.append(0)  # no error since we don't simulate the MaxPool layers.
+                x = block(x)
 
         logits = self.teacher.mlp(x)
 
-        return logits, intermediate_errors
+        return logits, np.array(intermediate_errors)
 
     def __call__(self, x: torch.Tensor):
         """
@@ -620,19 +621,18 @@ class ImitatorKNN:
 
     @ torch.no_grad()
     def evaluate(self, dataloader):
-        loss_sum = 0.0
         corrects_sum = 0
+        total_intermediate_errors = np.zeros(shape=len(self.teacher.features), dtype=np.float32)
 
         for inputs, labels in dataloader:
             prediction, intermediate_errors = self.forward(inputs)
             _, predictions = torch.max(prediction, dim=1)
-            loss_sum += sum(intermediate_errors)
+            total_intermediate_errors += intermediate_errors
             corrects_sum += torch.sum(torch.eq(predictions, labels.data)).item()
 
-        loss = loss_sum / len(dataloader.dataset)
         accuracy = 100 * (corrects_sum / len(dataloader.dataset))
 
-        return loss, accuracy
+        return total_intermediate_errors, accuracy
 
 
 def main():
@@ -647,9 +647,12 @@ def main():
 
     trainer.fit(model, datamodule=datamodule)
 
-    imitator = ImitatorKNN(model, datamodule)
-    loss, accuracy = imitator.evaluate(dataloader=datamodule.val_dataloader()[1])
-    wandb.summary({'knn_imitator_loss': loss, 'knn_imitator_accuracy': accuracy})
+    if args.imitation.imitate_with_knn:
+        imitator = ImitatorKNN(model, datamodule.train_dataloader(), args.imitation)
+        intermediate_errors, accuracy = imitator.evaluate(dataloader=datamodule.val_dataloader()[1])
+        for i, error in enumerate(intermediate_errors):
+            wandb.summary[f'knn_imitator_{i}_error'] = error
+        wandb.summary['knn_imitator_accuracy'] = accuracy
 
 
 if __name__ == '__main__':
