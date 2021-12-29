@@ -5,6 +5,7 @@ import faiss
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.figure_factory as ff
 import torchmetrics as tm
 import pytorch_lightning as pl
 import torch.nn as nn
@@ -535,7 +536,7 @@ class ImitatorKNN:
         self.kmeans: List[faiss.Kmeans] = list()
 
         for i, block in enumerate(teacher.features):
-            patches = sample_random_patches(self.dataloader, self.n_patches,
+            patches = sample_random_patches(self.dataloader, self.n_patches,  # TODO whiten / normalize the patches?
                                             self.teacher.kernel_sizes[i], self.teacher.get_sub_model(i),
                                             random_patches=args.random_patches)
             patches_flat = patches.reshape(patches.shape[0], -1)
@@ -559,7 +560,7 @@ class ImitatorKNN:
         """
         Returns the output of all blocks
         """
-        intermediate_errors: List[float] = list()
+        intermediate_errors: List[np.ndarray] = list()
         for i, block in enumerate(self.teacher.features):
             if isinstance(block, nn.Sequential):
                 # x might be on GPU, but our knn-imitator works on CPU only (since it requires more memory than on GPU)
@@ -599,13 +600,15 @@ class ImitatorKNN:
                 x_output = x_unfolded_outputs.reshape(batch_size, -1, *conv_output_size)
                 x_output = x_output.to(conv_output.device)
 
-                intermediate_errors.append(torch.mean(torch.abs(x_output - conv_output)).item())
+                intermediate_errors.append(torch.mean(torch.abs(x_output - conv_output),
+                                                      dim=tuple(range(1, x_output.ndim))).cpu().numpy())
 
                 # Run the rest of the block (i.e. BatchNorm->ReLU) on the calculated output
                 x = block[1:](x_output)
             else:  # block is a MaxPool layer
                 # TODO Do we want to simulate MaxPool with kNN as well?
-                intermediate_errors.append(0)  # no error since we don't simulate the MaxPool layers.
+                # No error since we don't simulate the MaxPool layers.
+                intermediate_errors.append(np.zeros(x.shape[0], dtype=np.float32))
                 x = block(x)
 
         logits = self.teacher.mlp(x)
@@ -622,12 +625,12 @@ class ImitatorKNN:
     @ torch.no_grad()
     def evaluate(self, dataloader):
         corrects_sum = 0
-        total_intermediate_errors = np.zeros(shape=len(self.teacher.features), dtype=np.float32)
+        total_intermediate_errors = np.zeros(shape=(len(self.teacher.features), 0), dtype=np.float32)
 
         for inputs, labels in dataloader:
-            prediction, intermediate_errors = self.forward(inputs)
-            _, predictions = torch.max(prediction, dim=1)
-            total_intermediate_errors += intermediate_errors
+            logits, intermediate_errors = self.forward(inputs)
+            _, predictions = torch.max(logits, dim=1)
+            total_intermediate_errors = np.concatenate([total_intermediate_errors, intermediate_errors], axis=1)
             corrects_sum += torch.sum(torch.eq(predictions, labels.data)).item()
 
         accuracy = 100 * (corrects_sum / len(dataloader.dataset))
@@ -644,14 +647,22 @@ def main():
 
     logger_kwargs = dict(level='DEBUG') if args.env.debug else dict()
     configure_logger(args.env.path, print_sink=model.print, **logger_kwargs)
-
     trainer.fit(model, datamodule=datamodule)
 
     if args.imitation.imitate_with_knn:
+        # TODO do we want to set-up knn-imitator on data without augmentations?
         imitator = ImitatorKNN(model, datamodule.train_dataloader(), args.imitation)
         intermediate_errors, accuracy = imitator.evaluate(dataloader=datamodule.val_dataloader()[1])
-        for i, error in enumerate(intermediate_errors):
-            wandb.summary[f'knn_imitator_{i}_error'] = error
+
+        conv_blocks_indices = [i for i, block in enumerate(model.features) if isinstance(block, nn.Sequential)]
+        trainer.logger.experiment.log({'knn_imitator_error': ff.create_distplot(
+            intermediate_errors[conv_blocks_indices],
+            group_labels=[f'block_{i}_error' for i in conv_blocks_indices],
+            show_hist=False
+        )})
+
+        for i, error in enumerate(intermediate_errors.mean(axis=1)):
+            wandb.summary[f'knn_block_{i}_imitator_mean_error'] = error
         wandb.summary['knn_imitator_accuracy'] = accuracy
 
 
