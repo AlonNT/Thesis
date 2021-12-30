@@ -2,28 +2,20 @@
 This file runs the experiments for patches-based learning, similar to
 The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods
 (https://arxiv.org/pdf/2101.07528.pdf)
-
-(1) Collect patches from the dataset (to enable calculating later k-nearest-neighbors).
-(2) ?Calculates whitening?
-(3) Defines the model which will
 """
-import argparse
 import copy
-from functools import partial
-from math import ceil
-
-import yaml
-from torchvision.transforms.functional import hflip
-
 import wandb
+import torch
 
 import numpy as np
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
 
+from functools import partial
+from math import ceil
+from torchvision.transforms.functional import hflip
+from matplotlib.patches import Rectangle
 from loguru import logger
 from typing import Callable, Optional, Tuple
 from datetime import timedelta
@@ -438,6 +430,7 @@ def visualize_patches(model: ClassifierOnPatchBasedEmbedding, args: Args, n: int
         wandb.log({'best_patches': best_patches_fig, 'worst_patches': worst_patches_fig}, step=training_step)
         plt.close('all')  # Avoid memory consumption
 
+
 @torch.no_grad()
 def kill_weak_patches(model: ClassifierOnPatchBasedEmbedding, args: Args) -> ClassifierOnPatchBasedEmbedding:
     bottleneck_weight = model.bottle_neck_conv_1.weight.data.squeeze(dim=3).squeeze(dim=2)
@@ -446,7 +439,7 @@ def kill_weak_patches(model: ClassifierOnPatchBasedEmbedding, args: Args) -> Cla
     strong_patches_mask = torch.greater(norms, quantile)
     weak_patches_mask = torch.logical_not(strong_patches_mask)
     n_weak_patches = torch.sum(weak_patches_mask).cpu().numpy().item()
-    kernel, bias = get_conv_kernel_and_bias(n_weak_patches, args.arch.patch_size, args)  # TODO existing model=?
+    kernel, bias = get_conv_kernel_and_bias(args)  # TODO existing model=?
 
     model.patch_based_embedding.kernel_convolution[weak_patches_mask, :, :, :] = kernel.to(args.env.device)
     model.patch_based_embedding.bias_convolution[:, weak_patches_mask, :, :] = bias.view(

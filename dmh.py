@@ -1,6 +1,7 @@
 import math
 import torch
 import faiss
+import wandb
 
 import numpy as np
 import pandas as pd
@@ -10,7 +11,6 @@ import torchmetrics as tm
 import pytorch_lightning as pl
 import torch.nn as nn
 import torch.nn.functional as F
-import wandb
 
 from loguru import logger
 from typing import Optional, List, Tuple
@@ -22,11 +22,142 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer.states import RunningStage
 
 from consts import CIFAR10_IMAGE_SIZE, N_CLASSES
-from patches import sample_random_patches
+from patches import sample_random_patches, calculate_smaller_than_kth_value_mask
 from schemas.data import DataArgs
 from schemas.dmh import Args, IntDimEstArgs, ImitationArgs
 from utils import configure_logger, get_args, power_minus_1, get_mlp, get_dataloaders
 from vgg import get_vgg_model_kernel_size, get_blocks, configs
+
+
+class KNearestPatchesEmbedding(nn.Module):  # TODO Should we inherit from pl.LightningModule ?
+    """
+    Calculating the k-nearest-neighbors is implemented as convolution with bias, as was done in
+    The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods
+    (https://arxiv.org/pdf/2101.07528.pdf)
+    Details can be found in Appendix B (page 13).
+    """
+
+    def __init__(self, patches: torch.Tensor, k: int):
+        super(KNearestPatchesEmbedding, self).__init__()
+        stop = 'here'
+        import ipdb; ipdb.set_trace()
+        self.kernel = nn.Parameter(torch.Tensor(0), requires_grad=False)  # TODO fill it up
+
+        # The bias will be added to a tensor of shape (N, n_patches, H, W) to reshaping it
+        # to (1, n_patches, 1, 1) will make the addition "broadcastable".
+        self.bias = nn.Parameter(torch.Tensor(0).view(1, -1, 1, 1), requires_grad=False)  # TODO fill it up
+
+        self.k = k
+
+    def forward(self, images):
+        stop = 'here'
+        import ipdb; ipdb.set_trace()
+
+        conv_result_no_bias = F.conv2d(images, self.kernel_convolution)
+        squared_distances = -1 * conv_result_no_bias + self.bias_convolution
+
+        # TODO change to a single 1 in the index of the k-th nearest-neighbor
+        k_nearest_patches_mask = calculate_smaller_than_kth_value_mask(squared_distances, self.k).float()
+        return k_nearest_patches_mask
+
+
+class LocallyLinearConvImitator(nn.Module):  # TODO Should we inherit from pl.LightningModule ?
+    def __init__(self, patches: torch.Tensor, out_channels: int, k: int):
+        super(LocallyLinearConvImitator, self).__init__()
+
+        self.k = k
+        self.out_channels = out_channels
+        self.n_patches, self.in_channels, kernel_height, kernel_width = patches.shape
+        self.kernel_size = kernel_height
+        assert kernel_height == kernel_width, "the patches should be square"
+
+        self.k_nearest_neighbors_embedding = KNearestPatchesEmbedding(patches, k)
+
+        # This layer is in fact linear function per patch.
+        self.conv = nn.Conv2d(in_channels=self.n_patches,
+                              out_channels=self.out_channels,
+                              kernel_size=self.kernel_size)
+
+    def forward(self, x):
+        k_nearest_neighbors_mask = self.k_nearest_neighbors_embedding(x)
+        linear_output_per_patch = self.conv(x)
+        linear_output_per_kth_nearest_neighbor = k_nearest_neighbors_mask * linear_output_per_patch
+        return linear_output_per_kth_nearest_neighbor
+
+
+class LocallyLinearImitatorVGG(pl.LightningModule):  # TODO Should we inherit from pl.LightningModule ?
+
+    def __init__(self, args: Args, teacher: "LitVGG"):
+        super(LocallyLinearImitatorVGG, self).__init__()
+        self.args: Args = args
+        self.save_hyperparameters(args.flattened_dict())
+
+        self.teacher: LitVGG = teacher
+        conv_blocks_indices = [i for i, block in enumerate(teacher.features)
+                               if isinstance(block, nn.Sequential) and isinstance(block[0], nn.Conv2d)]
+        self.losses = [torch.nn.MSELoss() if (i in conv_blocks_indices) else None
+                       for i in range(len(teacher.features))]
+        # self.mlp = teacher.mlp  # TODO freeze gradients?
+        # self.num_blocks: int = teacher.num_blocks
+        # self.kernel_sizes: List[int] = teacher.kernel_sizes
+        # self.shapes: List[tuple] = teacher.shapes
+
+        # Apparently the Metrics must be an attribute of the LightningModule, and not inside a dictionary.
+        # This is why we have to set them separately here and then the dictionary will map to the attributes.
+        self.train_accuracy = tm.Accuracy()
+        self.validate_accuracy = tm.Accuracy()
+        self.validate_no_aug_accuracy = tm.Accuracy()
+        self.accuracy = {RunningStage.TRAINING: [self.train_accuracy],
+                         RunningStage.VALIDATING: [self.validate_accuracy, self.validate_no_aug_accuracy]}
+
+    def forward(self, x: torch.Tensor):
+        stop = 'here'
+        import ipdb; ipdb.set_trace()
+        features = self.features(x)
+        outputs = self.mlp(features)
+        return outputs
+
+    def shared_step(self, batch, stage: RunningStage, dataloader_idx: int = 0):
+        inputs, labels = batch
+        logits = self(inputs)
+        loss = self.loss(logits, labels)
+
+        self.accuracy[stage][dataloader_idx](logits, labels)
+
+        name = str(stage)
+        if dataloader_idx == 1:
+            name += '_no_aug'
+
+        self.log(f'{name}_loss', loss)
+        self.log(f'{name}_accuracy', self.accuracy[stage][dataloader_idx])
+
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        loss = self.shared_step(batch, RunningStage.TRAINING)
+        return loss
+
+    def validation_step(self, batch, batch_idx, dataloader_idx):
+        self.shared_step(batch, RunningStage.VALIDATING, dataloader_idx)
+
+    def get_sub_model(self, i: int) -> nn.Sequential:
+        if i < len(self.features):
+            sub_model = self.features[:i]
+        else:
+            j = len(self.features) - i  # This is the index in the mlp
+            sub_model = nn.Sequential(*(list(self.features) + list(self.mlp[:j])))
+
+        return sub_model
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.SGD(self.parameters(),
+                                    self.args.opt.learning_rate,
+                                    self.args.opt.momentum,
+                                    weight_decay=self.args.opt.weight_decay)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
+                                                         milestones=self.args.opt.learning_rate_decay_steps,
+                                                         gamma=self.args.opt.learning_rate_decay_gamma)
+        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
 
 
 class ShufflePixels:
@@ -360,7 +491,6 @@ class IntrinsicDimensionCalculator(Callback):
         self.k3: int = 8 * self.k2  # This will be used to plot a graph of the intrinsic-dimension per k (until k3)
         self.estimate_dim_on_patches: bool = args.estimate_dim_on_patches
         self.estimate_dim_on_images: bool = args.estimate_dim_on_images
-        self.log_graphs: bool = args.log_graphs
         self.shuffle_before_estimate: bool = args.shuffle_before_estimate
         self.minimal_distance = minimal_distance
 
@@ -390,33 +520,68 @@ class IntrinsicDimensionCalculator(Callback):
     def whiten_data(data, epsilon=1e-05):
         centered_data = data - data.mean(axis=0)
         covariance_matrix = (1 / centered_data.shape[0]) * (centered_data.T @ centered_data)
-        u, s, v = np.linalg.svd(covariance_matrix, hermitian=True)
+        u, s, v_t = np.linalg.svd(covariance_matrix, hermitian=True)
         rotated_data = centered_data @ u
         whitened_data = rotated_data / (np.sqrt(s) + epsilon)
         return whitened_data
 
     def log_singular_values(self, metrics, block_name, data):
-        n_samples, n_features = data.shape
-        data_dict = {'original_data': data,
-                     'normalized_data': self.normalize_data(data),
-                     'whitened_data': self.whiten_data(data),
-                     'random_data': np.random.default_rng().multivariate_normal(mean=np.zeros(n_features),
-                                                                                cov=np.eye(n_features),
-                                                                                size=n_samples)}
+        n, d = data.shape
+        data_dict = {
+            'original_data': data,
+            'normalized_data': self.normalize_data(data),
+            'whitened_data': self.whiten_data(data),
+            'random_data': np.random.default_rng().multivariate_normal(mean=np.zeros(d), cov=np.eye(d), size=n)
+        }
 
-        singular_values = {k: np.linalg.svd(data_dict[k], compute_uv=False) for k in data_dict.keys()}
-        singular_values_ratio = {k: (singular_values[k] / singular_values[k][0]) for k in data_dict.keys()}
-
-        # Inspiration taken from sklearn.decomposition._pca.PCA._fit_full
+        singular_values = dict()
+        singular_values_ratio = dict()
         explained_variance_ratio = dict()
-        for k in data_dict.keys():
-            explained_variance = (singular_values[k] ** 2) / (n_samples - 1)
-            explained_variance_ratio[k] = explained_variance / explained_variance.sum()
+        variance_ratio = dict()
+        reconstruction_errors = dict()
+        for data_name in data_dict.keys():
+            data_orig = data_dict[data_name]
+            logger.debug(f'Calculating SVD for {data_name} with shape {tuple(data_orig.shape)}...')
+            # u is a n x n matrix, the columns are the left singular vectors.
+            # s is a vector of size min(n, d), containing the singular values.
+            # v is a d x d matrix, the *rows* are the right singular vectors.
+            u, s, v_t = np.linalg.svd(data_orig)
+            v = v_t.T  # d x d matrix, now the *columns* are the right singular vectors.
+            logger.debug('Finished calculating SVD')
+
+            singular_values[data_name] = s
+
+            # Inspiration taken from sklearn.decomposition._pca.PCA._fit_full
+            explained_variance = (s ** 2) / (n - 1)
+            explained_variance_ratio[data_name] = explained_variance / explained_variance.sum()
+
+            # Inspiration taken from "The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods"
+            variance_ratio[data_name] = np.cumsum(s) / np.sum(s)
+            singular_values_ratio[data_name] = s / s[0]
+
+            logger.debug('Calculating reconstruction error...')
+            transformed_data = np.dot(data_orig, v)  # n x d matrix (like the original)
+            reconstruction_errors_list = list()
+            for k in range(1, 1 + d):
+                v_reduced = v[:, :k]  # d x k matrix
+                data_reduced = np.dot(transformed_data, v_reduced)  # n x k matrix
+                data_reconstructed = np.dot(data_reduced, v_reduced.T)  # n x d matrix
+                reconstruction_error = np.linalg.norm(data_orig - data_reconstructed)
+                reconstruction_errors_list.append(reconstruction_error)
+            logger.debug('Finished calculating reconstruction error.')
+
+            reconstruction_errors[data_name] = np.array(reconstruction_errors_list)
+
+        # Inspiration (and the name 'd_cov') taken from
+        # "The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods"
+        metrics[f'{block_name}-d_cov'] = np.where(variance_ratio['original_data'] > 0.95)[0][0]
 
         fig_args = dict(markers=True)
         metrics[f'{block_name}-singular_values'] = px.line(pd.DataFrame(singular_values), **fig_args)
         metrics[f'{block_name}-singular_values_ratio'] = px.line(pd.DataFrame(singular_values_ratio), **fig_args)
+        metrics[f'{block_name}-variance_ratio'] = px.line(pd.DataFrame(variance_ratio), **fig_args)
         metrics[f'{block_name}-explained_variance_ratio'] = px.line(pd.DataFrame(explained_variance_ratio), **fig_args)
+        metrics[f'{block_name}-reconstruction_errors'] = px.line(pd.DataFrame(reconstruction_errors), **fig_args)
 
     def log_final_estimate(self, metrics, estimates, extrinsic_dimension, block_name):
         estimate_mean_over_k1_to_k2 = torch.mean(estimates[self.k1:self.k2 + 1])
@@ -428,29 +593,33 @@ class IntrinsicDimensionCalculator(Callback):
                         f'{block_name}-dim_ratio': dimensions_ratio})
         return intrinsic_dimension, dimensions_ratio
 
-    def calc_int_dim_per_layer_on_dataloader(self, trainer, pl_module, dataloader, name: str = ''):
+    def calc_int_dim_per_layer_on_dataloader(self, trainer, pl_module, dataloader, log_graphs: bool = False):
         """
         Given a VGG model, go over each block in it and calculates the intrinsic dimension of its input data.
         """
+        # Since this part takes a lot of time, we do it only in the beginning of the training process (step=0)
+        # or when the argument log_graphs is True (happens when called from on_fit_end).
+        log_graphs = log_graphs or (trainer.global_step == 0)
+
         metrics = dict()
         for i in range(pl_module.num_blocks):
-            block_name = f'{name}-block_{i}' if len(name) > 0 else f'block_{i}'
+            block_name = f'block_{i}'
             if self.estimate_dim_on_images or (i >= len(pl_module.kernel_sizes)):
                 patch_size = -1
             else:
                 patch_size = pl_module.kernel_sizes[i]
             patches = self.get_patches_not_too_close_to_one_another(dataloader, patch_size, pl_module.get_sub_model(i))
 
-            estimates_matrix = get_estimates_matrix(patches, self.k3 if self.log_graphs else self.k2)
+            estimates_matrix = get_estimates_matrix(patches, self.k3 if log_graphs else self.k2)
             estimates = torch.mean(estimates_matrix, dim=0)
 
-            if self.log_graphs:
+            if log_graphs:
                 self.log_dim_per_k_graph(metrics, block_name, estimates.cpu().numpy())
                 self.log_singular_values(metrics, block_name, patches.cpu().numpy())
 
-            int_dim, ratio = self.log_final_estimate(metrics, estimates, patches.shape[1], block_name)
+            mle_int_dim, ratio = self.log_final_estimate(metrics, estimates, patches.shape[1], block_name)
             logger.debug(f'epoch {trainer.current_epoch:0>2d} block {i:0>2d} '
-                         f'int-dim {int_dim:.2f} ({100 * ratio:.2f}% of ext-sim {patches.shape[1]})')
+                         f'mle_int_dim {mle_int_dim:.2f} ({100 * ratio:.2f}% of ext_sim {patches.shape[1]})')
         trainer.logger.experiment.log(metrics, step=trainer.global_step, commit=False)
 
     def get_patches_not_too_close_to_one_another(self, dataloader, patch_size, sub_model, device=None):
@@ -458,7 +627,7 @@ class IntrinsicDimensionCalculator(Callback):
         patches_to_keep_mask = self.get_patches_to_keep_mask(patches)
         patches = patches[patches_to_keep_mask]
 
-        patches = patches[:self.n]  # This is done to get exactly n like the user requested.
+        patches = patches[:self.n]  # This is done to get exactly (or up-to) n like the user requested
 
         return patches
 
@@ -491,8 +660,13 @@ class IntrinsicDimensionCalculator(Callback):
         """
         Calculates the intrinsic-dimension of the model, both on the training-data and test-data.
         """
-        validation_data_without_augmentations = trainer.request_dataloader(RunningStage.VALIDATING)[1]
-        self.calc_int_dim_per_layer_on_dataloader(trainer, pl_module, dataloader=validation_data_without_augmentations)
+        self.calc_int_dim_per_layer_on_dataloader(trainer, pl_module,
+                                                  dataloader=trainer.request_dataloader(RunningStage.VALIDATING)[1])
+
+    def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        self.calc_int_dim_per_layer_on_dataloader(trainer, pl_module,
+                                                  dataloader=trainer.request_dataloader(RunningStage.VALIDATING)[1],
+                                                  log_graphs=True)
 
 
 def initialize_model(args: Args):
