@@ -609,8 +609,9 @@ class IntrinsicDimensionCalculator(Callback):
             reconstruction_errors_list = list()
             for k in range(1, 101):
                 v_reduced = v[:, :k]  # d x k matrix
-                data_reduced = np.dot(transformed_data, v_reduced)  # n x k matrix
-                data_reconstructed = np.dot(data_reduced, v_reduced.T)  # n x d matrix
+                transformed_data_reduced = np.dot(transformed_data, v_reduced)  # n x k matrix
+                transformed_data_reconstructed = np.dot(transformed_data_reduced, v_reduced.T)  # n x d matrix
+                data_reconstructed = np.dot(transformed_data_reconstructed, v_t)  # n x d matrix
                 reconstruction_error = np.linalg.norm(data_orig - data_reconstructed)
                 reconstruction_errors_list.append(reconstruction_error)
             logger.debug('Finished calculating reconstruction error.')
