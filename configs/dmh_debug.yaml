@@ -1,6 +1,7 @@
 opt:
   epochs: 3
   learning_rate_decay_steps: [1, 2]
+  batch_size: 4
 env:
   debug: True
   wandb_run_name: "debug-run"

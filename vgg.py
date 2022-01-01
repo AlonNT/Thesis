@@ -17,7 +17,7 @@ configs = {
 
     # Models taken from the paper "Training Neural Networks with Local Error Signals"
     # https://github.com/anokland/local-loss/blob/master/train.py#L1276
-    'VGG8b': [128, 256, 'M', 256, 512, 'M', 512, 'M', 512, 'M'],  #
+    'VGG8b': [128, 256, 'M', 256, 512, 'M', 512, 'M', 512, 'M'],
     'VGG11b': [128, 128, 128, 256, 'M', 256, 512, 'M', 512, 512, 'M', 512, 'M'],
 
     # These are versions similar to the original VGG models but with less down-sampling,
