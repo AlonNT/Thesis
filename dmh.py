@@ -23,7 +23,7 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer.states import RunningStage
 from pytorch_lightning.callbacks import ModelCheckpoint, ModelSummary
 
-from consts import CIFAR10_IMAGE_SIZE, N_CLASSES
+from consts import CIFAR10_IMAGE_SIZE, N_CLASSES, CIFAR10_IN_CHANNELS
 from patches import sample_random_patches
 from schemas.data import DataArgs
 from schemas.dmh import Args, IntDimEstArgs, ImitationArgs
@@ -39,7 +39,7 @@ class KNearestPatchesEmbedding(nn.Module):
     Details can be found in Appendix B (page 13).
     """
 
-    def __init__(self, patches: np.ndarray, padding: int, k: int):
+    def __init__(self, patches: np.ndarray, k: int, padding: int = 0):
         super(KNearestPatchesEmbedding, self).__init__()
 
         self.k = k
@@ -74,14 +74,18 @@ class LocallyLinearConvImitator(nn.Module):
         self.kernel_size = kernel_height
         assert kernel_height == kernel_width, "the patches should be square"
         self.padding = padding
-        self.k_nearest_neighbors_embedding = KNearestPatchesEmbedding(patches, padding, k)
+        self.k_nearest_neighbors_embedding = KNearestPatchesEmbedding(patches, k, padding)
 
         # This convolution layer can be thought of as linear function per patch in the patch-dict,
-        # each function is from (in_channels x kernel_size^2) to out_channels per patch.
+        # each function is from (in_channels x kernel_size^2) to the reals.
         self.conv = nn.Conv2d(in_channels=self.in_channels,
                               out_channels=self.n_patches,  # * self.out_channels,
                               kernel_size=self.kernel_size,
                               padding=self.padding)
+
+        # This convolution layer can be thought of as transforming each vector containing the output of
+        # the linear classifier corresponding to the nearest-patch in its index and zero elsewhere.
+        # to a vector of size `out_channels` (the objective is the corresponding teacher conv layer).
         self.conv_1x1 = nn.Conv2d(in_channels=self.n_patches,
                                   out_channels=self.out_channels,
                                   kernel_size=(1, 1))
@@ -210,6 +214,91 @@ class LocallyLinearImitatorVGG(pl.LightningModule):
         return {'optimizer': optimizer, 'lr_scheduler': scheduler}
 
 
+class LocallyLinearNetwork(pl.LightningModule):
+
+    def __init__(self, args: Args, datamodule: pl.LightningDataModule):
+        super(LocallyLinearNetwork, self).__init__()
+        self.args: Args = args
+        self.save_hyperparameters(args.flattened_dict())
+        self.n_patches = args.lln.num_patches
+        self.n_clusters = args.lln.num_patches
+        self.patch_size = args.lln.patch_size
+        self.k = args.lln.kth_neighbor
+
+        self.embedding = KNearestPatchesEmbedding(self.get_clustered_patches(datamodule), self.k)
+
+        # This convolution layer can be thought of as linear function per patch in the patch-dict,
+        # each function is from (in_channels x kernel_size^2) to the reals.
+        self.conv = nn.Conv2d(in_channels=CIFAR10_IN_CHANNELS,
+                              out_channels=self.n_patches,
+                              kernel_size=self.patch_size)
+
+        embedding_spatial_size = CIFAR10_IMAGE_SIZE - self.patch_size + 1
+        intermediate_n_features = self.n_patches * (embedding_spatial_size ** 2)
+
+        self.flatten = nn.Flatten()
+        self.linear = nn.Linear(in_features=intermediate_n_features, out_features=N_CLASSES)
+
+        self.loss = nn.CrossEntropyLoss()
+
+        # Apparently the Metrics must be an attribute of the LightningModule, and not inside a dictionary.
+        # This is why we have to set them separately here and then the dictionary will map to the attributes.
+        self.train_accuracy = tm.Accuracy()
+        self.validate_accuracy = tm.Accuracy()
+        self.validate_no_aug_accuracy = tm.Accuracy()
+        self.accuracy = {RunningStage.TRAINING: [self.train_accuracy],
+                         RunningStage.VALIDATING: [self.validate_accuracy, self.validate_no_aug_accuracy]}
+
+    def get_clustered_patches(self, datamodule):
+        dataloader = datamodule.train_dataloader()  # TODO do we want a different dataloader (maybe no aug)?
+        patches = sample_random_patches(dataloader, self.n_patches, self.patch_size)
+        patches_flat = patches.reshape(patches.shape[0], -1)
+        kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=self.n_clusters, verbose=True)
+        kmeans.train(patches_flat)
+        centroids = kmeans.centroids.reshape(-1, *patches.shape[1:])
+        return centroids
+
+    def forward(self, x: torch.Tensor):
+        import ipdb; ipdb.set_trace()
+        embedding = self.self.embedding(x)
+        conv = self.conv(x)
+        conv_mask = embedding * conv
+        conv_mask_flat = self.flatten(conv_mask)
+        logits = self.linear(conv_mask_flat)
+        return logits
+
+    def shared_step(self, batch, stage: RunningStage, dataloader_idx=0):
+        x, labels = batch  # Note that we do not use the labels for training, only for logging training accuracy.
+        logits = self(x)
+        loss = self.loss(logits, labels)
+
+        accuracy = self.accuracy[stage][dataloader_idx]
+        accuracy(logits, labels)
+
+        name = stage.value if dataloader_idx == 0 else f'{stage.value}_no_aug'
+        self.log(f'{name}_loss', loss)
+        self.log(f'{name}_accuracy', accuracy)
+
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        loss = self.shared_step(batch, RunningStage.TRAINING)
+        return loss
+
+    def validation_step(self, batch, batch_idx, dataloader_idx):
+        self.shared_step(batch, RunningStage.VALIDATING, dataloader_idx)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.SGD(self.parameters(),  # Explicitly optimize only the imitators parameters
+                                    self.args.opt.learning_rate,
+                                    self.args.opt.momentum,
+                                    weight_decay=self.args.opt.weight_decay)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
+                                                         milestones=self.args.opt.learning_rate_decay_steps,
+                                                         gamma=self.args.opt.learning_rate_decay_gamma)
+        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
+
+
 class ShufflePixels:
     def __init__(self, keep_rgb_triplets_intact: bool = True):
         self.keep_rgb_triplets_intact = keep_rgb_triplets_intact
@@ -287,14 +376,16 @@ class CIFAR10DataModule(LightningDataModule):
                     self.datasets[k] = CIFAR10(self.data_dir, train=(s == 'fit'), transform=self.transforms[aug])
 
     def train_dataloader(self):
-        return DataLoader(self.datasets['fit_aug'], shuffle=True,
-                          batch_size=self.batch_size, num_workers=4)
+        return DataLoader(self.datasets['fit_aug'], batch_size=self.batch_size, num_workers=4, shuffle=True)
 
     def val_dataloader(self):
         return [
             DataLoader(self.datasets['validate_aug'], batch_size=self.batch_size, num_workers=4),
             DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=4)
         ]
+
+    def train_dataloader_no_aug(self):
+        return DataLoader(self.datasets['fit'], batch_size=self.batch_size, num_workers=4, shuffle=True)
 
 
 class LitVGG(pl.LightningModule):
@@ -772,7 +863,7 @@ def initialize_trainer(args: Args, wandb_logger: WandbLogger):
     return trainer
 
 
-class ImitatorKNN:
+class ImitatorKNN:  # TODO inherit from pl.LightningModule to enable saving checkpoint of the model
     @torch.no_grad()
     def __init__(self, teacher: LitVGG, dataloader: DataLoader, args: ImitationArgs):
         self.teacher: LitVGG = teacher
@@ -918,7 +1009,13 @@ def main():
     model = initialize_model(args, wandb_logger)
     configure_logger(args.env.path, print_sink=model.print, level='DEBUG')  # if args.env.debug else 'INFO')
 
-    if not args.arch.use_pretrained:
+    if args.lln.train_locally_linear_network:
+        model = LocallyLinearNetwork(args, datamodule)
+        wandb_logger.watch(model, log='all')
+        trainer = initialize_trainer(args, wandb_logger)
+        trainer.fit(model, datamodule=datamodule)
+
+    elif not args.arch.use_pretrained:
         wandb_logger.watch(model, log='all')
         trainer = initialize_trainer(args, wandb_logger)
         trainer.fit(model, datamodule=datamodule)

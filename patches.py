@@ -286,6 +286,7 @@ def sample_random_patches(data_loader,
         patch_shape = get_model_output_shape(existing_model)
 
     if len(patch_shape) > 1:
+        import ipdb; ipdb.set_trace()  # TODO reshape, usually given empty model which changed patch_shape to C x H x W
         assert len(patch_shape) == 3 and (patch_shape[1] == patch_shape[2]), "Should be C x H x W where H = W"
         spatial_size = patch_shape[-1]
         if patch_size == -1:  # -1 means the patch size is the whole size of the image (or down-sampled activation)

@@ -66,6 +66,24 @@ class ImitationArgs(ImmutableArgs):
         return values
 
 
+class LocallyLinearNetworkArgs(ImmutableArgs):
+
+    #: Whether to imitate network performance using knn-estimator.
+    train_locally_linear_network: bool = False
+
+    #: Number of patches to uniformly sample to perform clustering.
+    num_patches: PositiveInt = 65536
+
+    #: How many clusters to have in the final patches dictionary.
+    num_clusters: PositiveInt = 1024
+
+    #: Patch size.
+    patch_size: PositiveInt = 5
+
+    #: The k-th nearest-neighbor will be used for the imitation using locally linear model.
+    kth_neighbor: PositiveInt = 1
+
+
 class Args(MyBaseModel):
     opt = OptimizationArgs()
     arch = ArchitectureArgs()
@@ -73,6 +91,7 @@ class Args(MyBaseModel):
     data = DataArgs()
     int_dim_est = IntDimEstArgs()
     imitation = ImitationArgs()
+    lln = LocallyLinearNetworkArgs()
 
     @root_validator
     def validate_imitate_on_pretrained_only(cls, values):
