@@ -643,8 +643,7 @@ class IntrinsicDimensionCalculator(Callback):
         """
         Given a VGG model, go over each block in it and calculates the intrinsic dimension of its input data.
         """
-        # Since this part takes a lot of time, we do it only in the beginning of the training process (step=0)
-        # or when the argument log_graphs is True (happens when called from on_fit_end).
+
         log_graphs = log_graphs or (trainer.global_step == 0)
 
         metrics = dict()
@@ -702,17 +701,37 @@ class IntrinsicDimensionCalculator(Callback):
 
         return patches_to_keep_mask
 
-    def on_validation_epoch_end(self, trainer, pl_module):
+    def calc_int_dim_per_layer(self, trainer, pl_module, log_graphs: bool = False):
         """
-        Calculates the intrinsic-dimension of the model, both on the training-data and test-data.
+        Calculate the intrinsic-dimension of across layers on the validation-data (without augmentations).
+        When the callback is called from the fit loop (e.g. on_fit_begin / on_fit_end) it's in training-mode,
+        so the dropout / batch-norm layers are still training. When it's being called from the validation-loop (e.g.
+        in on_validation_epoch_end) the training-mode is off.
+        We change the training-mode explicitly to False, and set it back like it was before after we finish.
         """
-        self.calc_int_dim_per_layer_on_dataloader(trainer, pl_module,
-                                                  dataloader=trainer.request_dataloader(RunningStage.VALIDATING)[1])
-
-    def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        training_mode = pl_module.training
+        pl_module.eval()
         self.calc_int_dim_per_layer_on_dataloader(trainer, pl_module,
                                                   dataloader=trainer.request_dataloader(RunningStage.VALIDATING)[1],
-                                                  log_graphs=True)
+                                                  log_graphs=log_graphs)
+        pl_module.train(training_mode)
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if trainer.global_step == 0:  # This happens in the end of validation loop sanity-check before training,
+            return                    # and we do not want to treat it the same as actual validation-epoch end.
+        self.calc_int_dim_per_layer(trainer, pl_module)
+
+    def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        """
+        Since log_graphs=True takes a lot of time, we do it only in the beginning /end of the training process.
+        """
+        self.calc_int_dim_per_layer(trainer, pl_module, log_graphs=True)
+
+    def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        """
+        Since log_graphs=True takes a lot of time, we do it only in the beginning /end of the training process.
+        """
+        self.calc_int_dim_per_layer(trainer, pl_module, log_graphs=True)
 
 
 def initialize_model(args: Args, wandb_logger: WandbLogger):
