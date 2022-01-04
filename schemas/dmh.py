@@ -1,3 +1,6 @@
+from math import ceil
+from typing import Union, Optional
+
 from pydantic import root_validator
 from pydantic.types import PositiveInt
 
@@ -5,16 +8,22 @@ from schemas.architecture import ArchitectureArgs
 from schemas.data import DataArgs
 from schemas.environment import EnvironmentArgs
 from schemas.optimization import OptimizationArgs
-from schemas.utils import ImmutableArgs, MyBaseModel
+from schemas.utils import ImmutableArgs, MyBaseModel, ProperFraction
 
 
-class IntDimEstArgs(ImmutableArgs):
+class DMHArgs(ImmutableArgs):
+
+    #: Whether to train a (shallow) locally linear network.
+    train_locally_linear_network: bool = False
+
+    #: Whether to imitate network performance using knn-estimator.
+    imitate_with_knn: bool = False
+
+    #: Whether to imitate network performance using knn-estimator.
+    imitate_with_locally_linear_model: bool = False
 
     #: Whether to enable estimating intrinsic-dimension.
     estimate_intrinsic_dimension: bool = False
-
-    #: Number of patches/images to sample uniformly at random to estimate the intrinsic dimension.
-    n: PositiveInt = 8192
 
     #: Whether to estimate the intrinsic-dimension on the patches or on the images.
     estimate_dim_on_patches: bool = True
@@ -27,6 +36,46 @@ class IntDimEstArgs(ImmutableArgs):
     #: Indicator to shuffle the patches/images before calculating the intrinsic-dimension.
     shuffle_before_estimate: bool = False
 
+    #: Patch size.
+    patch_size: PositiveInt = 5
+
+    #: Number of patches to uniformly sample (which might get clustered later).
+    n_patches: PositiveInt = 262144
+
+    #: How many clusters to have in the final patches' dictionary.
+    n_clusters: PositiveInt = 1024
+
+    #: If it's true, the patches will NOT be taken from the dataset,
+    #: they will be uniformly sampled from [-1,+1]
+    random_patches: bool = False
+
+    #: The k-th nearest-neighbor will be used for the k-NN imitator, or in the locally linear model.
+    k: PositiveInt = 1
+
+    #: The k-th nearest-neighbor as a fraction of the total amount of clusters
+    k_fraction: Optional[ProperFraction] = None
+
+    #: If it's true, when calculating k-nearest-neighbors there will be ones in the indices of the neighbors
+    #: 1, 2, ..., k. If it's false, there will be a single one in the index of the k-th nearest-neighbor.
+    up_to_k: bool = True
+
+    #: Use convolution layer multiplied by the patch-based embedding.
+    #: If it's false the resulting model is the same as Thiry et al.
+    use_conv: bool = True
+
+    #: Initialize the patches dictionary randomly from the same random distribution as PyTorch default for Conv2D.
+    random_embedding: bool = False
+
+    #: If it's true, the embedding will have gradients and will change during training.
+    learnable_embedding: bool = False
+
+    @root_validator
+    def set_k_from_k_fraction(cls, values):
+        if values['k_fraction'] is not None:
+            assert values['k'] == DMHArgs.__fields__['k'].default, "If you give k_fraction, don't give k."
+            values['k'] = ceil(values['k_fraction'] * values['n_clusters'])
+        return values
+
     @root_validator
     def validate_estimate_dim_on_images_or_patches(cls, values):
         assert values['estimate_dim_on_patches'] != values['estimate_dim_on_images'], "Exactly one should be given."
@@ -34,54 +83,16 @@ class IntDimEstArgs(ImmutableArgs):
 
     @root_validator
     def validate_k1_and_k2(cls, values):
-        assert values['k1'] < values['k2'] <= values['n']
+        assert values['k1'] < values['k2'] <= values['n_patches']
         return values
-
-
-class ImitationArgs(ImmutableArgs):
-
-    #: Whether to imitate network performance using knn-estimator.
-    imitate_with_knn: bool = False
-
-    #: Whether to imitate network performance using knn-estimator.
-    imitate_with_locally_linear_model: bool = False
-
-    #: Number of patches to uniformly sample to perform clustering.
-    n_patches: PositiveInt = 65536
-
-    #: How many clusters to have in the final patches dictionary.
-    n_clusters: PositiveInt = 1024
-
-    #: If it's true, the patches will NOT be taken from the dataset,
-    #: they will be uniformly sampled from [-1,+1]
-    random_patches: bool = False
-
-    #: The k-th nearest-neighbor will be used for the imitation using locally linear model.
-    k: PositiveInt = 1
 
     @root_validator
     def validate_mutually_exclusive(cls, values):
-        assert not (values['imitate_with_knn'] and values['imitate_with_locally_linear_model']), \
+        assert (int(values['imitate_with_knn']) +
+                int(values['imitate_with_locally_linear_model']) +
+                int(values['train_locally_linear_network']) <= 1), \
             "Must be mutually exclusive"
         return values
-
-
-class LocallyLinearNetworkArgs(ImmutableArgs):
-
-    #: Whether to imitate network performance using knn-estimator.
-    train_locally_linear_network: bool = False
-
-    #: Number of patches to uniformly sample to perform clustering.
-    num_patches: PositiveInt = 65536
-
-    #: How many clusters to have in the final patches dictionary.
-    num_clusters: PositiveInt = 1024
-
-    #: Patch size.
-    patch_size: PositiveInt = 5
-
-    #: The k-th nearest-neighbor will be used for the imitation using locally linear model.
-    kth_neighbor: PositiveInt = 1
 
 
 class Args(MyBaseModel):
@@ -89,12 +100,11 @@ class Args(MyBaseModel):
     arch = ArchitectureArgs()
     env = EnvironmentArgs()
     data = DataArgs()
-    int_dim_est = IntDimEstArgs()
-    imitation = ImitationArgs()
-    lln = LocallyLinearNetworkArgs()
+    dmh = DMHArgs()
 
-    @root_validator
-    def validate_imitate_on_pretrained_only(cls, values):
-        if values['imitation'].imitate_with_locally_linear_model or values['imitation'].imitate_with_knn:
-            values['arch'].use_pretrained = True
-        return values
+    # @root_validator  # TODO Why does it fail?
+    # def when_imitating_use_a_pretrained_model(cls, values):
+    #     import ipdb; ipdb.set_trace()
+    #     if values['dmh'].imitate_with_locally_linear_model or values['dmh'].imitate_with_knn:
+    #         values['arch'].use_pretrained = True
+    #     return values

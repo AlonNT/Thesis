@@ -276,17 +276,15 @@ def sample_random_patches(data_loader,
     It samples random indices for the patches and then iterates over the dataset to extract them.
     It returns a (NumPy) array containing the patches.
     """
-    rng = np.random.default_rng()
-
     batch_size = data_loader.batch_size
     n_images = data_loader.dataset.data.shape[0]
     patch_shape = data_loader.dataset.data.shape[1:]
+    patch_shape = np.roll(patch_shape, shift=1)  # In the dataset it's H x W x C but in the model it's C x H x W
     if existing_model is not None:
         device = get_model_device(existing_model)
         patch_shape = get_model_output_shape(existing_model)
 
     if len(patch_shape) > 1:
-        import ipdb; ipdb.set_trace()  # TODO reshape, usually given empty model which changed patch_shape to C x H x W
         assert len(patch_shape) == 3 and (patch_shape[1] == patch_shape[2]), "Should be C x H x W where H = W"
         spatial_size = patch_shape[-1]
         if patch_size == -1:  # -1 means the patch size is the whole size of the image (or down-sampled activation)
@@ -302,7 +300,7 @@ def sample_random_patches(data_loader,
 
     if n_patches >= n_patches_in_dataset:
         n_patches = n_patches_in_dataset
-    patches_indices_in_dataset = np.sort(rng.choice(n_patches_in_dataset, size=n_patches, replace=False))
+    patches_indices_in_dataset = np.random.default_rng().choice(n_patches_in_dataset, size=n_patches, replace=False)
 
     images_indices = patches_indices_in_dataset % n_images
     patches_indices_in_images = patches_indices_in_dataset // n_images

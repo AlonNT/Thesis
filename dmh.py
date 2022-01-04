@@ -26,7 +26,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, ModelSummary
 from consts import CIFAR10_IMAGE_SIZE, N_CLASSES, CIFAR10_IN_CHANNELS
 from patches import sample_random_patches
 from schemas.data import DataArgs
-from schemas.dmh import Args, IntDimEstArgs, ImitationArgs
+from schemas.dmh import Args, DMHArgs
 from utils import configure_logger, get_args, power_minus_1, get_mlp, get_dataloaders
 from vgg import get_vgg_model_kernel_size, get_blocks, configs
 
@@ -39,19 +39,31 @@ class KNearestPatchesEmbedding(nn.Module):
     Details can be found in Appendix B (page 13).
     """
 
-    def __init__(self, patches: np.ndarray, k: int, padding: int = 0):
+    def __init__(self,
+                 patches: np.ndarray,
+                 k: int,
+                 up_to_k: bool = True,
+                 padding: int = 0,
+                 requires_grad: bool = False,
+                 random_embedding: bool = False):
         super(KNearestPatchesEmbedding, self).__init__()
 
         self.k = k
+        self.up_to_k = up_to_k
         self.padding = padding
 
-        kernel_np = -1 * patches
-        bias_np = 0.5 * np.square(np.linalg.norm(patches.reshape(patches.shape[0], -1), axis=1))
+        if random_embedding:
+            out_channels, in_channels, kernel_height, kernel_width = patches.shape
+            assert kernel_height == kernel_width, "the patches should be square"
+            tmp_conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_height, padding=self.padding)
+            kernel_np = tmp_conv.weight.data.cpu().numpy().copy()
+            bias_np = tmp_conv.bias.data.cpu().numpy().copy()
+        else:
+            kernel_np = -1 * patches
+            bias_np = 0.5 * np.square(np.linalg.norm(patches.reshape(patches.shape[0], -1), axis=1))
 
-        # The bias will be added to a tensor of shape (N, n_patches, H, W) to reshaping it
-        # to (1, n_patches, 1, 1) will make the addition "broadcastable".
-        self.kernel = nn.Parameter(torch.Tensor(kernel_np), requires_grad=False)
-        self.bias = nn.Parameter(torch.Tensor(bias_np), requires_grad=False)
+        self.kernel = nn.Parameter(torch.Tensor(kernel_np), requires_grad=requires_grad)
+        self.bias = nn.Parameter(torch.Tensor(bias_np), requires_grad=requires_grad)
 
     def forward(self, images):
         # In every spatial location ij, we'll have a vector containing the squared distances to all the patches.
@@ -59,9 +71,12 @@ class KNearestPatchesEmbedding(nn.Module):
         # input patch in that location, but minimizing this value will minimize the distance
         # (since the norm of the input patch is the same among all patches in the bank).
         distances = F.conv2d(images, self.kernel, self.bias, padding=self.padding)
-        _, indices = distances.kthvalue(self.k, dim=1, keepdim=True)
-        kth_nearest_neighbor_mask = torch.zeros_like(distances).scatter_(dim=1, index=indices, value=1)
-        return kth_nearest_neighbor_mask
+        values, indices = distances.kthvalue(self.k, dim=1, keepdim=True)
+        if self.up_to_k:
+            mask = (distances <= values).float()
+        else:
+            mask = torch.zeros_like(distances).scatter_(dim=1, index=indices, value=1)
+        return mask
 
 
 class LocallyLinearConvImitator(nn.Module):
@@ -74,7 +89,7 @@ class LocallyLinearConvImitator(nn.Module):
         self.kernel_size = kernel_height
         assert kernel_height == kernel_width, "the patches should be square"
         self.padding = padding
-        self.k_nearest_neighbors_embedding = KNearestPatchesEmbedding(patches, k, padding)
+        self.k_nearest_neighbors_embedding = KNearestPatchesEmbedding(patches, k, padding=padding)
 
         # This convolution layer can be thought of as linear function per patch in the patch-dict,
         # each function is from (in_channels x kernel_size^2) to the reals.
@@ -117,18 +132,18 @@ class LocallyLinearImitatorVGG(pl.LightningModule):
             if is_conv_block(block):
                 conv_layer: nn.Conv2d = block[0]
                 patches = sample_random_patches(datamodule.train_dataloader(),
-                                                args.imitation.n_patches,
+                                                args.dmh.n_patches,
                                                 conv_layer.kernel_size[0],
                                                 teacher.get_sub_model(i),
-                                                random_patches=args.imitation.random_patches)
+                                                random_patches=args.dmh.random_patches)
                 patches_flat = patches.reshape(patches.shape[0], -1)
-                kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=args.imitation.n_clusters, verbose=True)
+                kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=args.dmh.n_clusters, verbose=True)
                 kmeans.train(patches_flat)
                 centroids = kmeans.centroids.reshape(-1, *patches.shape[1:])
                 conv_imitator = LocallyLinearConvImitator(centroids,
                                                           conv_layer.out_channels,
                                                           conv_layer.padding[0],
-                                                          args.imitation.k)
+                                                          args.dmh.k)
                 layers.append(conv_imitator)
                 losses.append(nn.MSELoss())
             else:
@@ -220,21 +235,22 @@ class LocallyLinearNetwork(pl.LightningModule):
         super(LocallyLinearNetwork, self).__init__()
         self.args: Args = args
         self.save_hyperparameters(args.flattened_dict())
-        self.n_patches = args.lln.num_patches
-        self.n_clusters = args.lln.num_patches
-        self.patch_size = args.lln.patch_size
-        self.k = args.lln.kth_neighbor
 
-        self.embedding = KNearestPatchesEmbedding(self.get_clustered_patches(datamodule), self.k)
+        self.dataloader = datamodule.train_dataloader()  # TODO do we want a different dataloader (maybe no aug)?
+        self.embedding = KNearestPatchesEmbedding(self.get_clustered_patches(),
+                                                  self.args.dmh.k,
+                                                  self.args.dmh.up_to_k,
+                                                  requires_grad=self.args.dmh.learnable_embedding,
+                                                  random_embedding=self.args.dmh.random_embedding)
 
         # This convolution layer can be thought of as linear function per patch in the patch-dict,
         # each function is from (in_channels x kernel_size^2) to the reals.
-        self.conv = nn.Conv2d(in_channels=CIFAR10_IN_CHANNELS,
-                              out_channels=self.n_patches,
-                              kernel_size=self.patch_size)
+        self.conv = None if (not self.args.dmh.use_conv) else nn.Conv2d(in_channels=CIFAR10_IN_CHANNELS,
+                                                                        out_channels=self.args.dmh.n_clusters,
+                                                                        kernel_size=self.args.dmh.patch_size)
 
-        embedding_spatial_size = CIFAR10_IMAGE_SIZE - self.patch_size + 1
-        intermediate_n_features = self.n_patches * (embedding_spatial_size ** 2)
+        embedding_spatial_size = CIFAR10_IMAGE_SIZE - self.args.dmh.patch_size + 1
+        intermediate_n_features = self.args.dmh.n_clusters * (embedding_spatial_size ** 2)
 
         self.flatten = nn.Flatten()
         self.linear = nn.Linear(in_features=intermediate_n_features, out_features=N_CLASSES)
@@ -249,22 +265,21 @@ class LocallyLinearNetwork(pl.LightningModule):
         self.accuracy = {RunningStage.TRAINING: [self.train_accuracy],
                          RunningStage.VALIDATING: [self.validate_accuracy, self.validate_no_aug_accuracy]}
 
-    def get_clustered_patches(self, datamodule):
-        dataloader = datamodule.train_dataloader()  # TODO do we want a different dataloader (maybe no aug)?
-        patches = sample_random_patches(dataloader, self.n_patches, self.patch_size)
+    def get_clustered_patches(self):
+        patches = sample_random_patches(self.dataloader, self.args.dmh.n_patches, self.args.dmh.patch_size,
+                                        random_patches=self.args.dmh.random_patches)
         patches_flat = patches.reshape(patches.shape[0], -1)
-        kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=self.n_clusters, verbose=True)
+        kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=self.args.dmh.n_clusters, verbose=True)
         kmeans.train(patches_flat)
         centroids = kmeans.centroids.reshape(-1, *patches.shape[1:])
         return centroids
 
     def forward(self, x: torch.Tensor):
-        import ipdb; ipdb.set_trace()
-        embedding = self.self.embedding(x)
-        conv = self.conv(x)
-        conv_mask = embedding * conv
-        conv_mask_flat = self.flatten(conv_mask)
-        logits = self.linear(conv_mask_flat)
+        features = self.embedding(x)
+        if self.args.dmh.use_conv:
+            features *= self.conv(x)
+        features_flat = self.flatten(features)
+        logits = self.linear(features_flat)
         return logits
 
     def shared_step(self, batch, stage: RunningStage, dataloader_idx=0):
@@ -616,12 +631,12 @@ def indices_to_mask(n, indices, negate=False):
 
 class IntrinsicDimensionCalculator(Callback):
 
-    def __init__(self, args: IntDimEstArgs, minimal_distance: float = 1e-05):
+    def __init__(self, args: DMHArgs, minimal_distance: float = 1e-05):
         """
         Since the intrinsic-dimension calculation takes logarithm of the distances,
         if they are zero (or very small) it can cause numerical issues (NaN).
         """
-        self.n: int = args.n
+        self.n: int = args.n_patches
         self.k1: int = args.k1
         self.k2: int = args.k2
         self.k3: int = 8 * self.k2  # This will be used to plot a graph of the intrinsic-dimension per k (until k3)
@@ -809,7 +824,7 @@ class IntrinsicDimensionCalculator(Callback):
 
     def on_validation_epoch_end(self, trainer, pl_module):
         if trainer.global_step == 0:  # This happens in the end of validation loop sanity-check before training,
-            return                    # and we do not want to treat it the same as actual validation-epoch end.
+            return  # and we do not want to treat it the same as actual validation-epoch end.
         self.calc_int_dim_per_layer(trainer, pl_module)
 
     def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
@@ -856,8 +871,8 @@ def initialize_trainer(args: Args, wandb_logger: WandbLogger):
     if args.env.debug:
         trainer_kwargs.update({f'limit_{t}_batches': 3 for t in ['train', 'val']})
         trainer_kwargs.update({'log_every_n_steps': 1})
-    if args.int_dim_est.estimate_intrinsic_dimension:
-        callbacks.append(IntrinsicDimensionCalculator(args.int_dim_est))
+    if args.dmh.estimate_intrinsic_dimension:
+        callbacks.append(IntrinsicDimensionCalculator(args.dmh))
     trainer = pl.Trainer(logger=wandb_logger, callbacks=callbacks, max_epochs=args.opt.epochs,
                          **trainer_kwargs)
     return trainer
@@ -865,7 +880,7 @@ def initialize_trainer(args: Args, wandb_logger: WandbLogger):
 
 class ImitatorKNN:  # TODO inherit from pl.LightningModule to enable saving checkpoint of the model
     @torch.no_grad()
-    def __init__(self, teacher: LitVGG, dataloader: DataLoader, args: ImitationArgs):
+    def __init__(self, teacher: LitVGG, dataloader: DataLoader, args: DMHArgs):
         self.teacher: LitVGG = teacher
         self.dataloader: DataLoader = dataloader
         self.n_patches: int = args.n_patches
@@ -1009,7 +1024,7 @@ def main():
     model = initialize_model(args, wandb_logger)
     configure_logger(args.env.path, print_sink=model.print, level='DEBUG')  # if args.env.debug else 'INFO')
 
-    if args.lln.train_locally_linear_network:
+    if args.dmh.train_locally_linear_network:
         model = LocallyLinearNetwork(args, datamodule)
         wandb_logger.watch(model, log='all')
         trainer = initialize_trainer(args, wandb_logger)
@@ -1020,12 +1035,12 @@ def main():
         trainer = initialize_trainer(args, wandb_logger)
         trainer.fit(model, datamodule=datamodule)
 
-    if args.imitation.imitate_with_knn:
+    if args.dmh.imitate_with_knn:
         # TODO do we want to set-up knn-imitator on data without augmentations?
-        imitator = ImitatorKNN(model, datamodule.train_dataloader(), args.imitation)
+        imitator = ImitatorKNN(model, datamodule.train_dataloader(), args.dmh)
         evaluate_knn_imitator(imitator, datamodule, wandb_logger)
 
-    if args.imitation.imitate_with_locally_linear_model:
+    if args.dmh.imitate_with_locally_linear_model:
         imitator = LocallyLinearImitatorVGG(model, datamodule, args)
         wandb_logger.watch(imitator, log='all')
         trainer = initialize_trainer(args, wandb_logger)
