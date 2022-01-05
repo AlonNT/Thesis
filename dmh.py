@@ -27,7 +27,7 @@ from consts import CIFAR10_IMAGE_SIZE, N_CLASSES, CIFAR10_IN_CHANNELS
 from patches import sample_random_patches
 from schemas.data import DataArgs
 from schemas.dmh import Args, DMHArgs
-from utils import configure_logger, get_args, power_minus_1, get_mlp, get_dataloaders
+from utils import configure_logger, get_args, power_minus_1, get_mlp, get_dataloaders, calc_whitening
 from vgg import get_vgg_model_kernel_size, get_blocks, configs
 
 
@@ -40,7 +40,8 @@ class KNearestPatchesEmbedding(nn.Module):
     """
 
     def __init__(self,
-                 patches: np.ndarray,
+                 kernel: np.ndarray,
+                 bias: np.ndarray,
                  k: int,
                  up_to_k: bool = True,
                  padding: int = 0,
@@ -53,17 +54,14 @@ class KNearestPatchesEmbedding(nn.Module):
         self.padding = padding
 
         if random_embedding:
-            out_channels, in_channels, kernel_height, kernel_width = patches.shape
+            out_channels, in_channels, kernel_height, kernel_width = kernel.shape
             assert kernel_height == kernel_width, "the patches should be square"
             tmp_conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_height, padding=self.padding)
-            kernel_np = tmp_conv.weight.data.cpu().numpy().copy()
-            bias_np = tmp_conv.bias.data.cpu().numpy().copy()
-        else:
-            kernel_np = -1 * patches
-            bias_np = 0.5 * np.square(np.linalg.norm(patches.reshape(patches.shape[0], -1), axis=1))
+            kernel = tmp_conv.weight.data.cpu().numpy().copy()
+            bias = tmp_conv.bias.data.cpu().numpy().copy()
 
-        self.kernel = nn.Parameter(torch.Tensor(kernel_np), requires_grad=requires_grad)
-        self.bias = nn.Parameter(torch.Tensor(bias_np), requires_grad=requires_grad)
+        self.kernel = nn.Parameter(torch.Tensor(kernel), requires_grad=requires_grad)
+        self.bias = nn.Parameter(torch.Tensor(bias), requires_grad=requires_grad)
 
     def forward(self, images):
         # In every spatial location ij, we'll have a vector containing the squared distances to all the patches.
@@ -89,7 +87,8 @@ class LocallyLinearConvImitator(nn.Module):
         self.kernel_size = kernel_height
         assert kernel_height == kernel_width, "the patches should be square"
         self.padding = padding
-        self.k_nearest_neighbors_embedding = KNearestPatchesEmbedding(patches, k, padding=padding)
+        import ipdb; ipdb.set_trace()  # TODO DEBUG, since we changed the API to get kernel and bias
+        self.k_nearest_neighbors_embedding = KNearestPatchesEmbedding(kernel, bias, k, padding=padding)
 
         # This convolution layer can be thought of as linear function per patch in the patch-dict,
         # each function is from (in_channels x kernel_size^2) to the reals.
@@ -237,11 +236,21 @@ class LocallyLinearNetwork(pl.LightningModule):
         self.save_hyperparameters(args.flattened_dict())
 
         self.dataloader = datamodule.train_dataloader()  # TODO do we want a different dataloader (maybe no aug)?
-        self.embedding = KNearestPatchesEmbedding(self.get_clustered_patches(),
-                                                  self.args.dmh.k,
-                                                  self.args.dmh.up_to_k,
-                                                  requires_grad=self.args.dmh.learnable_embedding,
-                                                  random_embedding=self.args.dmh.random_embedding)
+
+        if self.args.dmh.use_whitening:
+            self.whitening_matrix = calc_whitening(self.dataloader,
+                                                   self.args.dmh.patch_size,
+                                                   self.args.dmh.whitening_regularization_factor)
+            self.wwt = self.whitening_matrix @ self.whitening_matrix.T
+        else:
+            self.whitening_matrix = None
+            self.wwt = None
+
+        kernel, bias = self.get_kernel_and_bias()
+        self.embedding = KNearestPatchesEmbedding(
+            kernel, bias, self.args.dmh.k, self.args.dmh.up_to_k,
+            requires_grad=self.args.dmh.learnable_embedding, random_embedding=self.args.dmh.random_embedding
+        )
 
         # This convolution layer can be thought of as linear function per patch in the patch-dict,
         # each function is from (in_channels x kernel_size^2) to the reals.
@@ -265,13 +274,32 @@ class LocallyLinearNetwork(pl.LightningModule):
         self.accuracy = {RunningStage.TRAINING: [self.train_accuracy],
                          RunningStage.VALIDATING: [self.validate_accuracy, self.validate_no_aug_accuracy]}
 
+    def get_kernel_and_bias(self):
+        # Set the kernel and the bias of the embedding. Note that if we use whitening then the kernel is the patches
+        # multiplied by WW^T and the bias is the squared-norm of patches multiplied by W (no W^T).
+        kernel = self.get_clustered_patches()
+        bias = 0.5 * np.linalg.norm(kernel.reshape(kernel.shape[0], -1), axis=1) ** 2
+        if self.args.dmh.use_whitening:
+            # TODO maybe we should multiply from left?
+            kernel_flat = kernel.reshape(kernel.shape[0], -1)
+            kernel_flat = kernel_flat @ self.whitening_matrix.T
+            kernel = kernel_flat.reshape(kernel.shape)
+        kernel *= -1  # According to the formula as page 13 in https://arxiv.org/pdf/2101.07528.pdf
+
+        return kernel, bias
+
     def get_clustered_patches(self):
         patches = sample_random_patches(self.dataloader, self.args.dmh.n_patches, self.args.dmh.patch_size,
                                         random_patches=self.args.dmh.random_patches)
-        patches_flat = patches.reshape(patches.shape[0], -1)
-        kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=self.args.dmh.n_clusters, verbose=True)
-        kmeans.train(patches_flat)
-        centroids = kmeans.centroids.reshape(-1, *patches.shape[1:])
+        original_shape = patches.shape
+        patches = patches.reshape(patches.shape[0], -1)
+
+        if self.args.dmh.use_whitening:
+            patches = patches @ self.whitening_matrix  # TODO maybe we should multiply from left?
+
+        kmeans = faiss.Kmeans(d=patches.shape[1], k=self.args.dmh.n_clusters, verbose=True)
+        kmeans.train(patches)
+        centroids = kmeans.centroids.reshape(-1, *original_shape[1:])
         return centroids
 
     def forward(self, x: torch.Tensor):
@@ -561,7 +589,6 @@ class LitMLP(pl.LightningModule):
         self.shared_step(batch, RunningStage.VALIDATING, dataloader_idx)
 
     def get_sub_model(self, i: int) -> nn.Sequential:
-        stop = 'here'
         return self.mlp[:i]
 
     def configure_optimizers(self):

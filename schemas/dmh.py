@@ -8,7 +8,7 @@ from schemas.architecture import ArchitectureArgs
 from schemas.data import DataArgs
 from schemas.environment import EnvironmentArgs
 from schemas.optimization import OptimizationArgs
-from schemas.utils import ImmutableArgs, MyBaseModel, ProperFraction
+from schemas.utils import ImmutableArgs, MyBaseModel, ProperFraction, NonNegativeFloat
 
 
 class DMHArgs(ImmutableArgs):
@@ -69,6 +69,12 @@ class DMHArgs(ImmutableArgs):
     #: If it's true, the embedding will have gradients and will change during training.
     learnable_embedding: bool = False
 
+    #: The regularization factor (a.k.a. lambda) of the whitening matrix.
+    use_whitening: bool = True
+
+    #: The regularization factor (a.k.a. lambda) of the whitening matrix.
+    whitening_regularization_factor: NonNegativeFloat = 0.001
+
     @root_validator
     def set_k_from_k_fraction(cls, values):
         if values['k_fraction'] is not None:
@@ -88,10 +94,9 @@ class DMHArgs(ImmutableArgs):
 
     @root_validator
     def validate_mutually_exclusive(cls, values):
-        assert (int(values['imitate_with_knn']) +
-                int(values['imitate_with_locally_linear_model']) +
-                int(values['train_locally_linear_network']) <= 1), \
-            "Must be mutually exclusive"
+        assert sum(int(values[k]) for k in ['imitate_with_knn',
+                                            'imitate_with_locally_linear_model',
+                                            'train_locally_linear_network']) <= 1, "Must be mutually exclusive"
         return values
 
 

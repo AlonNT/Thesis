@@ -5,6 +5,8 @@ import os
 import sys
 import time
 import itertools
+from functools import partial
+
 import yaml
 
 import torch
@@ -13,11 +15,13 @@ import wandb
 
 import torch.nn as nn
 import numpy as np
+import torch.nn.functional as F
 
-from torchvision.transforms.functional import resize
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Callable
 from loguru import logger
 from datetime import timedelta
+from torch.utils.data import DataLoader
+from torchvision.transforms.functional import resize
 
 from consts import CLASSES, LOGGER_FORMAT, DATETIME_STRING_FORMAT
 
@@ -1081,10 +1085,16 @@ def log_epoch_end(epoch, epoch_time_elapsed, total_epochs, total_time,
 
 
 def get_model_device(model: torch.nn.Module):
+    default_device = torch.device('cpu')
+
+    # If the model is None, assume the model's device is CPU.
+    if model is None:
+        return default_device
+
     try:
         device = next(model.parameters()).device
-    except StopIteration:  # If the model has no parameters, assume the model's device is cpu.
-        device = torch.device('cpu')
+    except StopIteration:  # If the model has no parameters, assume the model's device is CPU.
+        device = default_device
 
     return device
 
@@ -1102,3 +1112,73 @@ def get_model_output_shape(model: nn.Module):
     outputs = model(inputs)
     outputs = outputs.cpu().numpy()
     return outputs.shape[1:]  # Remove the first dimension corresponding to the batch
+
+
+@torch.no_grad()
+def calc_mean_patch(dataloader,
+                    patch_size,
+                    agg_func: Callable,
+                    existing_model: Optional[nn.Module] = None):
+    total_size = 0
+    mean = None
+    device = get_model_device(existing_model)
+    for inputs, _ in dataloader:
+        if existing_model is not None:
+            inputs = inputs.to(device)
+            inputs = existing_model(inputs)
+            inputs = inputs.cpu()
+
+        # Unfold the input batch to its patches - shape (N, C*H*W, M) where M is the number of patches per image.
+        patches = F.unfold(inputs, patch_size)
+
+        # Replace the batch axis with the patch axis, to obtain shape (C*H*W, N, M)
+        patches = patches.transpose(0, 1).contiguous()
+
+        # Flatten the batch and n_patches axes, to obtain shape (C*H*W, N*M)
+        patches = torch.flatten(patches, start_dim=1).double()
+
+        # Perform the aggregation function over the batch-size and number of patches per image.
+        # For example, when calculating mean it'll a (C*H*W)-dimensional vector,
+        # and when calculating the covariance it will be a square matrix of shape (C*H*W, C*H*W)
+        aggregated_patch = agg_func(patches)
+
+        if mean is None:
+            mean = torch.zeros_like(aggregated_patch)
+
+        batch_size = inputs.size(0)
+        mean = ((total_size / (total_size + batch_size)) * mean +
+                (batch_size / (total_size + batch_size)) * aggregated_patch)
+
+        total_size += batch_size
+
+    return mean
+
+
+def calc_covariance(tensor, mean):
+    centered_tensor = tensor - mean
+    return (centered_tensor @ centered_tensor.t()) / tensor.size(1)
+
+
+def calc_whitening(dataloader: DataLoader,
+                   patch_size: int,
+                   whitening_regularization_factor: float,
+                   existing_model: Optional[nn.Module] = None) -> np.ndarray:
+    logger.debug('Performing a first pass over the dataset to calculate the mean patch...')
+    mean_patch = calc_mean_patch(dataloader, patch_size,
+                                 agg_func=partial(torch.mean, dim=1),
+                                 existing_model=existing_model)
+
+    logger.debug('Performing a second pass over the dataset to calculate the covariance...')
+    covariance = calc_mean_patch(dataloader, patch_size,
+                                 agg_func=partial(calc_covariance, mean=torch.unsqueeze(mean_patch, dim=-1)),
+                                 existing_model=existing_model)
+
+    logger.debug('Calculating eigenvalues decomposition to get the whitening matrix...')
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance.cpu().numpy())
+
+    inv_sqrt_eigenvalues = np.diag(1. / np.sqrt(eigenvalues + whitening_regularization_factor))
+    whitening_matrix = eigenvectors.dot(inv_sqrt_eigenvalues)
+    whitening_matrix = whitening_matrix.astype(np.float32)
+
+    logger.debug('Done.')
+    return whitening_matrix
