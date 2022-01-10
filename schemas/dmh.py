@@ -1,5 +1,5 @@
 from math import ceil
-from typing import Union, Optional
+from typing import Optional
 
 from pydantic import root_validator
 from pydantic.types import PositiveInt
@@ -47,10 +47,14 @@ class DMHArgs(ImmutableArgs):
 
     #: If it's true, the patches will NOT be taken from the dataset,
     #: they will be uniformly sampled from [-1,+1]
-    random_patches: bool = False
+    random_uniform_patches: bool = False
+
+    #: If it's true, the patches will NOT be taken from the dataset,
+    #: they will be uniformly sampled from [-1,+1]
+    random_gaussian_patches: bool = False
 
     #: The k-th nearest-neighbor will be used for the k-NN imitator, or in the locally linear model.
-    k: PositiveInt = 1
+    k: PositiveInt = 64
 
     #: The k-th nearest-neighbor as a fraction of the total amount of clusters
     k_fraction: Optional[ProperFraction] = None
@@ -66,14 +70,41 @@ class DMHArgs(ImmutableArgs):
     #: Initialize the patches dictionary randomly from the same random distribution as PyTorch default for Conv2D.
     random_embedding: bool = False
 
+    #: If it's true, the embedding with be replaced with a Conv->ReLU
+    replace_embedding_with_regular_conv_relu: bool = False
+
     #: If it's true, the embedding will have gradients and will change during training.
     learnable_embedding: bool = False
 
     #: The regularization factor (a.k.a. lambda) of the whitening matrix.
     use_whitening: bool = True
 
+    #: If it's false, use PCA-whitening. Otherwise, use ZCA whitening (which is a rotation of the PCA-whitening).
+    zca_whitening: bool = False
+
+    #: If it's true, calculates whitening from the sampled patches, and not from all patches in the dataset.
+    calc_whitening_from_sampled_patches: bool = False
+
     #: The regularization factor (a.k.a. lambda) of the whitening matrix.
     whitening_regularization_factor: NonNegativeFloat = 0.001
+
+    #: Whether to use avg-pool after the embedding.
+    use_avg_pool: bool = True
+    pool_size: PositiveInt = 4
+    pool_stride: PositiveInt = 4
+
+    #: Whether to use adaptive-avg-pool after the avg-pool.
+    use_adaptive_avg_pool: bool = False
+    adaptive_pool_output_size: PositiveInt = 6
+
+    #: Whether to use batch-norm after the embedding or not.
+    use_batch_norm: bool = True
+
+    #: Whether to decompose the final linear layer into 1x1 convolution followed by an actual linear layer.
+    use_bottle_neck: bool = True
+    bottle_neck_dimension: PositiveInt = 128
+    bottle_neck_kernel_size: PositiveInt = 1
+    use_relu_after_bottleneck: bool = False
 
     @root_validator
     def set_k_from_k_fraction(cls, values):
@@ -106,10 +137,3 @@ class Args(MyBaseModel):
     env = EnvironmentArgs()
     data = DataArgs()
     dmh = DMHArgs()
-
-    # @root_validator  # TODO Why does it fail?
-    # def when_imitating_use_a_pretrained_model(cls, values):
-    #     import ipdb; ipdb.set_trace()
-    #     if values['dmh'].imitate_with_locally_linear_model or values['dmh'].imitate_with_knn:
-    #         values['arch'].use_pretrained = True
-    #     return values

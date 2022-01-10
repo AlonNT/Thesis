@@ -1124,18 +1124,14 @@ def calc_mean_patch(dataloader,
     device = get_model_device(existing_model)
     for inputs, _ in dataloader:
         if existing_model is not None:
-            inputs = inputs.to(device)
-            inputs = existing_model(inputs)
-            inputs = inputs.cpu()
+            inputs = existing_model(inputs.to(device)).cpu()
 
         # Unfold the input batch to its patches - shape (N, C*H*W, M) where M is the number of patches per image.
         patches = F.unfold(inputs, patch_size)
 
-        # Replace the batch axis with the patch axis, to obtain shape (C*H*W, N, M)
-        patches = patches.transpose(0, 1).contiguous()
-
-        # Flatten the batch and n_patches axes, to obtain shape (C*H*W, N*M)
-        patches = torch.flatten(patches, start_dim=1).double()
+        # Transpose to (N, M, C*H*W) and then reshape to (N*M, C*H*W) to have collection of vectors
+        # Also make contiguous in memory
+        patches = patches.transpose(1, 2).flatten(0, 1).contiguous().double()
 
         # Perform the aggregation function over the batch-size and number of patches per image.
         # For example, when calculating mean it'll a (C*H*W)-dimensional vector,
@@ -1154,31 +1150,93 @@ def calc_mean_patch(dataloader,
     return mean
 
 
-def calc_covariance(tensor, mean):
-    centered_tensor = tensor - mean
-    return (centered_tensor @ centered_tensor.t()) / tensor.size(1)
+def calc_covariance(data, mean=None):
+    """
+    Calculates the covariance-matrix of the given data.
+    This function assumes the data matrix is ordered as rows-vectors
+    (i.e. shape (n,d) so n data-points in d dimensions).
+
+    """
+    if mean is None:
+        mean = data.mean(axis=0)
+    centered_data = data - mean
+    return (1 / data.shape[0]) * (centered_data.T @ centered_data)
 
 
 def calc_whitening(dataloader: DataLoader,
                    patch_size: int,
                    whitening_regularization_factor: float,
+                   zca_whitening: bool = False,
                    existing_model: Optional[nn.Module] = None) -> np.ndarray:
+    """
+    Denote the data matrix by X (i.e. collection of patches) with shape N x D.
+    N is the number of patches, and D is the dimension of each patch (channels * spatial_size ** 2).
+    This function returns the whitening operator as a columns-vectors matrix of shape D x D,
+    so it needs to be multiplied by the target data matrix X' of shape N' x D from the right (X' @ W)
+    [and NOT from the left, i.e. NOT W @ X'].
+    """
     logger.debug('Performing a first pass over the dataset to calculate the mean patch...')
     mean_patch = calc_mean_patch(dataloader, patch_size,
-                                 agg_func=partial(torch.mean, dim=1),
+                                 agg_func=partial(torch.mean, dim=0),
                                  existing_model=existing_model)
 
     logger.debug('Performing a second pass over the dataset to calculate the covariance...')
-    covariance = calc_mean_patch(dataloader, patch_size,
-                                 agg_func=partial(calc_covariance, mean=torch.unsqueeze(mean_patch, dim=-1)),
-                                 existing_model=existing_model)
+    covariance_matrix = calc_mean_patch(dataloader, patch_size,
+                                        agg_func=partial(calc_covariance, mean=mean_patch),
+                                        existing_model=existing_model)
 
     logger.debug('Calculating eigenvalues decomposition to get the whitening matrix...')
-    eigenvalues, eigenvectors = np.linalg.eigh(covariance.cpu().numpy())
-
-    inv_sqrt_eigenvalues = np.diag(1. / np.sqrt(eigenvalues + whitening_regularization_factor))
-    whitening_matrix = eigenvectors.dot(inv_sqrt_eigenvalues)
-    whitening_matrix = whitening_matrix.astype(np.float32)
+    whitening_matrix = get_whitening_matrix_from_covariance_matrix(
+        covariance_matrix, whitening_regularization_factor, zca_whitening
+    )
 
     logger.debug('Done.')
     return whitening_matrix
+
+
+def get_whitening_matrix_from_covariance_matrix(covariance_matrix: np.ndarray,
+                                                whitening_regularization_factor: float,
+                                                zca_whitening: bool = False):
+    eigenvectors, eigenvalues, eigenvectors_transposed = np.linalg.svd(covariance_matrix, hermitian=True)
+    inv_sqrt_eigenvalues = np.diag(1. / (np.sqrt(eigenvalues) + whitening_regularization_factor))
+    whitening_matrix = eigenvectors.dot(inv_sqrt_eigenvalues)
+    if zca_whitening:
+        whitening_matrix = whitening_matrix @ eigenvectors.T
+    whitening_matrix = whitening_matrix.astype(np.float32)
+    return whitening_matrix
+
+
+def get_covariance_matrix(data: np.ndarray) -> np.ndarray:
+    """
+    The data is assumed to be of shape (n_samples, n_features),
+    meaning it's a collection of row-vectors.
+    """
+    centered_data = data - data.mean(axis=0)
+    covariance_matrix = (1 / centered_data.shape[0]) * (centered_data.T @ centered_data)
+    return covariance_matrix
+
+
+def whiten_data(data, whitening_regularization_factor=1e-05, zca_whitening=False):
+    """
+    Whiten the given data, according to the PCA-whitening method.
+    Note that the data is assumed to be of shape (n_samples, n_features),
+    meaning it's a collection of row-vectors.
+    """
+    covariance_matrix = get_covariance_matrix(data)
+    whitening_matrix = get_whitening_matrix_from_covariance_matrix(
+        covariance_matrix, whitening_regularization_factor, zca_whitening
+    )
+    centered_data = data - data.mean(axis=0)
+    whitened_data = centered_data @ whitening_matrix
+    return whitened_data
+
+
+def normalize_data(data, epsilon=1e-05):
+    """
+    Normalize the given data, making it centered (zero mean) and each feature have unit variance.
+    Note that the data is assumed to be of shape (n_samples, n_features),
+    meaning it's a collection of row-vectors.
+    """
+    centered_data = data - data.mean(axis=0)
+    normalized_data = centered_data / (centered_data.std(axis=0) + epsilon)
+    return normalized_data

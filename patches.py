@@ -4,6 +4,8 @@ The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods
 (https://arxiv.org/pdf/2101.07528.pdf)
 """
 import copy
+import math
+
 import wandb
 import torch
 
@@ -270,7 +272,8 @@ def sample_random_patches(data_loader,
                           patch_size,
                           existing_model: Optional[nn.Module] = None,
                           visualize: bool = False,
-                          random_patches: bool = False):
+                          random_uniform_patches: bool = False,
+                          random_gaussian_patches: bool = False):
     """
     This function sample random patches from the data, given by the data-loader object.
     It samples random indices for the patches and then iterates over the dataset to extract them.
@@ -312,8 +315,12 @@ def sample_random_patches(data_loader,
 
     patches = np.empty(shape=(n_patches, ) + patch_shape, dtype=np.float32)
 
-    if random_patches:
+    if random_uniform_patches:
         return np.random.default_rng().uniform(low=-1, high=+1, size=patches.shape).astype(np.float32)
+    if random_gaussian_patches:
+        patch_dim = math.prod(patch_shape)
+        return np.random.default_rng().multivariate_normal(
+            mean=np.zeros(patch_dim), cov=np.eye(patch_dim), size=n_patches).astype(np.float32).reshape(patches.shape)
 
     for batch_index, (inputs, _) in enumerate(data_loader):
         if batch_index not in batches_indices:

@@ -1,5 +1,7 @@
 import copy
 import math
+import sys
+import wandb
 import torch
 import faiss
 
@@ -15,6 +17,8 @@ import torch.nn.functional as F
 from loguru import logger
 from typing import Optional, List, Union
 from pathlib import Path
+
+from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
 from torchvision.transforms import ToTensor, RandomCrop, RandomHorizontalFlip, Normalize, Compose
@@ -27,7 +31,8 @@ from consts import CIFAR10_IMAGE_SIZE, N_CLASSES, CIFAR10_IN_CHANNELS
 from patches import sample_random_patches
 from schemas.data import DataArgs
 from schemas.dmh import Args, DMHArgs
-from utils import configure_logger, get_args, power_minus_1, get_mlp, get_dataloaders, calc_whitening
+from utils import configure_logger, get_args, power_minus_1, get_mlp, get_dataloaders, calc_whitening, whiten_data, \
+    normalize_data, get_covariance_matrix, get_whitening_matrix_from_covariance_matrix
 from vgg import get_vgg_model_kernel_size, get_blocks, configs
 
 
@@ -69,11 +74,12 @@ class KNearestPatchesEmbedding(nn.Module):
         # input patch in that location, but minimizing this value will minimize the distance
         # (since the norm of the input patch is the same among all patches in the bank).
         distances = F.conv2d(images, self.kernel, self.bias, padding=self.padding)
-        values, indices = distances.kthvalue(self.k, dim=1, keepdim=True)
+        values, indices = distances.kthvalue(k=self.k, dim=1, keepdim=True)
         if self.up_to_k:
             mask = (distances <= values).float()
         else:
             mask = torch.zeros_like(distances).scatter_(dim=1, index=indices, value=1)
+
         return mask
 
 
@@ -230,39 +236,37 @@ class LocallyLinearImitatorVGG(pl.LightningModule):
 
 class LocallyLinearNetwork(pl.LightningModule):
 
-    def __init__(self, args: Args, datamodule: pl.LightningDataModule):
+    def __init__(self, args: Args, datamodule: "CIFAR10DataModule"):
         super(LocallyLinearNetwork, self).__init__()
         self.args: Args = args
         self.save_hyperparameters(args.flattened_dict())
 
-        self.dataloader = datamodule.train_dataloader()  # TODO do we want a different dataloader (maybe no aug)?
+        self.dataloader = datamodule.train_dataloader_clean()
 
-        if self.args.dmh.use_whitening:
-            self.whitening_matrix = calc_whitening(self.dataloader,
-                                                   self.args.dmh.patch_size,
-                                                   self.args.dmh.whitening_regularization_factor)
-            self.wwt = self.whitening_matrix @ self.whitening_matrix.T
+        self.whitening_matrix = None
+        self.patches_covariance_matrix: Optional[np.ndarray] = None
+        self.whitened_patches_covariance_matrix: Optional[np.ndarray] = None
+        if not self.args.dmh.replace_embedding_with_regular_conv_relu:
+            kernel, bias = self.get_kernel_and_bias()
+            self.embedding = KNearestPatchesEmbedding(
+                kernel, bias, self.args.dmh.k, self.args.dmh.up_to_k,
+                requires_grad=self.args.dmh.learnable_embedding, random_embedding=self.args.dmh.random_embedding
+            )
         else:
-            self.whitening_matrix = None
-            self.wwt = None
+            self.embedding = nn.Sequential(nn.Conv2d(in_channels=CIFAR10_IN_CHANNELS,
+                                                     out_channels=self.args.dmh.n_clusters,
+                                                     kernel_size=self.args.dmh.patch_size),
+                                           nn.ReLU())
 
-        kernel, bias = self.get_kernel_and_bias()
-        self.embedding = KNearestPatchesEmbedding(
-            kernel, bias, self.args.dmh.k, self.args.dmh.up_to_k,
-            requires_grad=self.args.dmh.learnable_embedding, random_embedding=self.args.dmh.random_embedding
-        )
-
-        # This convolution layer can be thought of as linear function per patch in the patch-dict,
-        # each function is from (in_channels x kernel_size^2) to the reals.
-        self.conv = None if (not self.args.dmh.use_conv) else nn.Conv2d(in_channels=CIFAR10_IN_CHANNELS,
-                                                                        out_channels=self.args.dmh.n_clusters,
-                                                                        kernel_size=self.args.dmh.patch_size)
-
-        embedding_spatial_size = CIFAR10_IMAGE_SIZE - self.args.dmh.patch_size + 1
-        intermediate_n_features = self.args.dmh.n_clusters * (embedding_spatial_size ** 2)
+        self.conv = self.init_conv()
+        self.avg_pool = self.init_avg_pool()
+        self.adaptive_avg_pool = self.init_adaptive_avg_pool()
+        self.batch_norm = self.init_batch_norm()
+        self.bottle_neck = self.init_bottleneck()
+        self.bottle_neck_relu = self.init_bottleneck_relu()
 
         self.flatten = nn.Flatten()
-        self.linear = nn.Linear(in_features=intermediate_n_features, out_features=N_CLASSES)
+        self.linear = nn.Linear(in_features=self.calc_linear_in_features(), out_features=N_CLASSES)
 
         self.loss = nn.CrossEntropyLoss()
 
@@ -274,13 +278,84 @@ class LocallyLinearNetwork(pl.LightningModule):
         self.accuracy = {RunningStage.TRAINING: [self.train_accuracy],
                          RunningStage.VALIDATING: [self.validate_accuracy, self.validate_no_aug_accuracy]}
 
+    def init_whitening_matrix(self) -> Optional[np.ndarray]:
+        args = self.args.dmh
+
+        if not args.use_whitening:
+            return None
+
+        if args.random_gaussian_patches or args.random_uniform_patches or args.calc_whitening_from_sampled_patches:
+            return get_whitening_matrix_from_covariance_matrix(
+                self.patches_covariance_matrix, args.whitening_regularization_factor, args.zca_whitening
+            )
+
+        return calc_whitening(
+            self.dataloader, args.patch_size, args.whitening_regularization_factor, args.zca_whitening
+        )
+
+    def init_conv(self) -> Optional[nn.Conv2d]:
+        """
+        This convolution layer can be thought of as linear function per patch in the patch-dict,
+        each function is from (in_channels x kernel_size^2) to the reals.
+        """
+        if not self.args.dmh.use_conv:
+            return None
+        return nn.Conv2d(in_channels=CIFAR10_IN_CHANNELS,
+                         out_channels=self.args.dmh.n_clusters,
+                         kernel_size=self.args.dmh.patch_size)
+
+    def init_adaptive_avg_pool(self) -> Optional[nn.AdaptiveAvgPool2d]:
+        if not self.args.dmh.use_adaptive_avg_pool:
+            return None
+        return nn.AdaptiveAvgPool2d(output_size=self.args.dmh.adaptive_pool_output_size)
+
+    def init_avg_pool(self) -> Optional[nn.AvgPool2d]:
+        if not self.args.dmh.use_avg_pool:
+            return None
+        return nn.AvgPool2d(kernel_size=self.args.dmh.pool_size,
+                            stride=self.args.dmh.pool_stride,
+                            ceil_mode=True)
+
+    def init_batch_norm(self) -> Optional[nn.BatchNorm2d]:
+        if not self.args.dmh.use_batch_norm:
+            return None
+        return nn.BatchNorm2d(num_features=self.args.dmh.n_clusters)
+
+    def init_bottleneck(self) -> Optional[nn.Conv2d]:
+        if not self.args.dmh.use_bottle_neck:
+            return None
+        return nn.Conv2d(in_channels=self.args.dmh.n_clusters,
+                         out_channels=self.args.dmh.bottle_neck_dimension,
+                         kernel_size=self.args.dmh.bottle_neck_kernel_size)
+
+    def init_bottleneck_relu(self) -> Optional[nn.ReLU]:
+        if not self.args.dmh.use_relu_after_bottleneck:
+            return None
+        return nn.ReLU()
+
+    def calc_linear_in_features(self):
+        embedding_spatial_size = CIFAR10_IMAGE_SIZE - self.args.dmh.patch_size + 1
+
+        if self.args.dmh.use_adaptive_avg_pool:
+            intermediate_spatial_size = self.args.dmh.adaptive_pool_output_size
+        elif self.args.dmh.use_avg_pool:
+            intermediate_spatial_size = math.ceil(
+                1 + (embedding_spatial_size - self.args.dmh.pool_size) / self.args.dmh.pool_stride)
+        else:
+            intermediate_spatial_size = embedding_spatial_size
+
+        intermediate_n_features = self.args.dmh.n_clusters * (intermediate_spatial_size ** 2)
+        bottleneck_output_spatial_size = intermediate_spatial_size - self.args.dmh.bottle_neck_kernel_size + 1
+        bottleneck_output_n_features = self.args.dmh.bottle_neck_dimension * (bottleneck_output_spatial_size ** 2)
+        linear_in_features = bottleneck_output_n_features if self.args.dmh.use_bottle_neck else intermediate_n_features
+        return linear_in_features
+
     def get_kernel_and_bias(self):
         # Set the kernel and the bias of the embedding. Note that if we use whitening then the kernel is the patches
         # multiplied by WW^T and the bias is the squared-norm of patches multiplied by W (no W^T).
         kernel = self.get_clustered_patches()
         bias = 0.5 * np.linalg.norm(kernel.reshape(kernel.shape[0], -1), axis=1) ** 2
         if self.args.dmh.use_whitening:
-            # TODO maybe we should multiply from left?
             kernel_flat = kernel.reshape(kernel.shape[0], -1)
             kernel_flat = kernel_flat @ self.whitening_matrix.T
             kernel = kernel_flat.reshape(kernel.shape)
@@ -288,26 +363,144 @@ class LocallyLinearNetwork(pl.LightningModule):
 
         return kernel, bias
 
+    @staticmethod
+    def get_diagonal_sum_vs_total_sum_ratio(covariance_matrix):
+        non_diagonal_elements_sum = np.sum(np.abs(covariance_matrix - np.diag((np.diagonal(covariance_matrix)))))
+        elements_sum = np.sum(np.abs(covariance_matrix))
+        ratio = non_diagonal_elements_sum / elements_sum
+        return ratio
+
     def get_clustered_patches(self):
         patches = sample_random_patches(self.dataloader, self.args.dmh.n_patches, self.args.dmh.patch_size,
-                                        random_patches=self.args.dmh.random_patches)
+                                        random_uniform_patches=self.args.dmh.random_uniform_patches,
+                                        random_gaussian_patches=self.args.dmh.random_gaussian_patches)
         original_shape = patches.shape
         patches = patches.reshape(patches.shape[0], -1)
+        self.patches_covariance_matrix = get_covariance_matrix(patches)
+        self.whitening_matrix = self.init_whitening_matrix()
 
         if self.args.dmh.use_whitening:
-            patches = patches @ self.whitening_matrix  # TODO maybe we should multiply from left?
+            patches = patches @ self.whitening_matrix
+            self.whitened_patches_covariance_matrix = get_covariance_matrix(patches)
 
-        kmeans = faiss.Kmeans(d=patches.shape[1], k=self.args.dmh.n_clusters, verbose=True)
-        kmeans.train(patches)
-        centroids = kmeans.centroids.reshape(-1, *original_shape[1:])
-        return centroids
+        if self.args.dmh.n_patches == self.args.dmh.n_clusters:  # This means that we shouldn't do clustering
+            return patches.reshape(-1, *original_shape[1:])
+        else:
+            kmeans = faiss.Kmeans(d=patches.shape[1], k=self.args.dmh.n_clusters, verbose=True)
+            kmeans.train(patches)
+            centroids = kmeans.centroids.reshape(-1, *original_shape[1:])
+            return centroids
+
+    def unwhiten_patches(self, patches: np.ndarray, only_inv_t: bool = False) -> np.ndarray:
+        patches_flat = patches.reshape(patches.shape[0], -1)
+        whitening_matrix = np.eye(patches_flat.shape[1]) if (self.whitening_matrix is None) else self.whitening_matrix
+        matrix = whitening_matrix.T if only_inv_t else (whitening_matrix @ whitening_matrix.T)
+        patches_orig_flat = np.dot(patches_flat, np.linalg.inv(matrix))
+        patches_orig = patches_orig_flat.reshape(patches.shape)
+
+        return patches_orig
+
+    @staticmethod
+    def get_extreme_patches_indices(norms_numpy, number_of_extreme_patches_to_show):
+        partitioned_indices = np.argpartition(norms_numpy, number_of_extreme_patches_to_show)
+        worst_patches_indices = partitioned_indices[:number_of_extreme_patches_to_show]
+        partitioned_indices = np.argpartition(norms_numpy, len(norms_numpy) - number_of_extreme_patches_to_show)
+        best_patches_indices = partitioned_indices[-number_of_extreme_patches_to_show:]
+
+        return worst_patches_indices, best_patches_indices
+
+    def get_extreme_patches_unwhitened(self, worst_patches_indices, best_patches_indices, only_inv_t: bool = False):
+        kernel = self.embedding.kernel if not self.args.dmh.replace_embedding_with_regular_conv_relu else self.embedding[0].weight
+        all_patches = kernel.data.cpu().numpy()
+        worst_patches = all_patches[worst_patches_indices]
+        best_patches = all_patches[best_patches_indices]
+
+        both_patches = np.concatenate([worst_patches, best_patches])
+        both_patches_unwhitened = self.unwhiten_patches(both_patches, only_inv_t)
+
+        worst_patches_unwhitened = both_patches_unwhitened[:len(worst_patches)]
+        best_patches_unwhitened = both_patches_unwhitened[len(best_patches):]
+
+        return worst_patches_unwhitened, best_patches_unwhitened
+
+    def visualize_patches(self, n: int = 3):
+        if self.bottle_neck is not None:
+            bottleneck_weight = self.bottle_neck.weight.data.squeeze(dim=3).squeeze(dim=2)
+            norms = torch.linalg.norm(bottleneck_weight, ord=2, dim=0).cpu().numpy()
+        else:
+            norms = np.random.default_rng().uniform(size=self.args.dmh.n_clusters).astype(np.float32)
+
+        worst_patches_indices, best_patches_indices = self.get_extreme_patches_indices(norms, n ** 2)
+        worst_patches_unwhitened, best_patches_unwhitened = self.get_extreme_patches_unwhitened(
+            worst_patches_indices, best_patches_indices)
+        worst_patches_whitened, best_patches_whitened = self.get_extreme_patches_unwhitened(
+            worst_patches_indices, best_patches_indices, only_inv_t=True)
+
+        # Normalize the values to be in [0, 1] for plotting (matplotlib just clips the values).
+        for a in [worst_patches_unwhitened, best_patches_unwhitened, worst_patches_whitened, best_patches_whitened]:
+            a[:] = (a - a.min()) / (a.max() - a.min())
+
+        worst_patches_fig, worst_patches_axs = plt.subplots(n, n)
+        best_patches_fig, best_patches_axs = plt.subplots(n, n)
+        worst_patches_whitened_fig, worst_patches_whitened_axs = plt.subplots(n, n)
+        best_patches_whitened_fig, best_patches_whitened_axs = plt.subplots(n, n)
+
+        for k in range(n ** 2):
+            i = k // n  # Row index
+            j = k % n  # Columns index
+            worst_patches_axs[i, j].imshow(worst_patches_unwhitened[k].transpose(1, 2, 0), vmin=0, vmax=1)
+            best_patches_axs[i, j].imshow(best_patches_unwhitened[k].transpose(1, 2, 0), vmin=0, vmax=1)
+            worst_patches_whitened_axs[i, j].imshow(worst_patches_whitened[k].transpose(1, 2, 0), vmin=0, vmax=1)
+            best_patches_whitened_axs[i, j].imshow(best_patches_whitened[k].transpose(1, 2, 0), vmin=0, vmax=1)
+
+            worst_patches_axs[i, j].axis('off')
+            best_patches_axs[i, j].axis('off')
+            worst_patches_whitened_axs[i, j].axis('off')
+            best_patches_whitened_axs[i, j].axis('off')
+
+        self.trainer.logger.experiment.log({'worst_patches': worst_patches_fig,
+                                            'best_patches': best_patches_fig,
+                                            'worst_patches_whitened': worst_patches_whitened_fig,
+                                            'best_patches_whitened': best_patches_whitened_fig},
+                                           step=self.trainer.global_step)
+        plt.close('all')  # Avoid memory consumption
+
+    def log_covariance_matrix(self, covariance_matrix: np.ndarray, name: str):
+        labels = [f'{i:0>3}' for i in range(covariance_matrix.shape[0])]
+        name = f'{name}_cov_matrix'
+        self.logger.experiment.log(
+            {name: wandb.plots.HeatMap(x_labels=labels, y_labels=labels, matrix_values=covariance_matrix)},
+            step=self.trainer.global_step)
+        self.logger.experiment.summary[f'{name}_ratio'] = self.get_diagonal_sum_vs_total_sum_ratio(covariance_matrix)
+
+    def on_train_start(self):
+        self.visualize_patches()
+        if self.patches_covariance_matrix is not None:
+            self.log_covariance_matrix(self.patches_covariance_matrix, name='patches')
+        if self.args.dmh.use_whitening and (self.whitened_patches_covariance_matrix is not None):
+            self.log_covariance_matrix(self.whitened_patches_covariance_matrix, name='whitened_patches')
+
+    def on_train_end(self):
+        self.visualize_patches()
 
     def forward(self, x: torch.Tensor):
         features = self.embedding(x)
+
         if self.args.dmh.use_conv:
             features *= self.conv(x)
-        features_flat = self.flatten(features)
-        logits = self.linear(features_flat)
+        if self.args.dmh.use_avg_pool:
+            features = self.avg_pool(features)
+        if self.args.dmh.use_adaptive_avg_pool:
+            features = self.adaptive_avg_pool(features)
+        if self.args.dmh.use_batch_norm:
+            features = self.batch_norm(features)
+        if self.args.dmh.use_bottle_neck:
+            features = self.bottle_neck(features)
+        if self.args.dmh.use_relu_after_bottleneck:
+            features = self.bottle_neck_relu(features)
+
+        logits = self.linear(self.flatten(features))
+
         return logits
 
     def shared_step(self, batch, stage: RunningStage, dataloader_idx=0):
@@ -399,10 +592,12 @@ class CIFAR10DataModule(LightningDataModule):
         self.batch_size = batch_size
 
         transforms_list_no_aug, transforms_list_with_aug = CIFAR10DataModule.get_transforms_lists(args)
-        self.transforms = {'aug': Compose(transforms_list_with_aug), 'no_aug': Compose(transforms_list_no_aug)}
+        self.transforms = {'aug': Compose(transforms_list_with_aug),
+                           'no_aug': Compose(transforms_list_no_aug),
+                           'clean': ToTensor()}
         self.datasets = {f'{stage}_{aug}': None
                          for stage in ('fit', 'validate')
-                         for aug in ('aug', 'no_aug')}
+                         for aug in ('aug', 'no_aug', 'clean')}
 
     def prepare_data(self):
         CIFAR10(self.data_dir, train=True, download=True)
@@ -413,7 +608,7 @@ class CIFAR10DataModule(LightningDataModule):
             return
 
         for s in ('fit', 'validate'):
-            for aug in ('aug', 'no_aug'):
+            for aug in ('aug', 'no_aug', 'clean'):
                 k = f'{s}_{aug}'
                 if self.datasets[k] is None:
                     self.datasets[k] = CIFAR10(self.data_dir, train=(s == 'fit'), transform=self.transforms[aug])
@@ -428,7 +623,10 @@ class CIFAR10DataModule(LightningDataModule):
         ]
 
     def train_dataloader_no_aug(self):
-        return DataLoader(self.datasets['fit'], batch_size=self.batch_size, num_workers=4, shuffle=True)
+        return DataLoader(self.datasets['fit_no_aug'], batch_size=self.batch_size, num_workers=4, shuffle=True)
+
+    def train_dataloader_clean(self):
+        return DataLoader(self.datasets['fit_clean'], batch_size=self.batch_size, num_workers=4, shuffle=True)
 
 
 class LitVGG(pl.LightningModule):
@@ -689,26 +887,12 @@ class IntrinsicDimensionCalculator(Callback):
         metrics[f'{block_name}-int_dim_per_k'] = px.line(df)
 
     @staticmethod
-    def normalize_data(data, epsilon=1e-05):
-        centered_data = data - data.mean(axis=0)
-        normalized_data = centered_data / (centered_data.std(axis=0) + epsilon)
-        return normalized_data
-
-    @staticmethod
-    def whiten_data(data, epsilon=1e-05):
-        centered_data = data - data.mean(axis=0)
-        covariance_matrix = (1 / centered_data.shape[0]) * (centered_data.T @ centered_data)
-        u, s, v_t = np.linalg.svd(covariance_matrix, hermitian=True)
-        rotated_data = centered_data @ u
-        whitened_data = rotated_data / (np.sqrt(s) + epsilon)
-        return whitened_data
-
-    def log_singular_values(self, metrics, block_name, data):
+    def log_singular_values(metrics, block_name, data):
         n, d = data.shape
         data_dict = {
             'original_data': data,
-            'normalized_data': self.normalize_data(data),
-            'whitened_data': self.whiten_data(data),
+            'normalized_data': normalize_data(data),
+            'whitened_data': whiten_data(data),
             'random_data': np.random.default_rng().multivariate_normal(mean=np.zeros(d), cov=np.eye(d), size=n)
         }
 
@@ -792,8 +976,8 @@ class IntrinsicDimensionCalculator(Callback):
             estimates = torch.mean(estimates_matrix, dim=0)
 
             if log_graphs:
-                self.log_dim_per_k_graph(metrics, block_name, estimates.cpu().numpy())
-                self.log_singular_values(metrics, block_name, patches.cpu().numpy())
+                IntrinsicDimensionCalculator.log_dim_per_k_graph(metrics, block_name, estimates.cpu().numpy())
+                IntrinsicDimensionCalculator.log_singular_values(metrics, block_name, patches.cpu().numpy())
 
             mle_int_dim, ratio = self.log_final_estimate(metrics, estimates, patches.shape[1], block_name)
             logger.debug(f'epoch {trainer.current_epoch:0>2d} block {i:0>2d} '
@@ -912,7 +1096,7 @@ class ImitatorKNN:  # TODO inherit from pl.LightningModule to enable saving chec
         self.dataloader: DataLoader = dataloader
         self.n_patches: int = args.n_patches
         self.n_clusters: int = args.n_clusters
-        self.random_patches: bool = args.random_patches
+        self.random_patches: bool = args.random_patches  # TODO name was changed (PyCharm did not refactor well)
 
         self.centroids_outputs: List[np.ndarray] = list()
         self.kmeans: List[faiss.Kmeans] = list()
@@ -1049,14 +1233,13 @@ def main():
     datamodule = initialize_datamodule(args.data, args.opt.batch_size)
     wandb_logger = initialize_wandb_logger(args)
     model = initialize_model(args, wandb_logger)
-    configure_logger(args.env.path, print_sink=model.print, level='DEBUG')  # if args.env.debug else 'INFO')
+    configure_logger(args.env.path, print_sink=sys.stdout, level='DEBUG')  # if args.env.debug else 'INFO')
 
     if args.dmh.train_locally_linear_network:
         model = LocallyLinearNetwork(args, datamodule)
         wandb_logger.watch(model, log='all')
         trainer = initialize_trainer(args, wandb_logger)
         trainer.fit(model, datamodule=datamodule)
-
     elif not args.arch.use_pretrained:
         wandb_logger.watch(model, log='all')
         trainer = initialize_trainer(args, wandb_logger)

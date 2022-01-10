@@ -21,9 +21,6 @@ class EnvironmentArgs(ImmutableArgs):
     #: The name to give the run in wandb
     wandb_run_name: Optional[str] = None
 
-    #: How many iterations between each training log.
-    log_interval: PositiveInt = 100
-
     #: Debug mode means limiting the number of batches during training, etc.
     debug: bool = False
 
