@@ -22,7 +22,7 @@ from loguru import logger
 from typing import Callable, Optional, Tuple
 from datetime import timedelta
 
-from consts import CIFAR10_IMAGE_SIZE, N_CLASSES
+from consts import N_CLASSES
 from schemas.patches import Args, ArchitectureArgs
 from utils import (configure_logger,
                    get_dataloaders,
@@ -111,7 +111,7 @@ class ClassifierOnPatchBasedEmbedding(nn.Module):
                  args: ArchitectureArgs,
                  kernel_convolution: torch.Tensor,
                  bias_convolution: torch.Tensor,
-                 input_image_spatial_size: int = CIFAR10_IMAGE_SIZE):
+                 input_image_spatial_size: int = 3):
         super(ClassifierOnPatchBasedEmbedding, self).__init__()
 
         self.args = args
@@ -282,6 +282,8 @@ def sample_random_patches(data_loader,
     batch_size = data_loader.batch_size
     n_images = data_loader.dataset.data.shape[0]
     patch_shape = data_loader.dataset.data.shape[1:]
+    if len(patch_shape) == 2:  # Add dimension of channels which will be 1
+        patch_shape += (1, )
     patch_shape = np.roll(patch_shape, shift=1)  # In the dataset it's H x W x C but in the model it's C x H x W
     if existing_model is not None:
         device = get_model_device(existing_model)

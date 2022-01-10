@@ -20,14 +20,14 @@ from pathlib import Path
 
 from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader
-from torchvision.datasets import CIFAR10
+from torchvision.datasets import CIFAR10, MNIST, FashionMNIST
 from torchvision.transforms import ToTensor, RandomCrop, RandomHorizontalFlip, Normalize, Compose
 from pytorch_lightning import LightningDataModule, Callback
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer.states import RunningStage
 from pytorch_lightning.callbacks import ModelCheckpoint, ModelSummary
 
-from consts import CIFAR10_IMAGE_SIZE, N_CLASSES, CIFAR10_IN_CHANNELS
+from consts import N_CLASSES
 from patches import sample_random_patches
 from schemas.data import DataArgs
 from schemas.dmh import Args, DMHArgs
@@ -51,12 +51,14 @@ class KNearestPatchesEmbedding(nn.Module):
                  up_to_k: bool = True,
                  padding: int = 0,
                  requires_grad: bool = False,
-                 random_embedding: bool = False):
+                 random_embedding: bool = False,
+                 kmeans_triangle: bool = False):
         super(KNearestPatchesEmbedding, self).__init__()
 
         self.k = k
         self.up_to_k = up_to_k
         self.padding = padding
+        self.kmeans_triangle = kmeans_triangle
 
         if random_embedding:
             out_channels, in_channels, kernel_height, kernel_width = kernel.shape
@@ -75,7 +77,9 @@ class KNearestPatchesEmbedding(nn.Module):
         # (since the norm of the input patch is the same among all patches in the bank).
         distances = F.conv2d(images, self.kernel, self.bias, padding=self.padding)
         values, indices = distances.kthvalue(k=self.k, dim=1, keepdim=True)
-        if self.up_to_k:
+        if self.kmeans_triangle:
+            mask = F.relu(torch.mean(distances, dim=1, keepdim=True) - distances)
+        elif self.up_to_k:
             mask = (distances <= values).float()
         else:
             mask = torch.zeros_like(distances).scatter_(dim=1, index=indices, value=1)
@@ -236,11 +240,11 @@ class LocallyLinearImitatorVGG(pl.LightningModule):
 
 class LocallyLinearNetwork(pl.LightningModule):
 
-    def __init__(self, args: Args, datamodule: "CIFAR10DataModule"):
+    def __init__(self, args: Args, datamodule: "DataModule"):
         super(LocallyLinearNetwork, self).__init__()
         self.args: Args = args
         self.save_hyperparameters(args.flattened_dict())
-
+        self.datamodule = datamodule
         self.dataloader = datamodule.train_dataloader_clean()
 
         self.whitening_matrix = None
@@ -250,10 +254,11 @@ class LocallyLinearNetwork(pl.LightningModule):
             kernel, bias = self.get_kernel_and_bias()
             self.embedding = KNearestPatchesEmbedding(
                 kernel, bias, self.args.dmh.k, self.args.dmh.up_to_k,
-                requires_grad=self.args.dmh.learnable_embedding, random_embedding=self.args.dmh.random_embedding
+                requires_grad=self.args.dmh.learnable_embedding, random_embedding=self.args.dmh.random_embedding,
+                kmeans_triangle=self.args.dmh.kmeans_triangle
             )
         else:
-            self.embedding = nn.Sequential(nn.Conv2d(in_channels=CIFAR10_IN_CHANNELS,
+            self.embedding = nn.Sequential(nn.Conv2d(in_channels=datamodule.n_channels,
                                                      out_channels=self.args.dmh.n_clusters,
                                                      kernel_size=self.args.dmh.patch_size),
                                            nn.ReLU())
@@ -300,7 +305,7 @@ class LocallyLinearNetwork(pl.LightningModule):
         """
         if not self.args.dmh.use_conv:
             return None
-        return nn.Conv2d(in_channels=CIFAR10_IN_CHANNELS,
+        return nn.Conv2d(in_channels=self.datamodule.n_channels,
                          out_channels=self.args.dmh.n_clusters,
                          kernel_size=self.args.dmh.patch_size)
 
@@ -334,7 +339,7 @@ class LocallyLinearNetwork(pl.LightningModule):
         return nn.ReLU()
 
     def calc_linear_in_features(self):
-        embedding_spatial_size = CIFAR10_IMAGE_SIZE - self.args.dmh.patch_size + 1
+        embedding_spatial_size = self.datamodule.spatial_size - self.args.dmh.patch_size + 1
 
         if self.args.dmh.use_adaptive_avg_pool:
             intermediate_spatial_size = self.args.dmh.adaptive_pool_output_size
@@ -370,12 +375,25 @@ class LocallyLinearNetwork(pl.LightningModule):
         ratio = non_diagonal_elements_sum / elements_sum
         return ratio
 
+    def remove_low_norm_patches(self, patches):
+        minimal_norm = 0.01
+        low_norm_patches_mask = (np.linalg.norm(patches, axis=1) < minimal_norm)
+        patches = patches[np.logical_not(low_norm_patches_mask)]
+        patches = patches[:self.args.dmh.n_patches]  # Don't leave more than the requested patches
+
+        return patches
+
     def get_clustered_patches(self):
-        patches = sample_random_patches(self.dataloader, self.args.dmh.n_patches, self.args.dmh.patch_size,
+        n_patches_extended = math.ceil(1.01 * self.args.dmh.n_patches)
+        patches = sample_random_patches(self.dataloader, n_patches_extended, self.args.dmh.patch_size,
                                         random_uniform_patches=self.args.dmh.random_uniform_patches,
                                         random_gaussian_patches=self.args.dmh.random_gaussian_patches)
-        original_shape = patches.shape
+        patch_shape = patches.shape[1:]
         patches = patches.reshape(patches.shape[0], -1)
+
+        # Low norm (even zero) patches will become problematic later when we normalize by dividing by the norm.
+        patches = self.remove_low_norm_patches(patches)
+
         self.patches_covariance_matrix = get_covariance_matrix(patches)
         self.whitening_matrix = self.init_whitening_matrix()
 
@@ -384,12 +402,16 @@ class LocallyLinearNetwork(pl.LightningModule):
             self.whitened_patches_covariance_matrix = get_covariance_matrix(patches)
 
         if self.args.dmh.n_patches == self.args.dmh.n_clusters:  # This means that we shouldn't do clustering
-            return patches.reshape(-1, *original_shape[1:])
+            if self.args.dmh.normalize_patches_to_unit_vectors:
+                patches /= np.linalg.norm(patches, axis=1)[:, np.newaxis]
+            return patches.reshape(-1, *patch_shape)
         else:
             kmeans = faiss.Kmeans(d=patches.shape[1], k=self.args.dmh.n_clusters, verbose=True)
             kmeans.train(patches)
-            centroids = kmeans.centroids.reshape(-1, *original_shape[1:])
-            return centroids
+            centroids = kmeans.centroids
+            if self.args.dmh.normalize_patches_to_unit_vectors:
+                centroids /= np.linalg.norm(centroids, axis=1)[:, np.newaxis]
+            return centroids.reshape(-1, *patch_shape)
 
     def unwhiten_patches(self, patches: np.ndarray, only_inv_t: bool = False) -> np.ndarray:
         patches_flat = patches.reshape(patches.shape[0], -1)
@@ -549,49 +571,68 @@ class ShufflePixels:
         return permuted_img
 
 
-class CIFAR10DataModule(LightningDataModule):
+class DataModule(LightningDataModule):
 
     @staticmethod
-    def get_normalization_transform(plus_minus_one: bool = False, unit_gaussian: bool = False):
+    def get_normalization_transform(plus_minus_one: bool = False, unit_gaussian: bool = False,
+                                    n_channels: int = 3):
         if unit_gaussian:
+            if n_channels != 3:
+                raise NotImplementedError('Normalization for MNIST / FashionMNIST is not supported. ')
             normalization_values = [(0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)]
         elif plus_minus_one:
-            normalization_values = [(0.5, 0.5, 0.5), (0.5, 0.5, 0.5)]
+            normalization_values = [(0.5, ) * n_channels] * 2  # times 2 because one is mean and one is std
         else:
-            return list()
+            return None
 
         return Normalize(*normalization_values)
 
     @staticmethod
-    def get_augmentations_transforms(random_flip: bool = False, random_crop: bool = False):
+    def get_augmentations_transforms(random_flip: bool = False, random_crop: bool = False, spatial_size: int = 32):
         augmentations_transforms = list()
 
         if random_flip:
             augmentations_transforms.append(RandomHorizontalFlip())
         if random_crop:
-            augmentations_transforms.append(RandomCrop(size=32, padding=4))
+            augmentations_transforms.append(RandomCrop(size=spatial_size, padding=4))
 
         return augmentations_transforms
 
     @staticmethod
     def get_transforms_lists(args: DataArgs):
-        augmentations = CIFAR10DataModule.get_augmentations_transforms(args.random_horizontal_flip, args.random_crop)
-        normalization = CIFAR10DataModule.get_normalization_transform(args.normalization_to_plus_minus_one,
-                                                                      args.normalization_to_unit_gaussian)
-
+        augmentations = DataModule.get_augmentations_transforms(args.random_horizontal_flip, args.random_crop,
+                                                                args.spatial_size)
+        normalization = DataModule.get_normalization_transform(args.normalization_to_plus_minus_one,
+                                                               args.normalization_to_unit_gaussian,
+                                                               args.n_channels)
+        normalizations_list = list() if (normalization is None) else [normalization]
+        crucial_transforms = [ToTensor()]
         post_transforms = [ShufflePixels(args.keep_rgb_triplets_intact)] if args.shuffle_images else list()
-        transforms_list_no_aug = [ToTensor()] + [normalization] + post_transforms
-        transforms_list_with_aug = augmentations + [ToTensor()] + [normalization] + post_transforms
+        transforms_list_no_aug = crucial_transforms + normalizations_list + post_transforms
+        transforms_list_with_aug = augmentations + crucial_transforms + normalizations_list + post_transforms
 
         return transforms_list_no_aug, transforms_list_with_aug
+
+    def get_dataset_class(self, dataset_name: str):
+        if dataset_name == 'CIFAR10':
+            return CIFAR10
+        elif dataset_name == 'MNIST':
+            return MNIST
+        elif dataset_name == 'FashionMNIST':
+            return FashionMNIST
+        else:
+            raise NotImplementedError(f'Dataset {dataset_name} is not implemented.')
 
     def __init__(self, args: DataArgs, batch_size: int, data_dir: str = "./data"):
         super().__init__()
 
+        self.dataset_class = self.get_dataset_class(args.dataset_name)
+        self.n_channels = args.n_channels
+        self.spatial_size = args.spatial_size
         self.data_dir = data_dir
         self.batch_size = batch_size
 
-        transforms_list_no_aug, transforms_list_with_aug = CIFAR10DataModule.get_transforms_lists(args)
+        transforms_list_no_aug, transforms_list_with_aug = DataModule.get_transforms_lists(args)
         self.transforms = {'aug': Compose(transforms_list_with_aug),
                            'no_aug': Compose(transforms_list_no_aug),
                            'clean': ToTensor()}
@@ -600,8 +641,8 @@ class CIFAR10DataModule(LightningDataModule):
                          for aug in ('aug', 'no_aug', 'clean')}
 
     def prepare_data(self):
-        CIFAR10(self.data_dir, train=True, download=True)
-        CIFAR10(self.data_dir, train=False, download=True)
+        for train_mode in [True, False]:
+            self.dataset_class(self.data_dir, train=train_mode, download=True)
 
     def setup(self, stage: Optional[str] = None):
         if stage is None:
@@ -611,7 +652,9 @@ class CIFAR10DataModule(LightningDataModule):
             for aug in ('aug', 'no_aug', 'clean'):
                 k = f'{s}_{aug}'
                 if self.datasets[k] is None:
-                    self.datasets[k] = CIFAR10(self.data_dir, train=(s == 'fit'), transform=self.transforms[aug])
+                    self.datasets[k] = self.dataset_class(self.data_dir,
+                                                          train=(s == 'fit'),
+                                                          transform=self.transforms[aug])
 
     def train_dataloader(self):
         return DataLoader(self.datasets['fit_aug'], batch_size=self.batch_size, num_workers=4, shuffle=True)
@@ -742,7 +785,7 @@ class LitMLP(pl.LightningModule):
     def __init__(self, args: Args):
         super(LitMLP, self).__init__()
         self.args = args
-        self.input_dim = 3 * CIFAR10_IMAGE_SIZE ** 2
+        self.input_dim = args.data.n_channels * args.data.spatial_size ** 2
         self.output_dim = N_CLASSES
         self.n_hidden_layers = args.arch.final_mlp_n_hidden_layers
         self.hidden_dim = args.arch.final_mlp_hidden_dim
@@ -1220,7 +1263,7 @@ def evaluate_knn_imitator(imitator: ImitatorKNN, datamodule: pl.LightningDataMod
 
 
 def initialize_datamodule(args: DataArgs, batch_size: int):
-    datamodule = CIFAR10DataModule(args, batch_size)
+    datamodule = DataModule(args, batch_size)
     datamodule.prepare_data()
     datamodule.setup(stage='fit')
     datamodule.setup(stage='validate')

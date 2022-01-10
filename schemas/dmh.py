@@ -70,6 +70,13 @@ class DMHArgs(ImmutableArgs):
     #: Initialize the patches dictionary randomly from the same random distribution as PyTorch default for Conv2D.
     random_embedding: bool = False
 
+    #: Taken from page 4 from Coates et al (2011)
+    #: An Analysis of Single-Layer Networks in Unsupervised Feature Learning
+    #: https://cs.stanford.edu/~acoates/papers/coatesleeng_aistats_2011.pdf
+    #: This activation function outputs 0 for any patch where the distance to the centroid  is “above average”.
+    #: In practice, this means that roughly half of the features will be set to 0.
+    kmeans_triangle: bool = False
+
     #: If it's true, the embedding with be replaced with a Conv->ReLU
     replace_embedding_with_regular_conv_relu: bool = False
 
@@ -87,6 +94,9 @@ class DMHArgs(ImmutableArgs):
 
     #: The regularization factor (a.k.a. lambda) of the whitening matrix.
     whitening_regularization_factor: NonNegativeFloat = 0.001
+
+    #: The regularization factor (a.k.a. lambda) of the whitening matrix.
+    normalize_patches_to_unit_vectors: bool = False
 
     #: Whether to use avg-pool after the embedding.
     use_avg_pool: bool = True
