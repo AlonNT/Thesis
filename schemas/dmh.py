@@ -116,6 +116,9 @@ class DMHArgs(ImmutableArgs):
     bottle_neck_kernel_size: PositiveInt = 1
     use_relu_after_bottleneck: bool = False
 
+    #: If depth = 2 it means that we build one model on top of the other.
+    depth: int = 1
+
     @root_validator
     def set_k_from_k_fraction(cls, values):
         if values['k_fraction'] is not None:

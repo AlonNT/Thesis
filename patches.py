@@ -287,7 +287,7 @@ def sample_random_patches(data_loader,
     patch_shape = np.roll(patch_shape, shift=1)  # In the dataset it's H x W x C but in the model it's C x H x W
     if existing_model is not None:
         device = get_model_device(existing_model)
-        patch_shape = get_model_output_shape(existing_model)
+        patch_shape = get_model_output_shape(existing_model, data_loader)
 
     if len(patch_shape) > 1:
         assert len(patch_shape) == 3 and (patch_shape[1] == patch_shape[2]), "Should be C x H x W where H = W"

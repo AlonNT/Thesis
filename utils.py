@@ -17,7 +17,7 @@ import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
 
-from typing import List, Optional, Dict, Callable
+from typing import List, Optional, Dict, Callable, Tuple
 from loguru import logger
 from datetime import timedelta
 from torch.utils.data import DataLoader
@@ -1057,6 +1057,30 @@ def get_args(args_class):
     return args
 
 
+def get_args_from_flattened_dict(args_class, flattened_dict, excluded_categories: Optional[List[str]] = None):
+    args_dict = dict()
+
+    for arg_name, value in flattened_dict.items():
+        categories = list(args_class.__fields__.keys())
+        found = False
+        for category in categories:
+            category_args = list(args_class.__fields__[category].default.__fields__.keys())
+            if arg_name in category_args:
+                if category not in args_dict:
+                    args_dict[category] = dict()
+                args_dict[category][arg_name] = value
+                found = True
+        if not found:
+            raise ValueError(f'Argument {arg_name} is not recognized.')
+
+    if excluded_categories is not None:
+        for category in excluded_categories:
+            args_dict.pop(category)
+
+    args = args_class.parse_obj(args_dict)
+    return args
+
+
 def log_args(args):
     logger.info(f'Starting to train with the following arguments:')
     longest_arg_name_length = max(len(k) for k in args.flattened_dict().keys())
@@ -1104,11 +1128,13 @@ def power_minus_1(a: torch.Tensor):
 
 
 @torch.no_grad()
-def get_model_output_shape(model: nn.Module):
-    device = get_model_device(model)
-    clean_dataloaders = get_dataloaders(batch_size=1)
-    inputs, _ = next(iter(clean_dataloaders["train"]))
-    inputs = inputs.to(device)
+def get_model_output_shape(model: nn.Module, dataloader: Optional[DataLoader] = None):
+    if dataloader is None:
+        clean_dataloaders = get_dataloaders(batch_size=1)
+        dataloader = clean_dataloaders["train"]
+
+    inputs, _ = next(iter(dataloader))
+    inputs = inputs.to(get_model_device(model))
     outputs = model(inputs)
     outputs = outputs.cpu().numpy()
     return outputs.shape[1:]  # Remove the first dimension corresponding to the batch
@@ -1163,11 +1189,11 @@ def calc_covariance(data, mean=None):
     return (1 / data.shape[0]) * (centered_data.T @ centered_data)
 
 
-def calc_whitening(dataloader: DataLoader,
-                   patch_size: int,
-                   whitening_regularization_factor: float,
-                   zca_whitening: bool = False,
-                   existing_model: Optional[nn.Module] = None) -> np.ndarray:
+def calc_whitening_from_dataloader(dataloader: DataLoader,
+                                   patch_size: int,
+                                   whitening_regularization_factor: float,
+                                   zca_whitening: bool = False,
+                                   existing_model: Optional[nn.Module] = None) -> np.ndarray:
     """
     Denote the data matrix by X (i.e. collection of patches) with shape N x D.
     N is the number of patches, and D is the dimension of each patch (channels * spatial_size ** 2).
@@ -1240,3 +1266,12 @@ def normalize_data(data, epsilon=1e-05):
     centered_data = data - data.mean(axis=0)
     normalized_data = centered_data / (centered_data.std(axis=0) + epsilon)
     return normalized_data
+
+
+def get_random_initialized_conv_kernel_and_bias(in_channels: int,
+                                                out_channels: int,
+                                                kernel_size: int) -> Tuple[np.ndarray, np.ndarray]:
+    tmp_conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+    kernel = tmp_conv.weight.data.cpu().numpy().copy()
+    bias = tmp_conv.bias.data.cpu().numpy().copy()
+    return kernel, bias
