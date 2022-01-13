@@ -448,7 +448,7 @@ class LocallyLinearNetwork(pl.LightningModule):
                 patches /= np.linalg.norm(patches, axis=1)[:, np.newaxis]
             return patches.reshape(-1, *patch_shape)
         else:
-            kmeans = faiss.Kmeans(d=patches.shape[1], k=self.args.dmh.n_clusters)
+            kmeans = faiss.Kmeans(d=patches.shape[1], k=self.args.dmh.n_clusters, verbose=True)
             kmeans.train(patches)
             centroids = kmeans.centroids
             if self.args.dmh.normalize_patches_to_unit_vectors:
@@ -1362,7 +1362,9 @@ def main():
 
         model = LocallyLinearNetwork(args, pre_model)
         if not args.dmh.replace_embedding_with_regular_conv_relu:
+            model.to(args.env.device)
             model.calculate_embedding_from_data(datamodule.train_dataloader_clean())
+            model.cpu()
         wandb_logger.watch(model, log='all')
         trainer = initialize_trainer(args, wandb_logger)
         trainer.fit(model, datamodule=datamodule)

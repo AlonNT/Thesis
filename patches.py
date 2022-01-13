@@ -15,6 +15,7 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
 from functools import partial
+from tqdm import tqdm
 from math import ceil
 from torchvision.transforms.functional import hflip
 from matplotlib.patches import Rectangle
@@ -324,7 +325,8 @@ def sample_random_patches(data_loader,
         return np.random.default_rng().multivariate_normal(
             mean=np.zeros(patch_dim), cov=np.eye(patch_dim), size=n_patches).astype(np.float32).reshape(patches.shape)
 
-    for batch_index, (inputs, _) in enumerate(data_loader):
+    for batch_index, (inputs, _) in tqdm(enumerate(data_loader), total=len(data_loader),
+                                         desc='Sampling patches from the dataset'):
         if batch_index not in batches_indices:
             continue
 

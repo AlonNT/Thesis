@@ -5,10 +5,7 @@ import os
 import sys
 import time
 import itertools
-from functools import partial
-
 import yaml
-
 import torch
 import torchvision
 import wandb
@@ -17,6 +14,8 @@ import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
 
+from functools import partial
+from tqdm import tqdm
 from typing import List, Optional, Dict, Callable, Tuple
 from loguru import logger
 from datetime import timedelta
@@ -1148,9 +1147,10 @@ def calc_mean_patch(dataloader,
     total_size = 0
     mean = None
     device = get_model_device(existing_model)
-    for inputs, _ in dataloader:
+    for inputs, _ in tqdm(dataloader, total=len(dataloader), desc='Calculating mean patch'):
+        inputs = inputs.to(device)
         if existing_model is not None:
-            inputs = existing_model(inputs.to(device)).cpu()
+            inputs = existing_model(inputs)
 
         # Unfold the input batch to its patches - shape (N, C*H*W, M) where M is the number of patches per image.
         patches = F.unfold(inputs, patch_size)
@@ -1205,15 +1205,13 @@ def calc_whitening_from_dataloader(dataloader: DataLoader,
     mean_patch = calc_mean_patch(dataloader, patch_size,
                                  agg_func=partial(torch.mean, dim=0),
                                  existing_model=existing_model)
-
     logger.debug('Performing a second pass over the dataset to calculate the covariance...')
     covariance_matrix = calc_mean_patch(dataloader, patch_size,
                                         agg_func=partial(calc_covariance, mean=mean_patch),
                                         existing_model=existing_model)
-
     logger.debug('Calculating eigenvalues decomposition to get the whitening matrix...')
     whitening_matrix = get_whitening_matrix_from_covariance_matrix(
-        covariance_matrix, whitening_regularization_factor, zca_whitening
+        covariance_matrix.cpu(), whitening_regularization_factor, zca_whitening
     )
 
     logger.debug('Done.')
