@@ -30,10 +30,14 @@ class DataArgs(ImmutableArgs):
 
     @validator('n_channels', always=True, pre=True)
     def calculate_n_channels(cls, v, values):
-        assert v is None, "You shouldn't give 'n_channels', it should be set automatically."
-        return 3 if (values['dataset_name'] == 'CIFAR10') else 1
+        n_channels = 3 if (values['dataset_name'] == 'CIFAR10') else 1
+        assert (v is None) or (v == n_channels), \
+            f"n_channels is {v}, it should be None or {n_channels} for the dataset {values['dataset_name']}"
+        return n_channels
 
     @validator('spatial_size', always=True, pre=True)
     def calculate_spatial_size(cls, v, values):
-        assert v is None, "You shouldn't give 'spatial_size', it should be set automatically."
-        return 32 if (values['dataset_name'] == 'CIFAR10') else 28
+        spatial_size = 32 if (values['dataset_name'] == 'CIFAR10') else 28
+        assert (v is None) or (v == spatial_size), \
+            f"spatial_size is {v}, it should be None or {spatial_size} for the dataset {values['dataset_name']}"
+        return spatial_size

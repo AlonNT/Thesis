@@ -48,25 +48,25 @@ class KNearestPatchesEmbedding(nn.Module):
     def __init__(self,
                  kernel: np.ndarray,
                  bias: np.ndarray,
-                 k: int,
+                 k: int = 1,
                  up_to_k: bool = True,
+                 stride: int = 1,
                  padding: int = 0,
                  requires_grad: bool = False,
                  random_embedding: bool = False,
                  kmeans_triangle: bool = False):
         super(KNearestPatchesEmbedding, self).__init__()
 
-        self.k = k
-        self.up_to_k = up_to_k
-        self.padding = padding
-        self.kmeans_triangle = kmeans_triangle
+        self.k: int = k
+        self.up_to_k: bool = up_to_k
+        self.stride: int = stride
+        self.padding: int = padding
+        self.kmeans_triangle: bool = kmeans_triangle
 
         if random_embedding:
             out_channels, in_channels, kernel_height, kernel_width = kernel.shape
-            assert kernel_height == kernel_width, "the patches should be square"
-            tmp_conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_height, padding=self.padding)
-            kernel = tmp_conv.weight.data.cpu().numpy().copy()
-            bias = tmp_conv.bias.data.cpu().numpy().copy()
+            assert kernel_height == kernel_width, "the kernel should be square"
+            kernel, bias = get_random_initialized_conv_kernel_and_bias(in_channels, out_channels, kernel_height)
 
         self.kernel = nn.Parameter(torch.Tensor(kernel), requires_grad=requires_grad)
         self.bias = nn.Parameter(torch.Tensor(bias), requires_grad=requires_grad)
@@ -76,7 +76,7 @@ class KNearestPatchesEmbedding(nn.Module):
         # Note that it's not really the squared distance, but the squared distance minus the squared-norm of the
         # input patch in that location, but minimizing this value will minimize the distance
         # (since the norm of the input patch is the same among all patches in the bank).
-        distances = F.conv2d(images, self.kernel, self.bias, padding=self.padding)
+        distances = F.conv2d(images, self.kernel, self.bias, self.stride, self.padding)
         values, indices = distances.kthvalue(k=self.k, dim=1, keepdim=True)
         if self.kmeans_triangle:
             mask = F.relu(torch.mean(distances, dim=1, keepdim=True) - distances)
@@ -310,6 +310,7 @@ class LocallyLinearNetwork(pl.LightningModule):
                                                                    kernel_size=self.args.dmh.patch_size)
         return KNearestPatchesEmbedding(
             kernel, bias, self.args.dmh.k, self.args.dmh.up_to_k,
+            stride=self.args.dmh.stride, padding=self.args.dmh.padding,
             requires_grad=self.args.dmh.learnable_embedding,
             random_embedding=self.args.dmh.random_embedding,
             kmeans_triangle=self.args.dmh.kmeans_triangle
@@ -320,6 +321,7 @@ class LocallyLinearNetwork(pl.LightningModule):
         kernel, bias = self.get_kernel_and_bias_from_data(dataloader)
         self.embedding = KNearestPatchesEmbedding(
             kernel, bias, self.args.dmh.k, self.args.dmh.up_to_k,
+            stride=self.args.dmh.stride, padding=self.args.dmh.padding,
             requires_grad=self.args.dmh.learnable_embedding,
             random_embedding=self.args.dmh.random_embedding,
             kmeans_triangle=self.args.dmh.kmeans_triangle
@@ -348,7 +350,9 @@ class LocallyLinearNetwork(pl.LightningModule):
             return None
         return nn.Conv2d(in_channels=self.input_channels,
                          out_channels=self.args.dmh.n_clusters,
-                         kernel_size=self.args.dmh.patch_size)
+                         kernel_size=self.args.dmh.patch_size,
+                         stride=self.args.dmh.stride,
+                         padding=self.args.dmh.padding)
 
     def init_adaptive_avg_pool(self) -> Optional[nn.AdaptiveAvgPool2d]:
         if not self.args.dmh.use_adaptive_avg_pool:
@@ -380,12 +384,15 @@ class LocallyLinearNetwork(pl.LightningModule):
         return nn.ReLU()
 
     def calc_linear_in_features(self):
-        embedding_spatial_size = self.input_spatial_size - self.args.dmh.patch_size + 1
+        # Inspiration is taken from PyTorch Conv2d docs regarding the output shape
+        # https://pytorch.org/docs/1.10.1/generated/torch.nn.Conv2d.html
+        embedding_spatial_size = math.floor(
+            ((self.input_spatial_size - self.args.dmh.patch_size) / self.args.dmh.stride) + 1)
 
         if self.args.dmh.use_adaptive_avg_pool:
             intermediate_spatial_size = self.args.dmh.adaptive_pool_output_size
         elif self.args.dmh.use_avg_pool:
-            intermediate_spatial_size = math.ceil(
+            intermediate_spatial_size = math.ceil(  # ceil and not floor, because we used `ceil_mode=True` in AvgPool2d
                 1 + (embedding_spatial_size - self.args.dmh.pool_size) / self.args.dmh.pool_stride)
         else:
             intermediate_spatial_size = embedding_spatial_size
@@ -714,19 +721,19 @@ class DataModule(LightningDataModule):
                                                           transform=self.transforms[aug])
 
     def train_dataloader(self):
-        return DataLoader(self.datasets['fit_aug'], batch_size=self.batch_size, num_workers=0, shuffle=True)
+        return DataLoader(self.datasets['fit_aug'], batch_size=self.batch_size, num_workers=4, shuffle=True)
 
     def val_dataloader(self):
         return [
-            DataLoader(self.datasets['validate_aug'], batch_size=self.batch_size, num_workers=0),
-            DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=0)
+            DataLoader(self.datasets['validate_aug'], batch_size=self.batch_size, num_workers=4),
+            DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=4)
         ]
 
     def train_dataloader_no_aug(self):
-        return DataLoader(self.datasets['fit_no_aug'], batch_size=self.batch_size, num_workers=0, shuffle=True)
+        return DataLoader(self.datasets['fit_no_aug'], batch_size=self.batch_size, num_workers=4, shuffle=True)
 
     def train_dataloader_clean(self):
-        return DataLoader(self.datasets['fit_clean'], batch_size=self.batch_size, num_workers=0, shuffle=True)
+        return DataLoader(self.datasets['fit_clean'], batch_size=self.batch_size, num_workers=4, shuffle=True)
 
 
 class LitVGG(pl.LightningModule):
@@ -1328,6 +1335,26 @@ def initialize_datamodule(args: DataArgs, batch_size: int):
     return datamodule
 
 
+def get_pre_model(wandb_logger, args):
+    artifact = wandb_logger.experiment.use_artifact(args.arch.pretrained_path, type='model')
+    artifact_dir = artifact.download()
+    checkpoint_path = str(Path(artifact_dir) / "model.ckpt")
+    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+    pre_model_args: Args = get_args_from_flattened_dict(
+        Args, checkpoint['hyper_parameters'],
+        excluded_categories=['env']  # Ignore environment args, such as GPU (which will raise error if on CPU).
+    )
+    pre_model_args.env = args.env
+    pre_model = LocallyLinearNetwork.load_from_checkpoint(
+        checkpoint_path, map_location=torch.device('cpu'), args=pre_model_args)
+    pre_model.requires_grad_(False)
+    pre_model.eval()
+    pre_model.embedding_mode()
+    pre_model.linear = None  # we don't need the linear layer predicting the logits anymore.
+
+    return pre_model
+
+
 def main():
     args = get_args(args_class=Args)
     datamodule = initialize_datamodule(args.data, args.opt.batch_size)
@@ -1336,30 +1363,7 @@ def main():
     configure_logger(args.env.path, print_sink=sys.stdout, level='DEBUG')  # if args.env.debug else 'INFO')
 
     if args.dmh.train_locally_linear_network:
-        if args.dmh.depth > 1:
-            artifact = wandb_logger.experiment.use_artifact('alonnt/thesis/LLN-no-pool:v0', type='model')
-            artifact_dir = artifact.download()
-            checkpoint_path = str(Path(artifact_dir) / "model.ckpt")
-            checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-            pre_model_args: Args = get_args_from_flattened_dict(
-                Args, checkpoint['hyper_parameters'],
-                excluded_categories=['env']  # Ignore environment args, such as GPU (which will raise error if on CPU).
-            )
-            pre_model_args.env = args.env
-            pre_model = LocallyLinearNetwork.load_from_checkpoint(checkpoint_path,
-                                                                  map_location=torch.device('cpu'),
-                                                                  args=pre_model_args)
-            pre_model.requires_grad_(False)
-            pre_model.eval()
-            pre_model.embedding_mode()
-            pre_model.linear = None  # we don't need the linear layer predicting the logits anymore.
-
-            # TODO do we want to transfer the model to the GPU?
-            #  The trainer probably does, but the patches' sampling also uses the pre_model
-
-        else:
-            pre_model = None
-
+        pre_model = None if (args.dmh.depth == 1) else get_pre_model(wandb_logger, args)
         model = LocallyLinearNetwork(args, pre_model)
         if not args.dmh.replace_embedding_with_regular_conv_relu:
             model.to(args.env.device)

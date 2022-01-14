@@ -8,7 +8,7 @@ from schemas.architecture import ArchitectureArgs
 from schemas.data import DataArgs
 from schemas.environment import EnvironmentArgs
 from schemas.optimization import OptimizationArgs
-from schemas.utils import ImmutableArgs, MyBaseModel, ProperFraction, NonNegativeFloat
+from schemas.utils import ImmutableArgs, MyBaseModel, ProperFraction, NonNegativeFloat, NonNegativeInt
 
 
 class DMHArgs(ImmutableArgs):
@@ -36,9 +36,6 @@ class DMHArgs(ImmutableArgs):
     #: Indicator to shuffle the patches/images before calculating the intrinsic-dimension.
     shuffle_before_estimate: bool = False
 
-    #: Patch size.
-    patch_size: PositiveInt = 5
-
     #: Number of patches to uniformly sample (which might get clustered later).
     n_patches: PositiveInt = 262144
 
@@ -62,6 +59,15 @@ class DMHArgs(ImmutableArgs):
     #: If it's true, when calculating k-nearest-neighbors there will be ones in the indices of the neighbors
     #: 1, 2, ..., k. If it's false, there will be a single one in the index of the k-th nearest-neighbor.
     up_to_k: bool = True
+
+    #: Patch size.
+    patch_size: PositiveInt = 5
+
+    #: Amount of padding to use in the k-nearest-neighbors embedding.
+    padding: NonNegativeInt = 0
+
+    #: Stride to use in the k-nearest-neighbors embedding.
+    stride: PositiveInt = 1
 
     #: Use convolution layer multiplied by the patch-based embedding.
     #: If it's false the resulting model is the same as Thiry et al.
