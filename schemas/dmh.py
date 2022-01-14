@@ -125,6 +125,10 @@ class DMHArgs(ImmutableArgs):
     #: If depth = 2 it means that we build one model on top of the other.
     depth: int = 1
 
+    #: Whether the input embedding to the deep model should have a residual connection (addition / concatenation).
+    residual_add: bool = False
+    residual_cat: bool = False
+
     @root_validator
     def set_k_from_k_fraction(cls, values):
         if values['k_fraction'] is not None:

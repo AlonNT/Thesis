@@ -22,6 +22,7 @@ from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10, MNIST, FashionMNIST
 from torchvision.transforms import ToTensor, RandomCrop, RandomHorizontalFlip, Normalize, Compose
+from torchvision.transforms.functional import center_crop
 from pytorch_lightning import LightningDataModule, Callback
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer.states import RunningStage
@@ -387,7 +388,7 @@ class LocallyLinearNetwork(pl.LightningModule):
         # Inspiration is taken from PyTorch Conv2d docs regarding the output shape
         # https://pytorch.org/docs/1.10.1/generated/torch.nn.Conv2d.html
         embedding_spatial_size = math.floor(
-            ((self.input_spatial_size - self.args.dmh.patch_size) / self.args.dmh.stride) + 1)
+            ((self.input_spatial_size + 2*self.args.dmh.padding - self.args.dmh.patch_size) / self.args.dmh.stride) + 1)
 
         if self.args.dmh.use_adaptive_avg_pool:
             intermediate_spatial_size = self.args.dmh.adaptive_pool_output_size
@@ -399,7 +400,11 @@ class LocallyLinearNetwork(pl.LightningModule):
 
         intermediate_n_features = self.args.dmh.n_clusters * (intermediate_spatial_size ** 2)
         bottleneck_output_spatial_size = intermediate_spatial_size - self.args.dmh.bottle_neck_kernel_size + 1
-        bottleneck_output_n_features = self.args.dmh.bottle_neck_dimension * (bottleneck_output_spatial_size ** 2)
+        if self.args.dmh.residual_cat:
+            bottle_neck_dimension = self.args.dmh.bottle_neck_dimension + self.input_channels
+        else:
+            bottle_neck_dimension = self.args.dmh.bottle_neck_dimension
+        bottleneck_output_n_features = bottle_neck_dimension * (bottleneck_output_spatial_size ** 2)
         linear_in_features = bottleneck_output_n_features if self.args.dmh.use_bottle_neck else intermediate_n_features
         return linear_in_features
 
@@ -579,6 +584,10 @@ class LocallyLinearNetwork(pl.LightningModule):
             features = self.bottle_neck(features)
         if self.args.dmh.use_relu_after_bottleneck:
             features = self.bottle_neck_relu(features)
+        if self.args.dmh.residual_add or self.args.dmh.residual_cat:
+            if x.shape[-2:] != features.shape[-2:]:  # Spatial size might be slightly different due to lack of padding
+                x = center_crop(x, output_size=features.shape[-1])
+            features = torch.add(features, x) if self.args.dmh.residual_add else torch.cat((features, x), dim=1)
 
         if not self.logits_prediction_mode:
             return features
