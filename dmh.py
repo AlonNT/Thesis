@@ -343,14 +343,10 @@ class LocallyLinearNetwork(pl.LightningModule):
                                               args.zca_whitening, self.pre_model)
 
     def init_conv(self) -> Optional[nn.Conv2d]:
-        """
-        This convolution layer can be thought of as linear function per patch in the patch-dict,
-        each function is from (in_channels x kernel_size^2) to the reals.
-        """
         if not self.args.dmh.use_conv:
             return None
         return nn.Conv2d(in_channels=self.input_channels,
-                         out_channels=self.args.dmh.n_clusters,
+                         out_channels=self.args.dmh.n_clusters * self.args.dmh.c,
                          kernel_size=self.args.dmh.patch_size,
                          stride=self.args.dmh.stride,
                          padding=self.args.dmh.padding)
@@ -375,7 +371,7 @@ class LocallyLinearNetwork(pl.LightningModule):
     def init_bottleneck(self) -> Optional[nn.Conv2d]:
         if not self.args.dmh.use_bottle_neck:
             return None
-        return nn.Conv2d(in_channels=self.args.dmh.n_clusters,
+        return nn.Conv2d(in_channels=self.args.dmh.n_clusters if (self.args.dmh.c == 1) else self.args.dmh.c,
                          out_channels=self.args.dmh.bottle_neck_dimension,
                          kernel_size=self.args.dmh.bottle_neck_kernel_size)
 
@@ -385,27 +381,29 @@ class LocallyLinearNetwork(pl.LightningModule):
         return nn.ReLU()
 
     def calc_linear_in_features(self):
+        args = self.args.dmh
+
         # Inspiration is taken from PyTorch Conv2d docs regarding the output shape
         # https://pytorch.org/docs/1.10.1/generated/torch.nn.Conv2d.html
         embedding_spatial_size = math.floor(
-            ((self.input_spatial_size + 2*self.args.dmh.padding - self.args.dmh.patch_size) / self.args.dmh.stride) + 1)
+            ((self.input_spatial_size + 2*args.padding - args.patch_size) / args.stride) + 1)
 
-        if self.args.dmh.use_adaptive_avg_pool:
-            intermediate_spatial_size = self.args.dmh.adaptive_pool_output_size
-        elif self.args.dmh.use_avg_pool:
-            intermediate_spatial_size = math.ceil(  # ceil and not floor, because we used `ceil_mode=True` in AvgPool2d
-                1 + (embedding_spatial_size - self.args.dmh.pool_size) / self.args.dmh.pool_stride)
+        if args.use_adaptive_avg_pool:
+            intermediate_spatial_size = args.adaptive_pool_output_size
+        elif args.use_avg_pool:    # ceil and not floor, because we used `ceil_mode=True` in AvgPool2d
+            intermediate_spatial_size = math.ceil(1 + (embedding_spatial_size - args.pool_size) / args.pool_stride)
         else:
             intermediate_spatial_size = embedding_spatial_size
 
-        intermediate_n_features = self.args.dmh.n_clusters * (intermediate_spatial_size ** 2)
-        bottleneck_output_spatial_size = intermediate_spatial_size - self.args.dmh.bottle_neck_kernel_size + 1
-        if self.args.dmh.residual_cat:
-            bottle_neck_dimension = self.args.dmh.bottle_neck_dimension + self.input_channels
+        embedding_n_channels = args.n_clusters if args.c == 1 else args.c
+        intermediate_n_features = embedding_n_channels * (intermediate_spatial_size ** 2)
+        bottleneck_output_spatial_size = intermediate_spatial_size - args.bottle_neck_kernel_size + 1
+        if args.residual_cat:
+            bottle_neck_dimension = args.bottle_neck_dimension + self.input_channels
         else:
-            bottle_neck_dimension = self.args.dmh.bottle_neck_dimension
+            bottle_neck_dimension = args.bottle_neck_dimension
         bottleneck_output_n_features = bottle_neck_dimension * (bottleneck_output_spatial_size ** 2)
-        linear_in_features = bottleneck_output_n_features if self.args.dmh.use_bottle_neck else intermediate_n_features
+        linear_in_features = bottleneck_output_n_features if args.use_bottle_neck else intermediate_n_features
         return linear_in_features
 
     def get_kernel_and_bias_from_data(self, dataloader: DataLoader):
@@ -572,8 +570,14 @@ class LocallyLinearNetwork(pl.LightningModule):
 
         features = self.embedding(x)
 
+        if self.args.dmh.c > 1:
+            assert self.args.dmh.use_conv, 'it does not make sense to use c > 1 without the conv layer'
+            features = torch.repeat_interleave(features, repeats=self.args.dmh.c, dim=1)
         if self.args.dmh.use_conv:
             features *= self.conv(x)
+        if self.args.dmh.c > 1:
+            features = features.view(features.shape[0], self.args.dmh.n_clusters, self.args.dmh.c, *features.shape[2:])
+            features = torch.sum(features, dim=1) / self.args.dmh.k
         if self.args.dmh.use_avg_pool:
             features = self.avg_pool(features)
         if self.args.dmh.use_adaptive_avg_pool:

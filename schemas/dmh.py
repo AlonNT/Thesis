@@ -129,6 +129,9 @@ class DMHArgs(ImmutableArgs):
     residual_add: bool = False
     residual_cat: bool = False
 
+    #: Number of values to output for each patch's linear-classifier.
+    c: PositiveInt = 1
+
     @root_validator
     def set_k_from_k_fraction(cls, values):
         if values['k_fraction'] is not None:
