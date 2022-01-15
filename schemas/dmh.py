@@ -132,6 +132,9 @@ class DMHArgs(ImmutableArgs):
     #: Number of values to output for each patch's linear-classifier.
     c: PositiveInt = 1
 
+    full_embedding: bool = False
+    gather: bool = False
+
     @root_validator
     def set_k_from_k_fraction(cls, values):
         if values['k_fraction'] is not None:
@@ -142,6 +145,26 @@ class DMHArgs(ImmutableArgs):
     @root_validator
     def validate_estimate_dim_on_images_or_patches(cls, values):
         assert values['estimate_dim_on_patches'] != values['estimate_dim_on_images'], "Exactly one should be given."
+        return values
+
+    @root_validator
+    def validate_replace_embedding_with_regular_conv_relu(cls, values):
+        assert not (values['replace_embedding_with_regular_conv_relu'] and values['use_conv']), "Don't use them both"
+        return values
+
+    @root_validator
+    def validate_c_larger_than_1_requires_conv(cls, values):
+        if values['c'] > 1:
+            assert values['use_conv'], "It doesn't make sense to use c > 1 without a conv layer."
+        return values
+    
+    @root_validator
+    def validate_full_embedding(cls, values):
+        if values['full_embedding']:
+            for k in ['use_conv', 'use_avg_pool', 'use_adaptive_avg_pool', 'use_batch_norm', 
+                      'use_bottle_neck', 'use_relu_after_bottleneck', 'residual_add', 'residual_cat']:
+                assert not values[k], f"Can't use full embedding and {k}"
+            assert values['c'] == 1, "Can't use full embedding and c > 1"
         return values
 
     @root_validator

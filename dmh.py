@@ -264,7 +264,6 @@ class LocallyLinearNetwork(pl.LightningModule):
         self.batch_norm = self.init_batch_norm()
         self.bottle_neck = self.init_bottleneck()
         self.bottle_neck_relu = self.init_bottleneck_relu()
-        self.flatten = nn.Flatten()
         self.linear = nn.Linear(in_features=self.calc_linear_in_features(), out_features=N_CLASSES)
 
         self.loss = nn.CrossEntropyLoss()
@@ -298,23 +297,25 @@ class LocallyLinearNetwork(pl.LightningModule):
         return shape
 
     def init_embedding(self):
-        if self.args.dmh.replace_embedding_with_regular_conv_relu:
+        args = self.args.dmh
+
+        if args.replace_embedding_with_regular_conv_relu:
             return nn.Sequential(
                 nn.Conv2d(in_channels=self.input_channels,
-                          out_channels=self.args.dmh.n_clusters,
-                          kernel_size=self.args.dmh.patch_size),
+                          out_channels=args.n_clusters,
+                          kernel_size=args.patch_size),
                 nn.ReLU()
             )
 
         kernel, bias = get_random_initialized_conv_kernel_and_bias(in_channels=self.input_channels,
-                                                                   out_channels=self.args.dmh.n_clusters,
-                                                                   kernel_size=self.args.dmh.patch_size)
+                                                                   out_channels=args.n_clusters,
+                                                                   kernel_size=args.patch_size)
         return KNearestPatchesEmbedding(
-            kernel, bias, self.args.dmh.k, self.args.dmh.up_to_k,
-            stride=self.args.dmh.stride, padding=self.args.dmh.padding,
-            requires_grad=self.args.dmh.learnable_embedding,
-            random_embedding=self.args.dmh.random_embedding,
-            kmeans_triangle=self.args.dmh.kmeans_triangle
+            kernel, bias, args.k, args.up_to_k,
+            stride=args.stride, padding=args.padding,
+            requires_grad=args.learnable_embedding,
+            random_embedding=args.random_embedding,
+            kmeans_triangle=args.kmeans_triangle
         )
 
     def calculate_embedding_from_data(self, dataloader):
@@ -366,7 +367,8 @@ class LocallyLinearNetwork(pl.LightningModule):
     def init_batch_norm(self) -> Optional[nn.BatchNorm2d]:
         if not self.args.dmh.use_batch_norm:
             return None
-        return nn.BatchNorm2d(num_features=self.args.dmh.n_clusters)
+        num_features = self.args.dmh.n_clusters if self.args.dmh.c == 1 else self.args.dmh.c
+        return nn.BatchNorm2d(num_features)
 
     def init_bottleneck(self) -> Optional[nn.Conv2d]:
         if not self.args.dmh.use_bottle_neck:
@@ -395,7 +397,14 @@ class LocallyLinearNetwork(pl.LightningModule):
         else:
             intermediate_spatial_size = embedding_spatial_size
 
-        embedding_n_channels = args.n_clusters if args.c == 1 else args.c
+        if args.full_embedding:
+            patch_dim = self.input_channels * args.patch_size ** 2
+            embedding_n_channels = args.n_clusters * patch_dim
+        elif args.c > 1:
+            embedding_n_channels = args.c
+        else:
+            embedding_n_channels = args.n_clusters
+
         intermediate_n_features = embedding_n_channels * (intermediate_spatial_size ** 2)
         bottleneck_output_spatial_size = intermediate_spatial_size - args.bottle_neck_kernel_size + 1
         if args.residual_cat:
@@ -418,6 +427,99 @@ class LocallyLinearNetwork(pl.LightningModule):
         kernel *= -1  # According to the formula as page 13 in https://arxiv.org/pdf/2101.07528.pdf
 
         return kernel, bias
+
+    def get_full_embedding(self, x: torch.Tensor, features: torch.Tensor, args: DMHArgs):
+        x = F.unfold(x, kernel_size=args.patch_size, stride=args.stride, padding=args.padding)
+        batch_size, patch_dim, n_patches = x.shape
+        spatial_size = int(math.sqrt(n_patches))  # This is the spatial size (e.g. from 28 in CIFAR10 with patch-size 5)
+        
+        x = x.reshape(batch_size, patch_dim, spatial_size, spatial_size)
+        x = torch.repeat_interleave(x, repeats=args.n_clusters, dim=1)
+        x = x.reshape(batch_size, patch_dim, args.n_clusters, spatial_size, spatial_size)
+        x = x.transpose(1,2)
+        x = x.reshape(batch_size, patch_dim*args.n_clusters, spatial_size, spatial_size)
+
+        return x * torch.repeat_interleave(features, repeats=patch_dim, dim=1)
+
+    def forward(self, x: torch.Tensor):
+        args = self.args.dmh
+
+        if self.pre_model is not None:
+            x = self.pre_model(x)
+
+        features = self.embedding(x)
+        if args.full_embedding:
+            features = self.get_full_embedding(x, features, args)
+        if args.c > 1:
+            features = torch.repeat_interleave(features, repeats=args.c, dim=1)
+        if args.use_conv:
+            features *= self.conv(x)
+        if args.c > 1:
+            features = features.view(features.shape[0], args.n_clusters, args.c, *features.shape[2:])
+            # if args.gather:
+            #     import ipdb; ipdb.set_trace()
+            #     stop = 'here'
+            #     # TODO try to  it reshape from [64, 1024, 8, 28, 28] to [64, 1024, 8, 28, 28]
+            #     features_2d = torch.transpose(features, dim0=2, dim1=4).reshape(-1, args.c)
+            #     features_nonzero_rows = features_2d[torch.logical_not(torch.all(features_2d == 0, dim=1))].reshape(64,4,28,28,8).transpose(dim0=2, dim1=4)
+            #     features = features 
+            # else:
+            #     features = torch.sum(features, dim=1) / args.k
+            features = torch.sum(features, dim=1) / args.k
+        if args.use_avg_pool:
+            features = self.avg_pool(features)
+        if args.use_adaptive_avg_pool:
+            features = self.adaptive_avg_pool(features)
+        if args.use_batch_norm:
+            features = self.batch_norm(features)
+        if args.use_bottle_neck:
+            features = self.bottle_neck(features)
+        if args.use_relu_after_bottleneck:
+            features = self.bottle_neck_relu(features)
+        if args.residual_add or args.residual_cat:
+            if x.shape[-2:] != features.shape[-2:]:  # Spatial size might be slightly different due to lack of padding
+                x = center_crop(x, output_size=features.shape[-1])
+            features = torch.add(features, x) if args.residual_add else torch.cat((features, x), dim=1)
+
+        if not self.logits_prediction_mode:
+            return features
+
+        logits = self.linear(torch.flatten(features, start_dim=1))
+
+        return logits
+
+    def shared_step(self, batch, stage: RunningStage, dataloader_idx=0):
+        assert self.logits_prediction_mode, 'Can not do train/validation step when logits prediction mode is off'
+
+        x, labels = batch
+        logits = self(x)
+        loss = self.loss(logits, labels)
+
+        accuracy = self.accuracy[stage][dataloader_idx]
+        accuracy(logits, labels)
+
+        name = stage.value if dataloader_idx == 0 else f'{stage.value}_no_aug'
+        self.log(f'{name}_loss', loss)
+        self.log(f'{name}_accuracy', accuracy)
+
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        loss = self.shared_step(batch, RunningStage.TRAINING)
+        return loss
+
+    def validation_step(self, batch, batch_idx, dataloader_idx):
+        self.shared_step(batch, RunningStage.VALIDATING, dataloader_idx)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.SGD(self.parameters(),
+                                    self.args.opt.learning_rate,
+                                    self.args.opt.momentum,
+                                    weight_decay=self.args.opt.weight_decay)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
+                                                         milestones=self.args.opt.learning_rate_decay_steps,
+                                                         gamma=self.args.opt.learning_rate_decay_gamma)
+        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
 
     @staticmethod
     def get_diagonal_sum_vs_total_sum_ratio(covariance_matrix):
@@ -507,7 +609,10 @@ class LocallyLinearNetwork(pl.LightningModule):
             norms = torch.linalg.norm(bottleneck_weight, ord=2, dim=0).cpu().numpy()
         else:
             norms = np.random.default_rng().uniform(size=self.args.dmh.n_clusters).astype(np.float32)
-
+        
+        if n ** 2 >= len(norms) / 2:  # Otherwise we'll crash when asking for n**2 best/worth norms.
+            n = math.floor(math.sqrt(len(norms) / 2))
+        
         worst_patches_indices, best_patches_indices = self.get_extreme_patches_indices(norms, n ** 2)
         worst_patches_unwhitened, best_patches_unwhitened = self.get_extreme_patches_unwhitened(
             worst_patches_indices, best_patches_indices)
@@ -563,75 +668,6 @@ class LocallyLinearNetwork(pl.LightningModule):
     def on_train_end(self):
         if self.input_channels == 3:
             self.visualize_patches()
-
-    def forward(self, x: torch.Tensor):
-        if self.pre_model is not None:
-            x = self.pre_model(x)
-
-        features = self.embedding(x)
-
-        if self.args.dmh.c > 1:
-            assert self.args.dmh.use_conv, 'it does not make sense to use c > 1 without the conv layer'
-            features = torch.repeat_interleave(features, repeats=self.args.dmh.c, dim=1)
-        if self.args.dmh.use_conv:
-            features *= self.conv(x)
-        if self.args.dmh.c > 1:
-            features = features.view(features.shape[0], self.args.dmh.n_clusters, self.args.dmh.c, *features.shape[2:])
-            features = torch.sum(features, dim=1) / self.args.dmh.k
-        if self.args.dmh.use_avg_pool:
-            features = self.avg_pool(features)
-        if self.args.dmh.use_adaptive_avg_pool:
-            features = self.adaptive_avg_pool(features)
-        if self.args.dmh.use_batch_norm:
-            features = self.batch_norm(features)
-        if self.args.dmh.use_bottle_neck:
-            features = self.bottle_neck(features)
-        if self.args.dmh.use_relu_after_bottleneck:
-            features = self.bottle_neck_relu(features)
-        if self.args.dmh.residual_add or self.args.dmh.residual_cat:
-            if x.shape[-2:] != features.shape[-2:]:  # Spatial size might be slightly different due to lack of padding
-                x = center_crop(x, output_size=features.shape[-1])
-            features = torch.add(features, x) if self.args.dmh.residual_add else torch.cat((features, x), dim=1)
-
-        if not self.logits_prediction_mode:
-            return features
-
-        logits = self.linear(self.flatten(features))
-
-        return logits
-
-    def shared_step(self, batch, stage: RunningStage, dataloader_idx=0):
-        assert self.logits_prediction_mode, 'Can not do train/validation step when logits prediction mode is off'
-
-        x, labels = batch
-        logits = self(x)
-        loss = self.loss(logits, labels)
-
-        accuracy = self.accuracy[stage][dataloader_idx]
-        accuracy(logits, labels)
-
-        name = stage.value if dataloader_idx == 0 else f'{stage.value}_no_aug'
-        self.log(f'{name}_loss', loss)
-        self.log(f'{name}_accuracy', accuracy)
-
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        loss = self.shared_step(batch, RunningStage.TRAINING)
-        return loss
-
-    def validation_step(self, batch, batch_idx, dataloader_idx):
-        self.shared_step(batch, RunningStage.VALIDATING, dataloader_idx)
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.SGD(self.parameters(),
-                                    self.args.opt.learning_rate,
-                                    self.args.opt.momentum,
-                                    weight_decay=self.args.opt.weight_decay)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                         milestones=self.args.opt.learning_rate_decay_steps,
-                                                         gamma=self.args.opt.learning_rate_decay_gamma)
-        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
 
 
 class ShufflePixels:
@@ -1260,7 +1296,7 @@ class ImitatorKNN:  # TODO inherit from pl.LightningModule to enable saving chec
                 x_unfolded = F.unfold(x_cpu, **conv_kwargs)
                 batch_size, patch_dim, n_patches = x_unfolded.shape
 
-                # Transpose to (N, M, C*H*W) and then reshape to (N*M, C*H*W) to have collection of vectors
+                # Transpose from (N, C*H*W, M) to (N, M, C*H*W) and then reshape to (N*M, C*H*W) to have collection of vectors
                 # Also make contiguous in memory (required by function kmeans.search).
                 x_unfolded = x_unfolded.transpose(dim0=1, dim1=2).flatten(start_dim=0, end_dim=1).contiguous()
 
