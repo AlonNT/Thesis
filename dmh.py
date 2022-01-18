@@ -101,8 +101,7 @@ class LocallyLinearConvImitator(nn.Module):
         self.padding = padding
 
         # TODO DEBUG, since we changed the API to get kernel and bias
-        import ipdb;
-        ipdb.set_trace()
+        import ipdb; ipdb.set_trace()
         self.k_nearest_neighbors_embedding = KNearestPatchesEmbedding(kernel, bias, k, padding=padding)
 
         # This convolution layer can be thought of as linear function per patch in the patch-dict,
@@ -245,7 +244,10 @@ class LocallyLinearImitatorVGG(pl.LightningModule):
 
 class LocallyLinearNetwork(pl.LightningModule):
 
-    def __init__(self, args: Args, pre_model: Optional["LocallyLinearNetwork"] = None):
+    def __init__(self, 
+                 args: Args, 
+                 pre_model: Optional["LocallyLinearNetwork"] = None,
+                 input_shape: Optional[Tuple[int, int, int]] = None):
         super(LocallyLinearNetwork, self).__init__()
         self.args: Args = args
         self.save_hyperparameters(args.flattened_dict())
@@ -253,7 +255,8 @@ class LocallyLinearNetwork(pl.LightningModule):
         self.whitening_matrix: Optional[np.ndarray] = None
         self.patches_covariance_matrix: Optional[np.ndarray] = None
         self.whitened_patches_covariance_matrix: Optional[np.ndarray] = None
-        self.input_shape = self.get_input_shape()  # TODO create a dummy image from dataset and pass get_input_shape
+
+        self.input_shape = input_shape if (input_shape is not None) else self.get_input_shape()
         self.input_channels = self.input_shape[0]
         self.input_spatial_size = self.input_shape[1]
 
@@ -318,9 +321,9 @@ class LocallyLinearNetwork(pl.LightningModule):
             kmeans_triangle=args.kmeans_triangle
         )
 
-    def calculate_embedding_from_data(self, dataloader):
+    def calculate_embedding_from_data(self, dataloader, pre_model: Optional[nn.Module] = None):
         assert not self.args.dmh.replace_embedding_with_regular_conv_relu, 'This function should not have been called'
-        kernel, bias = self.get_kernel_and_bias_from_data(dataloader)
+        kernel, bias = self.get_kernel_and_bias_from_data(dataloader, pre_model)
         self.embedding = KNearestPatchesEmbedding(
             kernel, bias, self.args.dmh.k, self.args.dmh.up_to_k,
             stride=self.args.dmh.stride, padding=self.args.dmh.padding,
@@ -329,8 +332,10 @@ class LocallyLinearNetwork(pl.LightningModule):
             kmeans_triangle=self.args.dmh.kmeans_triangle
         )
 
-    def init_whitening_matrix(self, dataloader: DataLoader) -> Optional[np.ndarray]:
+    def init_whitening_matrix(self, dataloader: DataLoader, pre_model: Optional[nn.Module] = None) -> Optional[np.ndarray]:
         args = self.args.dmh
+        if pre_model is None:
+            pre_model = self.pre_model
 
         if not args.use_whitening:
             return None
@@ -340,8 +345,9 @@ class LocallyLinearNetwork(pl.LightningModule):
                 self.patches_covariance_matrix, args.whitening_regularization_factor, args.zca_whitening
             )
 
-        return calc_whitening_from_dataloader(dataloader, args.patch_size, args.whitening_regularization_factor,
-                                              args.zca_whitening, self.pre_model)
+        return calc_whitening_from_dataloader(dataloader, args.patch_size, 
+                                              args.whitening_regularization_factor, args.zca_whitening, 
+                                              pre_model)
 
     def init_conv(self) -> Optional[nn.Conv2d]:
         if not self.args.dmh.use_conv:
@@ -415,10 +421,10 @@ class LocallyLinearNetwork(pl.LightningModule):
         linear_in_features = bottleneck_output_n_features if args.use_bottle_neck else intermediate_n_features
         return linear_in_features
 
-    def get_kernel_and_bias_from_data(self, dataloader: DataLoader):
+    def get_kernel_and_bias_from_data(self, dataloader: DataLoader, pre_model: Optional[nn.Module] = None):
         # Set the kernel and the bias of the embedding. Note that if we use whitening then the kernel is the patches
         # multiplied by WW^T and the bias is the squared-norm of patches multiplied by W (no W^T).
-        kernel = self.get_clustered_patches(dataloader)
+        kernel = self.get_clustered_patches(dataloader, pre_model)
         bias = 0.5 * np.linalg.norm(kernel.reshape(kernel.shape[0], -1), axis=1) ** 2
         if self.args.dmh.use_whitening:
             kernel_flat = kernel.reshape(kernel.shape[0], -1)
@@ -445,7 +451,7 @@ class LocallyLinearNetwork(pl.LightningModule):
         args = self.args.dmh
 
         if self.pre_model is not None:
-            x = self.pre_model(x)
+            x = self.pre_model(x)  # TODO remove self.pre_model
 
         features = self.embedding(x)
         if args.full_embedding:
@@ -457,8 +463,6 @@ class LocallyLinearNetwork(pl.LightningModule):
         if args.c > 1:
             features = features.view(features.shape[0], args.n_clusters, args.c, *features.shape[2:])
             # if args.gather:
-            #     import ipdb; ipdb.set_trace()
-            #     stop = 'here'
             #     # TODO try to  it reshape from [64, 1024, 8, 28, 28] to [64, 1024, 8, 28, 28]
             #     features_2d = torch.transpose(features, dim0=2, dim1=4).reshape(-1, args.c)
             #     features_nonzero_rows = features_2d[torch.logical_not(torch.all(features_2d == 0, dim=1))].reshape(64,4,28,28,8).transpose(dim0=2, dim1=4)
@@ -536,12 +540,14 @@ class LocallyLinearNetwork(pl.LightningModule):
 
         return patches
 
-    def get_clustered_patches(self, dataloader: DataLoader):
+    def get_clustered_patches(self, dataloader: DataLoader, pre_model: Optional[nn.Module] = None):
+        if pre_model is None:
+            pre_model = self.pre_model
         n_patches_extended = math.ceil(1.01 * self.args.dmh.n_patches)
         patches = sample_random_patches(dataloader, n_patches_extended, self.args.dmh.patch_size,
                                         random_uniform_patches=self.args.dmh.random_uniform_patches,
                                         random_gaussian_patches=self.args.dmh.random_gaussian_patches,
-                                        existing_model=self.pre_model)
+                                        existing_model=pre_model)
         patch_shape = patches.shape[1:]
         patches = patches.reshape(patches.shape[0], -1)
 
@@ -549,7 +555,7 @@ class LocallyLinearNetwork(pl.LightningModule):
         patches = self.remove_low_norm_patches(patches)
 
         self.patches_covariance_matrix = get_covariance_matrix(patches)
-        self.whitening_matrix = self.init_whitening_matrix(dataloader)
+        self.whitening_matrix = self.init_whitening_matrix(dataloader, pre_model)
 
         if self.args.dmh.use_whitening:
             patches = patches @ self.whitening_matrix
@@ -670,6 +676,100 @@ class LocallyLinearNetwork(pl.LightningModule):
             self.visualize_patches()
 
 
+
+class DeepLocallyLinearNetwork(pl.LightningModule):
+
+    def __init__(self, args: Args, dataloader: DataLoader):
+        super(DeepLocallyLinearNetwork, self).__init__()
+        self.args: Args = args
+        self.dataloader: DataLoader = dataloader  # This is the dataloader for sampling patches
+        self.save_hyperparameters(args.flattened_dict())
+        self.input_channels = self.args.data.n_channels
+        self.input_spatial_size = self.args.data.spatial_size
+        self.input_shape = (self.input_channels,) + 2 * (self.input_spatial_size,)
+        
+        self.layers = nn.ModuleList()
+
+        self.loss = nn.CrossEntropyLoss()
+
+        self.train_accuracy = tm.Accuracy()
+        self.validate_accuracy = tm.Accuracy()
+        self.validate_no_aug_accuracy = tm.Accuracy()
+        self.accuracy = {RunningStage.TRAINING: [self.train_accuracy],
+                         RunningStage.VALIDATING: [self.validate_accuracy, self.validate_no_aug_accuracy]}
+
+    def add_layer(self):
+        if len(self.layers) > 0:
+            self.layers[-1].eval()
+            self.layers[-1].requires_grad_(False)
+        
+        pre_model = nn.Sequential(*self.layers)
+
+        args = copy.deepcopy(self.args)
+        args.dmh = self.args.dmh.extract_single_depth_args(i=len(self.layers))
+        new_layer = LocallyLinearNetwork(args, input_shape=get_model_output_shape(pre_model))
+
+        original_device = get_model_device(pre_model)
+        pre_model.to(self.args.env.device)
+        new_layer.calculate_embedding_from_data(self.dataloader, pre_model)
+        pre_model.to(original_device)
+
+        new_layer.embedding_mode()  # we'll run a linear layer explicitly in forward()
+        
+        # Remove these from the layer since we are not planning to train them separately.
+        # (The loss and accuracy will be those of the DeepLocallyLinearNetwork).
+        new_layer.loss = None
+        new_layer.train_accuracy = None
+        new_layer.validate_accuracy = None
+        new_layer.validate_no_aug_accuracy = None
+
+        self.layers.append(new_layer)
+    
+    def forward(self, x: torch.Tensor):
+        assert len(self.layers) > 0, 'Can not perform a forward-pass until at least one layer is added.'
+        logits = list()
+        for layer in self.layers:
+            x = layer(x)
+            if self.args.dmh.sum_logits:
+                logits.append(layer.linear(x.flatten(start_dim=1)))
+        
+        if self.args.dmh.sum_logits:
+            return sum(logits)
+        else:
+            logits = layer.linear(x.flatten(start_dim=1))
+            return logits
+
+    def shared_step(self, batch, stage: RunningStage, dataloader_idx=0):
+        x, labels = batch
+        logits = self(x)
+        loss = self.loss(logits, labels)
+
+        accuracy = self.accuracy[stage][dataloader_idx]
+        accuracy(logits, labels)
+
+        name = stage.value if dataloader_idx == 0 else f'{stage.value}_no_aug'
+        self.log(f'{name}_loss', loss)
+        self.log(f'{name}_accuracy', accuracy)
+
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        loss = self.shared_step(batch, RunningStage.TRAINING)
+        return loss
+
+    def validation_step(self, batch, batch_idx, dataloader_idx):
+        self.shared_step(batch, RunningStage.VALIDATING, dataloader_idx)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.SGD(self.layers[-1].parameters(),  # We only train the last layer.
+                                    self.args.opt.learning_rate,
+                                    self.args.opt.momentum,
+                                    weight_decay=self.args.opt.weight_decay)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
+                                                         milestones=self.args.opt.learning_rate_decay_steps,
+                                                         gamma=self.args.opt.learning_rate_decay_gamma)
+        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
+
 class ShufflePixels:
     def __init__(self, keep_rgb_triplets_intact: bool = True):
         self.keep_rgb_triplets_intact = keep_rgb_triplets_intact
@@ -789,12 +889,15 @@ class LitVGG(pl.LightningModule):
 
     def __init__(self, args: Args):
         super(LitVGG, self).__init__()
-        layers, n_features = get_vgg_blocks(configs[args.arch.model_name],
-                                            args.data.n_channels,
-                                            args.data.spatial_size,
-                                            args.dmh.patch_size,
-                                            args.dmh.padding,
-                                            args.dmh.use_batch_norm)
+        layers, n_features = get_vgg_blocks(
+            configs[args.arch.model_name],
+            args.data.n_channels,
+            args.data.spatial_size,
+            args.dmh.patch_size,
+            args.dmh.padding,
+            args.dmh.use_batch_norm,
+            args.dmh.bottle_neck_dimension if args.dmh.use_relu_after_bottleneck else 0
+        )
         self.features = nn.Sequential(*layers)
         self.mlp = get_mlp(input_dim=n_features,
                            output_dim=N_CLASSES,
@@ -1305,10 +1408,10 @@ def initialize_model(args: Args, wandb_logger: WandbLogger):
     return model
 
 
-def initialize_wandb_logger(args: Args):
+def initialize_wandb_logger(args: Args, name_suffix: str = ''):
     return WandbLogger(project='thesis',
                        config=args.flattened_dict(),
-                       name=args.env.wandb_run_name,
+                       name=args.env.wandb_run_name + name_suffix,
                        log_model=True)
 
 
@@ -1495,19 +1598,42 @@ def main():
     configure_logger(args.env.path, print_sink=sys.stdout, level='DEBUG')  # if args.env.debug else 'INFO')
 
     if args.dmh.train_locally_linear_network:
-        pre_model = None if (args.dmh.depth == 1) else get_pre_model(wandb_logger, args)
-        model = LocallyLinearNetwork(args, pre_model)
-        if not args.dmh.replace_embedding_with_regular_conv_relu:
-            model.to(args.env.device)
-            if args.dmh.sample_patches_from_original_zero_one_values:
-                dataloader = datamodule.train_dataloader_clean()
-            else:
-                dataloader = datamodule.train_dataloader_no_aug()
-            model.calculate_embedding_from_data(dataloader)
-            model.cpu()
-        wandb_logger.watch(model, log='all')
-        trainer = initialize_trainer(args, wandb_logger)
-        trainer.fit(model, datamodule=datamodule)
+        if args.dmh.sample_patches_from_original_zero_one_values:
+            dataloader_for_sampling_patches = datamodule.train_dataloader_clean()
+        else:
+            dataloader_for_sampling_patches = datamodule.train_dataloader_no_aug()
+
+        if args.dmh.depth == 1:
+            # TODO delete
+            # pre_model = None if (args.dmh.depth == 1) else get_pre_model(wandb_logger, args)
+            model = LocallyLinearNetwork(args)
+            if not args.dmh.replace_embedding_with_regular_conv_relu:
+                model.to(args.env.device)
+                model.calculate_embedding_from_data(dataloader_for_sampling_patches)
+                model.cpu()
+            wandb_logger.watch(model, log='all')
+            trainer = initialize_trainer(args, wandb_logger)
+            trainer.fit(model, datamodule=datamodule)
+        else:
+            model = DeepLocallyLinearNetwork(args, dataloader_for_sampling_patches)
+            for i in range(args.dmh.depth):
+                model.add_layer()
+                wandb_logger = initialize_wandb_logger(args, name_suffix=f'_layer_{i+1}')
+                wandb_logger.watch(model, log='all')
+                trainer = initialize_trainer(args, wandb_logger)
+                trainer.fit(model, datamodule=datamodule)
+
+                # Prevents wandb error which they have a TO-DO for fixing in wandb/sdk/wandb_watch.py:123
+                # "  TO-DO: we should also remove recursively model._wandb_watch_called  "
+                # ValueError: You can only call `wandb.watch` once per model.  
+                # Pass a new instance of the model if you need to call wandb.watch again in your code.
+                wandb.unwatch(model)
+                for module in model.modules():
+                    if hasattr(module, "_wandb_watch_called"):
+                        delattr(module, "_wandb_watch_called")
+                if hasattr(module, "_wandb_watch_called"):
+                    delattr(model, "_wandb_watch_called")
+                wandb.finish()
     else:
         model = initialize_model(args, wandb_logger)
         if not args.arch.use_pretrained:

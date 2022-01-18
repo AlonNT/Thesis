@@ -109,7 +109,8 @@ def get_vgg_blocks(config: List[Union[int, str]],
                    spatial_size: int = 32,
                    kernel_size: int = 3,
                    padding: int = 1,
-                   use_batch_norm: bool = False) -> Tuple[List[nn.Module], int]:
+                   use_batch_norm: bool = False,
+                   bottleneck_dim: int = 0) -> Tuple[List[nn.Module], int]:
     """
     Return a list of `blocks` which constitute the whole network,
     Each block is a sequence of several layers (Conv, BatchNorm, ReLU, MaxPool2d and Dropout).
@@ -129,9 +130,15 @@ def get_vgg_blocks(config: List[Union[int, str]],
             out_channels = config[i]
 
             block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding)]
+
             if use_batch_norm:
                 block_layers.append(nn.BatchNorm2d(out_channels))
+
             block_layers.append(nn.ReLU())
+
+            if bottleneck_dim > 0:
+                block_layers.append(nn.Conv2d(out_channels, bottleneck_dim, kernel_size=1))
+                out_channels = bottleneck_dim
             
             blocks.append(nn.Sequential(*block_layers))
             
