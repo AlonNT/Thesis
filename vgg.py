@@ -9,6 +9,38 @@ from utils import get_mlp, get_cnn
 # Configurations for the VGG models family.
 # A number indicates number of channels in a convolution block, and M denotes a MaxPool layer.
 configs = {
+    'VGGc16d1': [16],
+    'VGGc32d1': [32],
+    'VGGc64d1': [64],
+    'VGGc128d1': [128],
+    'VGGc256d1': [256],
+    'VGGc512d1': [512],
+    'VGGc1024d1': [1024],
+
+    'VGGc16d2': [16, 16],
+    'VGGc32d2': [32, 32],
+    'VGGc64d2': [64, 64],
+    'VGGc128d2': [128, 128],
+    'VGGc256d2': [256, 256],
+    'VGGc512d2': [512, 512],
+    'VGGc1024d2': [1024, 1024],
+
+    'VGGc16d3': [16, 16, 16],
+    'VGGc32d3': [32, 32, 32],
+    'VGGc64d3': [64, 64, 64],
+    'VGGc128d3': [128, 128, 128],
+    'VGGc256d3': [256, 256, 256],
+    'VGGc512d3': [512, 512, 512],
+    'VGGc1024d3': [1024, 1024, 1024],
+
+    'VGGc16d4': [16, 16, 16, 16],
+    'VGGc32d4': [32, 32, 32, 32],
+    'VGGc64d4': [64, 64, 64, 64],
+    'VGGc128d4': [128, 128, 128, 128],
+    'VGGc256d4': [256, 256, 256, 256],
+    'VGGc512d4': [512, 512, 512, 512],
+    'VGGc1024d4': [1024, 1024, 1024, 1024],
+
     'VGGs': [8, 'M', 16, 'M', 32, 'M'],  # 's' for shallow.
     'VGGsw': [64, 'M', 128, 'M', 256, 'M'],  # 'w' for wide.
     'VGGsxw': [128, 'M', 256, 'M', 512, 'M'],  # 'x' for extra.
@@ -70,6 +102,44 @@ def get_ssl_aux_net(channels: int,
     layers.append(nn.Conv2d(in_channels, out_channels=3, kernel_size=1))
 
     return nn.Sequential(*layers)
+
+
+def get_vgg_blocks(config: List[Union[int, str]],
+                   in_channels: int = 3,
+                   spatial_size: int = 32,
+                   kernel_size: int = 3,
+                   padding: int = 1,
+                   use_batch_norm: bool = False) -> Tuple[List[nn.Module], int]:
+    """
+    Return a list of `blocks` which constitute the whole network,
+    Each block is a sequence of several layers (Conv, BatchNorm, ReLU, MaxPool2d and Dropout).
+
+    :param config: A list of integers / 'M' describing the architecture (see examples in the top of the file).
+    :param mlp_n_hidden_layers: Number of hidden layers in the final MLP sub-network (predicting the scores).
+    :param mlp_hidden_dim: The dimension of each hidden layer in the final MLP sub-network.
+    :param dropout_prob: When positive, add dropout after each non-linearity.
+    :return: The blocks and the dimension of the last layer (will be useful when feeding into a liner layer later).
+    """
+    blocks: List[nn.Module] = list()
+
+    for i in range(len(config)):
+        if config[i] == 'M':
+            blocks.append(nn.Sequential(nn.MaxPool2d(kernel_size=2, stride=2)))
+        else:
+            out_channels = config[i]
+
+            block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding)]
+            if use_batch_norm:
+                block_layers.append(nn.BatchNorm2d(out_channels))
+            block_layers.append(nn.ReLU())
+            
+            blocks.append(nn.Sequential(*block_layers))
+            
+            spatial_size = spatial_size + 2*padding - kernel_size + 1
+            in_channels = out_channels  # The input channels of the next convolution layer.
+
+    n_features = out_channels * (spatial_size ** 2)
+    return blocks, n_features
 
 
 def get_blocks(config: List[Union[int, str]],

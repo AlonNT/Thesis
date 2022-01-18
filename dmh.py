@@ -32,10 +32,10 @@ from consts import N_CLASSES
 from patches import sample_random_patches
 from schemas.data import DataArgs
 from schemas.dmh import Args, DMHArgs
-from utils import (configure_logger, get_args, power_minus_1, get_mlp, get_dataloaders, calc_whitening_from_dataloader,
+from utils import (configure_logger, get_args, get_model_device, power_minus_1, get_mlp, get_dataloaders, calc_whitening_from_dataloader,
                    whiten_data, normalize_data, get_covariance_matrix, get_whitening_matrix_from_covariance_matrix,
                    get_args_from_flattened_dict, get_model_output_shape, get_random_initialized_conv_kernel_and_bias)
-from vgg import get_vgg_model_kernel_size, get_blocks, configs
+from vgg import get_vgg_model_kernel_size, get_vgg_blocks, configs
 
 
 class KNearestPatchesEmbedding(nn.Module):
@@ -789,15 +789,18 @@ class LitVGG(pl.LightningModule):
 
     def __init__(self, args: Args):
         super(LitVGG, self).__init__()
-        layers, _, _, features_output_dimension = get_blocks(configs[args.arch.model_name],
-                                                             args.arch.dropout_prob,
-                                                             args.arch.padding_mode)
+        layers, n_features = get_vgg_blocks(configs[args.arch.model_name],
+                                            args.data.n_channels,
+                                            args.data.spatial_size,
+                                            args.dmh.patch_size,
+                                            args.dmh.padding,
+                                            args.dmh.use_batch_norm)
         self.features = nn.Sequential(*layers)
-        self.mlp = get_mlp(input_dim=features_output_dimension,
+        self.mlp = get_mlp(input_dim=n_features,
                            output_dim=N_CLASSES,
                            n_hidden_layers=args.arch.final_mlp_n_hidden_layers,
                            hidden_dim=args.arch.final_mlp_hidden_dim,
-                           use_batch_norm=True,
+                           use_batch_norm=args.dmh.use_batch_norm,
                            organize_as_blocks=True)
         self.loss = torch.nn.CrossEntropyLoss()
         self.args: Args = args
@@ -805,8 +808,6 @@ class LitVGG(pl.LightningModule):
 
         self.num_blocks = len(self.features) + len(self.mlp)
 
-        # Apparently the Metrics must be an attribute of the LightningModule, and not inside a dictionary.
-        # This is why we have to set them separately here and then the dictionary will map to the attributes.
         self.train_accuracy = tm.Accuracy()
         self.validate_accuracy = tm.Accuracy()
         self.validate_no_aug_accuracy = tm.Accuracy()
@@ -818,8 +819,8 @@ class LitVGG(pl.LightningModule):
 
     def forward(self, x: torch.Tensor):
         features = self.features(x)
-        outputs = self.mlp(features)
-        return outputs
+        logits = self.mlp(features.flatten(start_dim=1))
+        return logits
 
     def shared_step(self, batch, stage: RunningStage, dataloader_idx: int = 0):
         inputs, labels = batch
@@ -1017,13 +1018,7 @@ class IntrinsicDimensionCalculator(Callback):
         Since the intrinsic-dimension calculation takes logarithm of the distances,
         if they are zero (or very small) it can cause numerical issues (NaN).
         """
-        self.n: int = args.n_patches
-        self.k1: int = args.k1
-        self.k2: int = args.k2
-        self.k3: int = 8 * self.k2  # This will be used to plot a graph of the intrinsic-dimension per k (until k3)
-        self.estimate_dim_on_patches: bool = args.estimate_dim_on_patches
-        self.estimate_dim_on_images: bool = args.estimate_dim_on_images
-        self.shuffle_before_estimate: bool = args.shuffle_before_estimate
+        self.args: DMHArgs = args
         self.minimal_distance = minimal_distance
 
         # Since the intrinsic-dimension calculation takes logarithm of the distances,
@@ -1031,8 +1026,8 @@ class IntrinsicDimensionCalculator(Callback):
         # The solution is to sample a bit more patches than requested,
         # and later we remove patches that are really close to one another,
         # and we want our final number of patches to be the desired one.
-        ratio_to_extend_n = 1.5 if self.estimate_dim_on_patches else 1.01  # Lower probability to get similar images.
-        self.n_extended = math.ceil(self.n * ratio_to_extend_n)
+        ratio_to_extend_n = 1.5 if self.args.estimate_dim_on_patches else 1.01  # Lower probability to get similar images.
+        self.n_clusters_extended = math.ceil(self.args.n_clusters * ratio_to_extend_n)
 
     @staticmethod
     def log_dim_per_k_graph(metrics, block_name, estimates):
@@ -1103,7 +1098,7 @@ class IntrinsicDimensionCalculator(Callback):
         metrics[f'{block_name}-reconstruction_errors'] = px.line(pd.DataFrame(reconstruction_errors), **fig_args)
 
     def log_final_estimate(self, metrics, estimates, extrinsic_dimension, block_name):
-        estimate_mean_over_k1_to_k2 = torch.mean(estimates[self.k1:self.k2 + 1])
+        estimate_mean_over_k1_to_k2 = torch.mean(estimates[self.args.k1:self.args.k2 + 1])
         intrinsic_dimension = estimate_mean_over_k1_to_k2.item()
         dimensions_ratio = intrinsic_dimension / extrinsic_dimension
 
@@ -1122,13 +1117,13 @@ class IntrinsicDimensionCalculator(Callback):
         metrics = dict()
         for i in range(pl_module.num_blocks):
             block_name = f'block_{i}'
-            if self.estimate_dim_on_images or (i >= len(pl_module.kernel_sizes)):
+            if self.args.estimate_dim_on_images or (i >= len(pl_module.kernel_sizes)):
                 patch_size = -1
             else:
                 patch_size = pl_module.kernel_sizes[i]
             patches = self.get_patches_not_too_close_to_one_another(dataloader, patch_size, pl_module.get_sub_model(i))
-
-            estimates_matrix = get_estimates_matrix(patches, self.k3 if log_graphs else self.k2)
+            
+            estimates_matrix = get_estimates_matrix(patches, 8*self.args.k2 if log_graphs else self.args.k2)
             estimates = torch.mean(estimates_matrix, dim=0)
 
             if log_graphs:
@@ -1145,15 +1140,15 @@ class IntrinsicDimensionCalculator(Callback):
         patches_to_keep_mask = self.get_patches_to_keep_mask(patches)
         patches = patches[patches_to_keep_mask]
 
-        patches = patches[:self.n]  # This is done to get exactly (or up-to) n like the user requested
+        patches = patches[:self.args.n_clusters]  # This is done to get exactly (or up-to) n like the user requested
 
         return patches
 
     def get_flattened_patches(self, dataloader, kernel_size, sub_model, device=None):
-        patches = sample_random_patches(dataloader, self.n_extended, kernel_size, sub_model)
+        patches = sample_random_patches(dataloader, self.n_clusters_extended, kernel_size, sub_model)
         patches = patches.reshape(patches.shape[0], -1)  # a.k.a. flatten in NumPy
 
-        if self.shuffle_before_estimate:
+        if self.args.shuffle_before_estimate:
             patches = np.random.default_rng().permuted(patches, axis=1, out=patches)
 
         patches = patches.astype(np.float64)  # Increase accuracy of calculations.
@@ -1207,6 +1202,93 @@ class IntrinsicDimensionCalculator(Callback):
         self.calc_int_dim_per_layer(trainer, pl_module, log_graphs=True)
 
 
+
+class LinearRegionsCalculator(Callback):
+
+    def __init__(self, args: DMHArgs):
+        """
+        Since the intrinsic-dimension calculation takes logarithm of the distances,
+        if they are zero (or very small) it can cause numerical issues (NaN).
+        """
+        self.args: DMHArgs = args
+
+    @torch.no_grad()
+    def calc_activations(self, patches: np.ndarray, block: nn.Sequential):
+        patches_tensor = torch.from_numpy(patches).to(get_model_device(block))
+        patches_activations = block(patches_tensor).squeeze(dim=-1).squeeze(dim=-1)
+        return patches_activations
+
+    @torch.no_grad()
+    def log_linear_regions_respect(self, metrics, pl_module: LitVGG, dataloader, block_index):
+        """
+        TODO Might be interesting to perform kmeans to decreasing number of centroids 
+             and plot knee curve and linear-regions respectfullness.
+        
+        TODO Can also iterate the whole dataset's patches and count the actual good/bad patches
+        """
+        block = pl_module.features[block_index]
+        patches = sample_random_patches(dataloader, self.args.n_patches, 
+                                        pl_module.kernel_sizes[block_index], 
+                                        pl_module.get_sub_model(block_index),
+                                        verbose=False)
+        patches_flat = patches.reshape(patches.shape[0], -1)
+
+        kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=self.args.n_clusters)
+        kmeans.train(patches_flat)
+        centroids = kmeans.centroids.reshape(-1, *patches.shape[1:])
+        _, indices = kmeans.assign(patches_flat)
+        random_indices = np.random.default_rng().choice(self.args.n_clusters, size=self.args.n_patches)
+        
+        patches_activations = self.calc_activations(patches, block)
+        centroids_activations = self.calc_activations(centroids, block)
+        centroids_of_patches_activations = centroids_activations[indices]
+        random_centroids_activations = centroids_activations[random_indices]
+
+        patches_active_neurons = (patches_activations > 0)
+        centroids_active_neurons = (centroids_of_patches_activations > 0)
+        random_centroids_active_neurons = (random_centroids_activations > 0)
+        different_activations = (patches_active_neurons != centroids_active_neurons)
+        different_activations_to_random_centroids = (patches_active_neurons != random_centroids_active_neurons)
+        fraction_different_activations = torch.mean(different_activations.float(), dim=1)
+        fraction_different_activations_random = torch.mean(different_activations_to_random_centroids.float(), dim=1)
+        
+        # This is the number of patches which are in a different linear region than their matched centroid
+        n_bad_patches = torch.count_nonzero(fraction_different_activations)
+        n_good_patches = fraction_different_activations.numel() - n_bad_patches
+        n_bad_patches_random = torch.count_nonzero(fraction_different_activations_random)
+        n_good_patches_random = fraction_different_activations_random.numel() - n_bad_patches_random
+        
+        fraction_good_patches = n_good_patches / self.args.n_patches
+        sym_diff_mean = torch.mean(fraction_different_activations)
+        sym_diff_median = torch.median(fraction_different_activations)
+        fraction_good_patches_random = n_good_patches_random / self.args.n_patches
+        sym_diff_mean_random = torch.mean(fraction_different_activations_random)
+        sym_diff_median_random = torch.median(fraction_different_activations_random)
+        
+        metrics[f'block_{block_index}_fraction_good_patches'] = fraction_good_patches.item()
+        metrics[f'block_{block_index}_sym_diff_mean'] = sym_diff_mean.item()
+        metrics[f'block_{block_index}_sym_diff_median'] = sym_diff_median.item()
+
+        metrics[f'block_{block_index}_fraction_good_patches_random_centroids'] = fraction_good_patches_random.item()
+        metrics[f'block_{block_index}_sym_diff_mean_random_centroids'] = sym_diff_mean_random.item()
+        metrics[f'block_{block_index}_sym_diff_median_random_centroids'] = sym_diff_median_random.item()
+        
+
+    def log_linear_regions_respect_per_layer(self, trainer, pl_module: LitVGG, dataloader):
+        """
+        Given a VGG model, go over each block in it and calculates the intrinsic dimension of its input data.
+        """
+        metrics = dict()
+        for i in range(len(pl_module.features)):
+            self.log_linear_regions_respect(metrics, pl_module, dataloader, block_index=i)
+        trainer.logger.experiment.log(metrics, step=trainer.global_step, commit=True)  # TODO maybe pl_module.log()
+        # pl_module.log_dict(metrics)  # TODO maybe pl_module.log()
+
+    def on_validation_epoch_end(self, trainer, pl_module: LitVGG):
+        self.log_linear_regions_respect_per_layer(trainer, pl_module,
+                                                  dataloader=trainer.request_dataloader(RunningStage.VALIDATING)[1])
+
+
 def initialize_model(args: Args, wandb_logger: WandbLogger):
     if args.arch.model_name.startswith('VGG'):
         model_class = LitVGG
@@ -1240,6 +1322,8 @@ def initialize_trainer(args: Args, wandb_logger: WandbLogger):
         trainer_kwargs.update({'log_every_n_steps': 1})
     if args.dmh.estimate_intrinsic_dimension:
         callbacks.append(IntrinsicDimensionCalculator(args.dmh))
+    if args.dmh.linear_regions_calculator:
+        callbacks.append(LinearRegionsCalculator(args.dmh))
     trainer = pl.Trainer(logger=wandb_logger, callbacks=callbacks, max_epochs=args.opt.epochs,
                          **trainer_kwargs)
     return trainer
@@ -1408,7 +1492,6 @@ def main():
     args = get_args(args_class=Args)
     datamodule = initialize_datamodule(args.data, args.opt.batch_size)
     wandb_logger = initialize_wandb_logger(args)
-    model = initialize_model(args, wandb_logger)
     configure_logger(args.env.path, print_sink=sys.stdout, level='DEBUG')  # if args.env.debug else 'INFO')
 
     if args.dmh.train_locally_linear_network:
@@ -1416,15 +1499,21 @@ def main():
         model = LocallyLinearNetwork(args, pre_model)
         if not args.dmh.replace_embedding_with_regular_conv_relu:
             model.to(args.env.device)
-            model.calculate_embedding_from_data(datamodule.train_dataloader_clean())
+            if args.dmh.sample_patches_from_original_zero_one_values:
+                dataloader = datamodule.train_dataloader_clean()
+            else:
+                dataloader = datamodule.train_dataloader_no_aug()
+            model.calculate_embedding_from_data(dataloader)
             model.cpu()
         wandb_logger.watch(model, log='all')
         trainer = initialize_trainer(args, wandb_logger)
         trainer.fit(model, datamodule=datamodule)
-    elif not args.arch.use_pretrained:
-        wandb_logger.watch(model, log='all')
-        trainer = initialize_trainer(args, wandb_logger)
-        trainer.fit(model, datamodule=datamodule)
+    else:
+        model = initialize_model(args, wandb_logger)
+        if not args.arch.use_pretrained:
+            wandb_logger.watch(model, log='all')
+            trainer = initialize_trainer(args, wandb_logger)
+            trainer.fit(model, datamodule=datamodule)
 
     if args.dmh.imitate_with_knn:
         # TODO do we want to set-up knn-imitator on data without augmentations?

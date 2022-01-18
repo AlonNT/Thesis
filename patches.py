@@ -274,7 +274,8 @@ def sample_random_patches(data_loader,
                           existing_model: Optional[nn.Module] = None,
                           visualize: bool = False,
                           random_uniform_patches: bool = False,
-                          random_gaussian_patches: bool = False):
+                          random_gaussian_patches: bool = False,
+                          verbose: bool = True):
     """
     This function sample random patches from the data, given by the data-loader object.
     It samples random indices for the patches and then iterates over the dataset to extract them.
@@ -325,8 +326,10 @@ def sample_random_patches(data_loader,
         return np.random.default_rng().multivariate_normal(
             mean=np.zeros(patch_dim), cov=np.eye(patch_dim), size=n_patches).astype(np.float32).reshape(patches.shape)
 
-    for batch_index, (inputs, _) in tqdm(enumerate(data_loader), total=len(data_loader),
-                                         desc='Sampling patches from the dataset'):
+    iterator = enumerate(data_loader)
+    if verbose:
+        iterator = tqdm(iterator, total=len(data_loader), desc='Sampling patches from the dataset')
+    for batch_index, (inputs, _) in iterator:
         if batch_index not in batches_indices:
             continue
 

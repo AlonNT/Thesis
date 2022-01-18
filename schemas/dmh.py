@@ -29,6 +29,8 @@ class DMHArgs(ImmutableArgs):
     estimate_dim_on_patches: bool = True
     estimate_dim_on_images: bool = False
 
+    linear_regions_calculator: bool = False
+
     #: The minimal and maximal values of k to average the intrinsic-dimension estimate and get $\\hat(m)$ (see paper)
     k1: PositiveInt = 10
     k2: PositiveInt = 20
@@ -101,8 +103,11 @@ class DMHArgs(ImmutableArgs):
     #: The regularization factor (a.k.a. lambda) of the whitening matrix.
     whitening_regularization_factor: NonNegativeFloat = 0.001
 
-    #: The regularization factor (a.k.a. lambda) of the whitening matrix.
+    #: Whether rto normalize the patches to unit vectors (divide by its l2 norm). 
+    #: This cause the metric between patches to be minimal-angle instead of euclidean-distance.
     normalize_patches_to_unit_vectors: bool = False
+
+    sample_patches_from_original_zero_one_values: bool = True
 
     #: Whether to use avg-pool after the embedding.
     use_avg_pool: bool = True
