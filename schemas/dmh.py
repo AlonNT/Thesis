@@ -225,3 +225,23 @@ class Args(MyBaseModel):
     env = EnvironmentArgs()
     data = DataArgs()
     dmh = DMHArgs()
+
+    def extract_single_depth_args(self, i: int):
+        assert i < self.dmh.depth, f'i is {i} and self.dmh.depth is {self.depth}, i should be smaller.'
+        new_self = deepcopy(self)
+
+        fields = Args.__fields__
+        categories = list(fields.keys())
+        for category in categories:
+            new_category = getattr(new_self, category)
+            old_category = getattr(self, category)
+
+            category_fields = fields[category].default.__fields__
+            for arg_name, arg_field in category_fields.items():
+                if (get_origin(arg_field.type_) is Union) and (isinstance(getattr(old_category, arg_name), list)):
+                    setattr(new_category, arg_name, getattr(old_category, arg_name)[i])
+            
+            setattr(new_self, category, new_category)
+        
+        new_self.dmh.depth = 1  # To make the validators of the pydantic class not crash.
+        return new_self

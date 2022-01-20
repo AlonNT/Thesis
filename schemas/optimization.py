@@ -1,16 +1,16 @@
 from pydantic import validator
 from pydantic.types import PositiveInt
-from typing import List
+from typing import List, Union
 from schemas.utils import ImmutableArgs, ProperFraction, NonNegativeFloat
 
 
 class OptimizationArgs(ImmutableArgs):
 
     #: Number of epochs to train.
-    epochs: PositiveInt = 100
+    epochs: Union[PositiveInt, List[PositiveInt]] = 200
 
     #: Mini batch size to use in each training-step.
-    batch_size: PositiveInt = 64
+    batch_size: Union[PositiveInt, List[PositiveInt]] = 64
 
     #: Momentum to use in SGD optimizer.
     momentum: ProperFraction = 0.9
@@ -19,10 +19,10 @@ class OptimizationArgs(ImmutableArgs):
     weight_decay: NonNegativeFloat = 0
 
     # The initial learning-rate which might later be decayed.
-    learning_rate: ProperFraction = 0.003
+    learning_rate: Union[ProperFraction, List[ProperFraction]] = 0.003
 
     #: Decay the learning-rate at these steps by a factor of `learning_rate_decay_gamma`.
-    learning_rate_decay_steps: List[PositiveInt] = [50, 90]
+    learning_rate_decay_steps: List[PositiveInt] = [100, 150]
 
     #: The factor gamma to multiply the learning-rate at the decay steps.
     learning_rate_decay_gamma: ProperFraction = 0.1

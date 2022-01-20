@@ -462,13 +462,6 @@ class LocallyLinearNetwork(pl.LightningModule):
             features *= self.conv(x)
         if args.c > 1:
             features = features.view(features.shape[0], args.n_clusters, args.c, *features.shape[2:])
-            # if args.gather:
-            #     # TODO try to  it reshape from [64, 1024, 8, 28, 28] to [64, 1024, 8, 28, 28]
-            #     features_2d = torch.transpose(features, dim0=2, dim1=4).reshape(-1, args.c)
-            #     features_nonzero_rows = features_2d[torch.logical_not(torch.all(features_2d == 0, dim=1))].reshape(64,4,28,28,8).transpose(dim0=2, dim1=4)
-            #     features = features 
-            # else:
-            #     features = torch.sum(features, dim=1) / args.k
             features = torch.sum(features, dim=1) / args.k
         if args.use_avg_pool:
             features = self.avg_pool(features)
@@ -611,7 +604,11 @@ class LocallyLinearNetwork(pl.LightningModule):
 
     def visualize_patches(self, n: int = 3):
         if self.bottle_neck is not None:
-            bottleneck_weight = self.bottle_neck.weight.data.squeeze(dim=3).squeeze(dim=2)
+            bottleneck_weight = self.bottle_neck.weight.data
+            if self.args.dmh.bottle_neck_kernel_size > 1:
+                bottleneck_weight = bottleneck_weight.mean(dim=(2,3))
+            else:
+                bottleneck_weight = bottleneck_weight.squeeze(dim=3).squeeze(dim=2)
             norms = torch.linalg.norm(bottleneck_weight, ord=2, dim=0).cpu().numpy()
         else:
             norms = np.random.default_rng().uniform(size=self.args.dmh.n_clusters).astype(np.float32)
@@ -705,16 +702,16 @@ class DeepLocallyLinearNetwork(pl.LightningModule):
         
         pre_model = nn.Sequential(*self.layers)
 
-        args = copy.deepcopy(self.args)
-        args.dmh = self.args.dmh.extract_single_depth_args(i=len(self.layers))
+        args = self.args.extract_single_depth_args(i=len(self.layers))
         new_layer = LocallyLinearNetwork(args, input_shape=get_model_output_shape(pre_model))
 
-        original_device = get_model_device(pre_model)
-        pre_model.to(self.args.env.device)
-        new_layer.calculate_embedding_from_data(self.dataloader, pre_model)
-        pre_model.to(original_device)
+        if not args.dmh.replace_embedding_with_regular_conv_relu:
+            original_device = get_model_device(pre_model)
+            pre_model.to(self.args.env.device)
+            new_layer.calculate_embedding_from_data(self.dataloader, pre_model)
+            pre_model.to(original_device)
 
-        new_layer.embedding_mode()  # we'll run a linear layer explicitly in forward()
+        new_layer.embedding_mode()  # we'll run the linear layer explicitly in forward()
         
         # Remove these from the layer since we are not planning to train them separately.
         # (The loss and accuracy will be those of the DeepLocallyLinearNetwork).
@@ -761,13 +758,14 @@ class DeepLocallyLinearNetwork(pl.LightningModule):
         self.shared_step(batch, RunningStage.VALIDATING, dataloader_idx)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.SGD(self.layers[-1].parameters(),  # We only train the last layer.
-                                    self.args.opt.learning_rate,
-                                    self.args.opt.momentum,
-                                    weight_decay=self.args.opt.weight_decay)
+        args = self.layers[-1].args.opt
+        optimizer = torch.optim.SGD(self.layers[-1].parameters(),
+                                    args.learning_rate,
+                                    args.momentum,
+                                    weight_decay=args.weight_decay)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                         milestones=self.args.opt.learning_rate_decay_steps,
-                                                         gamma=self.args.opt.learning_rate_decay_gamma)
+                                                         milestones=args.learning_rate_decay_steps,
+                                                         gamma=args.learning_rate_decay_gamma)
         return {'optimizer': optimizer, 'lr_scheduler': scheduler}
 
 class ShufflePixels:

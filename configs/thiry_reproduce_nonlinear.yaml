@@ -1,0 +1,27 @@
+opt:
+  epochs: 175
+  batch_size: 128
+  learning_rate: 0.003
+  learning_rate_decay_gamma: 0.1
+  learning_rate_decay_steps: [100, 150]
+dmh:
+  train_locally_linear_network: True
+  patch_size: 6
+  n_patches: 2048
+  n_clusters: 2048
+  k: 820  # 40% of the dictionary-size
+
+  use_conv: False
+  use_avg_pool: True
+  pool_size: 3
+  pool_stride: 2
+
+  # TODO did they run this variant with adaptive-average-pooling?
+  # use_adaptive_avg_pool: True  
+  # adaptive_pool_output_size: 6
+
+  use_batch_norm: True
+  use_bottle_neck: True
+  bottle_neck_dimension: 2048
+  bottle_neck_kernel_size: 3
+  use_relu_after_bottleneck: True
