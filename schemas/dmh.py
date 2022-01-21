@@ -55,7 +55,7 @@ class DMHArgs(ImmutableArgs):
     random_gaussian_patches: Union[bool, List[bool]] = False
 
     #: The k-th nearest-neighbor will be used for the k-NN imitator, or in the locally linear model.
-    k: Union[PositiveInt, List[PositiveInt]] = 64
+    k: Union[PositiveInt, List[PositiveInt]] = 256
 
     #: If it's true, when calculating k-nearest-neighbors there will be ones in the indices of the neighbors
     #: 1, 2, ..., k. If it's false, there will be a single one in the index of the k-th nearest-neighbor.
