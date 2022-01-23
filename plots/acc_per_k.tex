@@ -1,0 +1,39 @@
+% This file was created with tikzplotlib v0.9.17.
+\begin{tikzpicture}
+
+\definecolor{color0}{rgb}{0.886274509803922,0.290196078431373,0.2}
+
+\begin{axis}[
+axis background/.style={fill=white!89.8039215686275!black},
+axis line style={white},
+tick align=outside,
+tick pos=left,
+x grid style={white},
+xlabel=\textcolor{white!33.3333333333333!black}{k},
+xmajorgrids,
+xmin=0.55, xmax=10.45,
+xtick style={color=white!33.3333333333333!black},
+xtick={1,2,3,4,5,6,7,8,9,10},
+xticklabels={1,2,4,8,16,32,64,128,256,512},
+y grid style={white},
+ylabel=\textcolor{white!33.3333333333333!black}{accuracy},
+ymajorgrids,
+ymin=74.4685, ymax=81.1015,
+ytick style={color=white!33.3333333333333!black}
+]
+\addplot [semithick, color0, mark=*, mark size=3, mark options={solid}]
+table {%
+1 74.77
+2 76.8
+3 77.75
+4 78.8
+5 79.88
+6 80.34
+7 80.36
+8 80.76
+9 80.8
+10 79.75
+};
+\end{axis}
+
+\end{tikzpicture}

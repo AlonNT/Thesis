@@ -5,3 +5,4 @@ data/
 experiments/
 wandb/
 artifacts/
+plots/.ipynb_checkpoints/
