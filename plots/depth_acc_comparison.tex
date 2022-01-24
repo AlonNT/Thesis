@@ -1,0 +1,60 @@
+% This file was created with tikzplotlib v0.9.17.
+\begin{tikzpicture}
+
+\definecolor{color0}{rgb}{0.886274509803922,0.290196078431373,0.2}
+\definecolor{color1}{rgb}{0.203921568627451,0.541176470588235,0.741176470588235}
+\definecolor{color2}{rgb}{0.596078431372549,0.556862745098039,0.835294117647059}
+
+\begin{axis}[
+axis background/.style={fill=white!89.8039215686275!black},
+axis line style={white},
+legend cell align={left},
+legend style={
+  fill opacity=0.8,
+  draw opacity=1,
+  text opacity=1,
+  at={(0.97,0.03)},
+  anchor=south east,
+  draw=white!80!black,
+  fill=white!89.8039215686275!black
+},
+tick align=outside,
+tick pos=left,
+x grid style={white},
+xlabel=\textcolor{white!33.3333333333333!black}{depth},
+xmajorgrids,
+xmin=0.85, xmax=4.15,
+xtick style={color=white!33.3333333333333!black},
+y grid style={white},
+ylabel=\textcolor{white!33.3333333333333!black}{accuracy},
+ymajorgrids,
+ymin=79.5315, ymax=90.4985,
+ytick style={color=white!33.3333333333333!black}
+]
+\addplot [semithick, color0, mark=asterisk, mark size=3, mark options={solid}]
+table {%
+1 81.47
+2 82.62
+3 82.93
+4 83.25
+};
+\addlegendentry{Phi_full}
+\addplot [semithick, color1, mark=*, mark size=3, mark options={solid}]
+table {%
+1 80.03
+2 87.87
+3 90
+4 89.59
+};
+\addlegendentry{CNN}
+\addplot [semithick, color2, mark=triangle*, mark size=3, mark options={solid}]
+table {%
+1 80.45
+2 85.36
+3 85.23
+4 85.3
+};
+\addlegendentry{CNN layer-wise}
+\end{axis}
+
+\end{tikzpicture}
