@@ -16,6 +16,7 @@ configs = {
     'VGGc256d1': [256],
     'VGGc512d1': [512],
     'VGGc1024d1': [1024],
+    'VGGc1024d1A': [1024, 'A'],
 
     'VGGc16d2': [16, 16],
     'VGGc32d2': [32, 32],
@@ -24,6 +25,7 @@ configs = {
     'VGGc256d2': [256, 256],
     'VGGc512d2': [512, 512],
     'VGGc1024d2': [1024, 1024],
+    'VGGc1024d2A': [1024, 'A', 1024],
 
     'VGGc16d3': [16, 16, 16],
     'VGGc32d3': [32, 32, 32],
@@ -32,6 +34,7 @@ configs = {
     'VGGc256d3': [256, 256, 256],
     'VGGc512d3': [512, 512, 512],
     'VGGc1024d3': [1024, 1024, 1024],
+    'VGGc1024d3A': [1024, 'A', 1024, 1024],
 
     'VGGc16d4': [16, 16, 16, 16],
     'VGGc32d4': [32, 32, 32, 32],
@@ -40,6 +43,7 @@ configs = {
     'VGGc256d4': [256, 256, 256, 256],
     'VGGc512d4': [512, 512, 512, 512],
     'VGGc1024d4': [1024, 1024, 1024, 1024],
+    'VGGc1024d4A': [1024, 'A', 1024, 1024, 1024],
 
     'VGGs': [8, 'M', 16, 'M', 32, 'M'],  # 's' for shallow.
     'VGGsw': [64, 'M', 128, 'M', 256, 'M'],  # 'w' for wide.
@@ -104,13 +108,24 @@ def get_ssl_aux_net(channels: int,
     return nn.Sequential(*layers)
 
 
+def get_list_of_arguments_for_config(config: List[Union[int, str]], arg):
+    if isinstance(arg, list):
+        non_conv_indices = [i for i, l in enumerate(config) if isinstance(l, str)]
+        for non_conv_index in non_conv_indices:
+            arg.insert(non_conv_index, None)
+    else:
+        arg = [(arg if isinstance(l, int) else None) for l in range(len(config))]
+    
+    return arg
+
+
 def get_vgg_blocks(config: List[Union[int, str]],
                    in_channels: int = 3,
                    spatial_size: int = 32,
-                   kernel_size: int = 3,
-                   padding: int = 1,
-                   use_batch_norm: bool = False,
-                   bottleneck_dim: int = 0) -> Tuple[List[nn.Module], int]:
+                   kernel_size: Union[int, List[int]] = 3,
+                   padding: Union[int, List[int]] = 1,
+                   use_batch_norm: Union[bool, List[bool]] = False,
+                   bottleneck_dim: Union[int, List[int]] = 0) -> Tuple[List[nn.Module], int]:
     """
     Return a list of `blocks` which constitute the whole network,
     Each block is a sequence of several layers (Conv, BatchNorm, ReLU, MaxPool2d and Dropout).
@@ -122,30 +137,41 @@ def get_vgg_blocks(config: List[Union[int, str]],
     :return: The blocks and the dimension of the last layer (will be useful when feeding into a liner layer later).
     """
     blocks: List[nn.Module] = list()
+    
+    kernel_size = get_list_of_arguments_for_config(config, kernel_size)
+    padding = get_list_of_arguments_for_config(config, padding)
+    use_batch_norm = get_list_of_arguments_for_config(config, use_batch_norm)
+    bottleneck_dim = get_list_of_arguments_for_config(config, bottleneck_dim)
 
     for i in range(len(config)):
         if config[i] == 'M':
             blocks.append(nn.Sequential(nn.MaxPool2d(kernel_size=2, stride=2)))
+        elif config[i] == 'A':
+            continue  # The average-pooling was already added in the else section...
         else:
             out_channels = config[i]
 
-            block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding)]
+            block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size[i], padding=padding[i]),
+                            nn.ReLU()]
 
-            if use_batch_norm:
+            if (i+1 < len(config)) and (config[i+1] == 'A'):
+                block_layers.append(nn.AvgPool2d(kernel_size=2, stride=2))
+            
+            if use_batch_norm[i]:
                 block_layers.append(nn.BatchNorm2d(out_channels))
 
-            block_layers.append(nn.ReLU())
-
-            if bottleneck_dim > 0:
-                block_layers.append(nn.Conv2d(out_channels, bottleneck_dim, kernel_size=1))
-                out_channels = bottleneck_dim
+            if bottleneck_dim[i] > 0:
+                block_layers.append(nn.Conv2d(out_channels, bottleneck_dim[i], kernel_size=1))
+                out_channels = bottleneck_dim[i]
             
             blocks.append(nn.Sequential(*block_layers))
             
-            spatial_size = spatial_size + 2*padding - kernel_size + 1
+            spatial_size = spatial_size + 2*padding[i] - kernel_size[i] + 1
+            if (i+1 < len(config)) and (config[i+1] == 'A'):
+                spatial_size /= 2
             in_channels = out_channels  # The input channels of the next convolution layer.
 
-    n_features = out_channels * (spatial_size ** 2)
+    n_features = int(out_channels * (spatial_size ** 2))
     return blocks, n_features
 
 
