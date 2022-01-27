@@ -14,14 +14,17 @@ from math import ceil
 from loguru import logger
 from scipy.stats import special_ortho_group
 from sklearn.decomposition import PCA
+from pathlib import Path
 
 from patches import sample_random_patches
 from dmh import (DataModule, 
                  get_estimates_matrix, 
                  get_patches_not_too_close_to_one_another, 
-                 log_final_estimate)
+                 log_final_estimate,
+                 LocallyLinearNetwork)
 from schemas.intrinsic_dimension_playground import Args
-from utils import get_args, configure_logger, log_args, calc_whitening_from_dataloader
+from schemas.dmh import Args as ArgsForDMH
+from utils import get_args, configure_logger, log_args, calc_whitening_from_dataloader, get_args_from_flattened_dict
 
 
 def get_m_dimensional_gaussian_in_n_dimensional_space(m: int, n: int, n_points: int, noise_std: float = 0):
@@ -309,21 +312,82 @@ def cifar_elbow_main(args: Args):
     wandb.log(figures, step=0)
  
 
+def linear_regions_main(args: Args, wandb_run):
+
+    artifact = wandb_run.use_artifact(args.int_dim.model_path, type='model')
+    artifact_dir = artifact.download()
+    checkpoint_path = str(Path(artifact_dir) / "model.ckpt")
+    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+    hparams = checkpoint['hyper_parameters']
+
+    model_args: ArgsForDMH = get_args_from_flattened_dict(
+        ArgsForDMH, hparams,
+        excluded_categories=['env']  # Ignore environment args, such as GPU (which will raise error if on CPU).
+    )
+    model_args.env = args.env
+    model = LocallyLinearNetwork.load_from_checkpoint(checkpoint_path, map_location=torch.device('cpu'), args=model_args)
+    conv_block = model.embedding
+
+    datamodule = DataModule(args.data, batch_size=128)
+    datamodule.prepare_data()
+    datamodule.setup(stage='validate')
+    dataloader = datamodule.val_dataloader()
+
+    figures = dict()
+
+    patch_size = args.int_dim.patch_size
+    n_points = args.int_dim.n_points
+    n_centroids = args.int_dim.max_n_centroids
+
+    logger.info(f'Calculating the whitening-matrix for patch-size {patch_size}x{patch_size}...')
+    patches = sample_random_patches(dataloader, n_points, patch_size, verbose=True)
+    patches_flat = patches.reshape(patches.shape[0], -1)
+    n_patches, patch_dim = patches_flat.shape
+
+    kmeans = faiss.Kmeans(patch_dim, n_centroids, verbose=True)
+    kmeans.train(patches_flat)
+    centroids = kmeans.centroids.reshape((n_centroids,) + patches.shape[1:])
+    _, indices = kmeans.assign(patches_flat)
+
+    patches_activations = None
+    centroids_activations = None
+
+    with torch.no_grad():
+        patches_activations = conv_block(torch.from_numpy(patches)).detach().cpu().numpy().squeeze()
+        centroids_activations = conv_block(torch.from_numpy(centroids)).detach().cpu().numpy().squeeze()
+
+    centroids_of_patches_activations = centroids_activations[indices]
+
+    patches_active_neurons = (patches_activations > 0)
+    centroids_active_neurons = (centroids_of_patches_activations > 0)
+    different_activations = (patches_active_neurons != centroids_active_neurons)
+    fraction_different_activations = np.mean(different_activations, axis=1)
+    
+    agg_funcs = {'mean': np.mean, 'max': np.max, 'median': np.median}
+    for agg_name, agg_func in agg_funcs.items():
+        logger.info(f'{agg_name}_symmetrical_difference = {agg_func(fraction_different_activations)}')
+
+    figures[f'activation_set_symmetrical_difference'] = px.histogram(fraction_different_activations, marginal='box')
+
+    wandb.log(figures, step=0)
+
+
 def main():
     args = get_args(args_class=Args)
 
     configure_logger(args.env.path)
     log_args(args)
-    wandb.init(project='thesis', name=args.env.wandb_run_name, config=args.flattened_dict())
+    wandb_run = wandb.init(project='thesis', name=args.env.wandb_run_name, config=args.flattened_dict())
 
     if args.int_dim.gaussian_playground:
         gaussian_playground_main(args)
     if args.int_dim.cifar_mle:
         cifar_mle_main(args)
+    if args.int_dim.linear_regions:
+        linear_regions_main(args, wandb_run)
     if args.int_dim.cifar_elbow:
         cifar_elbow_main(args)
     
-
 
 if __name__ == '__main__':
     main()

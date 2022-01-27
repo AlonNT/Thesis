@@ -31,6 +31,9 @@ class IntDimArgs(ImmutableArgs):
     min_n_centroids: PositiveInt = 2
     max_n_centroids: PositiveInt = 100
 
+    linear_regions: bool = False
+    model_path: str = 'alonnt/thesis/model-13dgm3zv:v0'  # 1024 channels
+
 
 class Args(MyBaseModel):
     env = EnvironmentArgs()

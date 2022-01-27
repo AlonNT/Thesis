@@ -883,10 +883,6 @@ class DataModule(LightningDataModule):
 
     def val_dataloader(self):
         return DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=4)
-        # return [
-        #     DataLoader(self.datasets['validate_aug'], batch_size=self.batch_size, num_workers=4),
-        #     DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=4)
-        # ]
 
     def train_dataloader_no_aug(self):
         return DataLoader(self.datasets['fit_no_aug'], batch_size=self.batch_size, num_workers=4, shuffle=True)
