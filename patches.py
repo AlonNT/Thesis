@@ -275,7 +275,7 @@ def sample_random_patches(data_loader,
                           visualize: bool = False,
                           random_uniform_patches: bool = False,
                           random_gaussian_patches: bool = False,
-                          verbose: bool = True):
+                          verbose: bool = False):
     """
     This function sample random patches from the data, given by the data-loader object.
     It samples random indices for the patches and then iterates over the dataset to extract them.

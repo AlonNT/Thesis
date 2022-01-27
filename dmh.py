@@ -173,9 +173,8 @@ class LocallyLinearImitatorVGG(pl.LightningModule):
         # This is why we have to set them separately here and then the dictionary will map to the attributes.
         self.train_accuracy = tm.Accuracy()
         self.validate_accuracy = tm.Accuracy()
-        self.validate_no_aug_accuracy = tm.Accuracy()
-        self.accuracy = {RunningStage.TRAINING: [self.train_accuracy],
-                         RunningStage.VALIDATING: [self.validate_accuracy, self.validate_no_aug_accuracy]}
+        self.accuracy = {RunningStage.TRAINING: self.train_accuracy,
+                         RunningStage.VALIDATING: self.validate_accuracy}
 
         # self.state_dict_copy = copy.deepcopy(self.state_dict())
 
@@ -184,10 +183,9 @@ class LocallyLinearImitatorVGG(pl.LightningModule):
         logits = self.mlp(features)
         return logits
 
-    def shared_step(self, batch, stage: RunningStage, dataloader_idx=0):
+    def shared_step(self, batch, stage: RunningStage):
         x, labels = batch  # Note that we do not use the labels for training, only for logging training accuracy.
         intermediate_losses = list()
-        name = stage.value if dataloader_idx == 0 else f'{stage.value}_no_aug'
 
         # Prevent BatchNorm layers from changing `running_mean`, `running_var` and `num_batches_tracked`
         self.teacher.eval()
@@ -198,16 +196,16 @@ class LocallyLinearImitatorVGG(pl.LightningModule):
                 x_teacher_output = self.teacher.features[i](x).detach()  # TODO should we really detach here?
                 curr_loss = self.losses[i](x_output, x_teacher_output)
                 intermediate_losses.append(curr_loss)
-                self.log(f'{name}_loss_{i}', curr_loss.item())
+                self.log(f'{stage.value}_loss_{i}', curr_loss.item())
             x = x_output.detach()  # TODO Is it the right way?
 
         loss = sum(intermediate_losses)
-        self.log(f'{name}_loss', loss / len(intermediate_losses))
+        self.log(f'{stage.value}_loss', loss / len(intermediate_losses))
 
         logits = self.mlp(x)
-        accuracy = self.accuracy[stage][dataloader_idx]
+        accuracy = self.accuracy[stage]
         accuracy(logits, labels)
-        self.log(f'{name}_accuracy', accuracy)
+        self.log(f'{stage.value}_accuracy', accuracy)
 
         # if stage == RunningStage.TRAINING:
         #     # For debugging purposes - verify that the weights of the model changed.
@@ -228,8 +226,8 @@ class LocallyLinearImitatorVGG(pl.LightningModule):
         loss = self.shared_step(batch, RunningStage.TRAINING)
         return loss
 
-    def validation_step(self, batch, batch_idx, dataloader_idx):
-        self.shared_step(batch, RunningStage.VALIDATING, dataloader_idx)
+    def validation_step(self, batch, batch_idx):
+        self.shared_step(batch, RunningStage.VALIDATING)
 
     def configure_optimizers(self):
         optimizer = torch.optim.SGD(self.features.parameters(),  # Explicitly optimize only the imitators parameters
@@ -275,9 +273,8 @@ class LocallyLinearNetwork(pl.LightningModule):
         # This is why we have to set them separately here and then the dictionary will map to the attributes.
         self.train_accuracy = tm.Accuracy()
         self.validate_accuracy = tm.Accuracy()
-        self.validate_no_aug_accuracy = tm.Accuracy()
-        self.accuracy = {RunningStage.TRAINING: [self.train_accuracy],
-                         RunningStage.VALIDATING: [self.validate_accuracy, self.validate_no_aug_accuracy]}
+        self.accuracy = {RunningStage.TRAINING: self.train_accuracy,
+                         RunningStage.VALIDATING: self.validate_accuracy}
 
         self.logits_prediction_mode: bool = True
 
@@ -485,28 +482,45 @@ class LocallyLinearNetwork(pl.LightningModule):
 
         return logits
 
-    def shared_step(self, batch, stage: RunningStage, dataloader_idx=0):
+    def shared_step(self, batch, stage: RunningStage):
         assert self.logits_prediction_mode, 'Can not do train/validation step when logits prediction mode is off'
 
         x, labels = batch
         logits = self(x)
         loss = self.loss(logits, labels)
 
-        accuracy = self.accuracy[stage][dataloader_idx]
+        self.log(f'{stage.value}_loss', loss)
+
+        return {'loss': loss, 'logits': logits, 'labels': labels}
+    
+    def shared_step_end(self, batch_parts_outputs, stage: RunningStage):
+        """
+        When using multi-GPU, there is an error due to accumulating the Accuracy metric in different devices.
+        The solution (as proposed in the fillowing link) is the call the Accuracy in *_step_end.
+        https://github.com/PyTorchLightning/pytorch-lightning/issues/4353#issuecomment-716224855
+        """
+        loss = batch_parts_outputs['loss']
+        logits = batch_parts_outputs['logits']
+        labels = batch_parts_outputs['labels']
+
+        accuracy = self.accuracy[stage]
         accuracy(logits, labels)
 
-        name = stage.value if dataloader_idx == 0 else f'{stage.value}_no_aug'
-        self.log(f'{name}_loss', loss)
-        self.log(f'{name}_accuracy', accuracy)
+        self.log(f'{stage.value}_accuracy', accuracy, metric_attribute=f'{stage.value}_accuracy')
 
-        return loss
+        return loss.mean()
 
     def training_step(self, batch, batch_idx):
-        loss = self.shared_step(batch, RunningStage.TRAINING)
-        return loss
+        return self.shared_step(batch, RunningStage.TRAINING)
 
-    def validation_step(self, batch, batch_idx, dataloader_idx):
-        self.shared_step(batch, RunningStage.VALIDATING, dataloader_idx)
+    def training_step_end(self, batch_parts_outputs):
+        return self.shared_step_end(batch_parts_outputs, RunningStage.TRAINING)
+
+    def validation_step(self, batch, batch_idx):
+        return self.shared_step(batch, RunningStage.VALIDATING)
+
+    def validation_step_end(self, batch_parts_outputs):
+        return self.shared_step_end(batch_parts_outputs, RunningStage.VALIDATING)
 
     def configure_optimizers(self):
         optimizer = torch.optim.SGD(self.parameters(),
@@ -691,9 +705,8 @@ class DeepLocallyLinearNetwork(pl.LightningModule):
 
         self.train_accuracy = tm.Accuracy()
         self.validate_accuracy = tm.Accuracy()
-        self.validate_no_aug_accuracy = tm.Accuracy()
-        self.accuracy = {RunningStage.TRAINING: [self.train_accuracy],
-                         RunningStage.VALIDATING: [self.validate_accuracy, self.validate_no_aug_accuracy]}
+        self.accuracy = {RunningStage.TRAINING: self.train_accuracy,
+                         RunningStage.VALIDATING: self.validate_accuracy}
 
     def add_layer(self):
         if len(self.layers) > 0:
@@ -718,7 +731,6 @@ class DeepLocallyLinearNetwork(pl.LightningModule):
         new_layer.loss = None
         new_layer.train_accuracy = None
         new_layer.validate_accuracy = None
-        new_layer.validate_no_aug_accuracy = None
 
         self.layers.append(new_layer)
     
@@ -736,17 +748,16 @@ class DeepLocallyLinearNetwork(pl.LightningModule):
             logits = layer.linear(x.flatten(start_dim=1))
             return logits
 
-    def shared_step(self, batch, stage: RunningStage, dataloader_idx=0):
+    def shared_step(self, batch, stage: RunningStage):
         x, labels = batch
         logits = self(x)
         loss = self.loss(logits, labels)
 
-        accuracy = self.accuracy[stage][dataloader_idx]
+        accuracy = self.accuracy[stage]
         accuracy(logits, labels)
 
-        name = stage.value if dataloader_idx == 0 else f'{stage.value}_no_aug'
-        self.log(f'{name}_loss', loss)
-        self.log(f'{name}_accuracy', accuracy)
+        self.log(f'{stage.value}_loss', loss)
+        self.log(f'{stage.value}_accuracy', accuracy)
 
         return loss
 
@@ -754,8 +765,8 @@ class DeepLocallyLinearNetwork(pl.LightningModule):
         loss = self.shared_step(batch, RunningStage.TRAINING)
         return loss
 
-    def validation_step(self, batch, batch_idx, dataloader_idx):
-        self.shared_step(batch, RunningStage.VALIDATING, dataloader_idx)
+    def validation_step(self, batch, batch_idx):
+        self.shared_step(batch, RunningStage.VALIDATING)
 
     def configure_optimizers(self):
         args = self.layers[-1].args.opt
@@ -871,10 +882,11 @@ class DataModule(LightningDataModule):
         return DataLoader(self.datasets['fit_aug'], batch_size=self.batch_size, num_workers=4, shuffle=True)
 
     def val_dataloader(self):
-        return [
-            DataLoader(self.datasets['validate_aug'], batch_size=self.batch_size, num_workers=4),
-            DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=4)
-        ]
+        return DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=4)
+        # return [
+        #     DataLoader(self.datasets['validate_aug'], batch_size=self.batch_size, num_workers=4),
+        #     DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=4)
+        # ]
 
     def train_dataloader_no_aug(self):
         return DataLoader(self.datasets['fit_no_aug'], batch_size=self.batch_size, num_workers=4, shuffle=True)
@@ -911,9 +923,8 @@ class LitVGG(pl.LightningModule):
 
         self.train_accuracy = tm.Accuracy()
         self.validate_accuracy = tm.Accuracy()
-        self.validate_no_aug_accuracy = tm.Accuracy()
-        self.accuracy = {RunningStage.TRAINING: [self.train_accuracy],
-                         RunningStage.VALIDATING: [self.validate_accuracy, self.validate_no_aug_accuracy]}
+        self.accuracy = {RunningStage.TRAINING: self.train_accuracy,
+                         RunningStage.VALIDATING: self.validate_accuracy}
 
         self.kernel_sizes: List[int] = self.get_kernel_sizes()  # For each convolution/pooling block
         self.shapes: List[tuple] = self.get_shapes()
@@ -923,16 +934,15 @@ class LitVGG(pl.LightningModule):
         logits = self.mlp(features.flatten(start_dim=1))
         return logits
 
-    def shared_step(self, batch, stage: RunningStage, dataloader_idx: int = 0):
+    def shared_step(self, batch, stage: RunningStage):
         inputs, labels = batch
         logits = self(inputs)
         loss = self.loss(logits, labels)
 
-        self.accuracy[stage][dataloader_idx](logits, labels)
+        self.accuracy[stage](logits, labels)
 
-        name = stage.value if dataloader_idx == 0 else f'{stage.value}_no_aug'
-        self.log(f'{name}_loss', loss)
-        self.log(f'{name}_accuracy', self.accuracy[stage][dataloader_idx])
+        self.log(f'{stage.value}_loss', loss)
+        self.log(f'{stage.value}_accuracy', self.accuracy[stage])
 
         return loss
 
@@ -940,8 +950,8 @@ class LitVGG(pl.LightningModule):
         loss = self.shared_step(batch, RunningStage.TRAINING)
         return loss
 
-    def validation_step(self, batch, batch_idx, dataloader_idx):
-        self.shared_step(batch, RunningStage.VALIDATING, dataloader_idx)
+    def validation_step(self, batch, batch_idx):
+        self.shared_step(batch, RunningStage.VALIDATING)
 
     def get_sub_model(self, i: int) -> nn.Sequential:
         if i < len(self.features):
@@ -1014,26 +1024,21 @@ class LitMLP(pl.LightningModule):
         # This is why we have to set them separately here and then the dictionary will map to the attributes.
         self.train_accuracy = tm.Accuracy()
         self.validate_accuracy = tm.Accuracy()
-        self.validate_no_aug_accuracy = tm.Accuracy()
-        self.accuracy = {RunningStage.TRAINING: [self.train_accuracy],
-                         RunningStage.VALIDATING: [self.validate_accuracy, self.validate_no_aug_accuracy]}
+        self.accuracy = {RunningStage.TRAINING: self.train_accuracy,
+                         RunningStage.VALIDATING: self.validate_accuracy}
 
     def forward(self, x: torch.Tensor):
         return self.mlp(x)
 
-    def shared_step(self, batch, stage: RunningStage, dataloader_idx: int = 0):
+    def shared_step(self, batch, stage: RunningStage):
         inputs, labels = batch
         logits = self(inputs)
         loss = self.loss(logits, labels)
 
-        self.accuracy[stage][dataloader_idx](logits, labels)
+        self.accuracy[stage](logits, labels)
 
-        name = stage.value
-        if dataloader_idx == 1:
-            name += '_no_aug'
-
-        self.log(f'{name}_loss', loss)
-        self.log(f'{name}_accuracy', self.accuracy[stage][dataloader_idx])
+        self.log(f'{stage.value}_loss', loss)
+        self.log(f'{stage.value}_accuracy', self.accuracy[stage])
 
         return loss
 
@@ -1041,8 +1046,8 @@ class LitMLP(pl.LightningModule):
         loss = self.shared_step(batch, RunningStage.TRAINING)
         return loss
 
-    def validation_step(self, batch, batch_idx, dataloader_idx):
-        self.shared_step(batch, RunningStage.VALIDATING, dataloader_idx)
+    def validation_step(self, batch, batch_idx):
+        self.shared_step(batch, RunningStage.VALIDATING)
 
     def get_sub_model(self, i: int) -> nn.Sequential:
         return self.mlp[:i]
@@ -1112,6 +1117,127 @@ def indices_to_mask(n, indices, negate=False):
     return mask
 
 
+def get_flattened_patches(dataloader, n_patches, kernel_size,
+                          shuffle_before_estimate: bool = False, sub_model=None, device=None):
+    patches = sample_random_patches(dataloader, n_patches, kernel_size, sub_model)
+    patches = patches.reshape(patches.shape[0], -1)  # a.k.a. flatten in NumPy
+
+    if shuffle_before_estimate:
+        patches = np.random.default_rng().permuted(patches, axis=1, out=patches)
+
+    patches = patches.astype(np.float64)  # Increase accuracy of calculations.
+    patches = torch.from_numpy(patches)
+
+    if device is not None:
+        patches = patches.to(device)
+
+    return patches
+
+def get_patches_to_keep_mask(patches, minimal_distance: float = 1e-05):
+    distance_matrix = torch.cdist(patches, patches)
+    small_distances_indices = torch.nonzero(torch.less(distance_matrix, minimal_distance))
+    different_patches_mask = (small_distances_indices[:, 0] != small_distances_indices[:, 1])
+    different_patches_close_indices_pairs = small_distances_indices[different_patches_mask]
+    different_patches_close_indices = different_patches_close_indices_pairs.unique()
+    patches_to_keep_mask = indices_to_mask(len(patches), different_patches_close_indices, negate=True)
+
+    return patches_to_keep_mask
+
+def get_patches_not_too_close_to_one_another(dataloader, n_patches, patch_size,
+                                             minimal_distance: float = 1e-5,
+                                             shuffle_before_estimate: bool = False,
+                                             sub_model=None, 
+                                             device=None):
+    ratio_to_extend_n = 1.5
+    n_patches_extended = math.ceil(n_patches * ratio_to_extend_n)
+    patches = get_flattened_patches(dataloader, n_patches_extended, patch_size, 
+                                    shuffle_before_estimate, sub_model, device)
+    patches_to_keep_mask = get_patches_to_keep_mask(patches, minimal_distance)
+    patches = patches[patches_to_keep_mask]
+
+    patches = patches[:n_patches]  # This is done to get exactly (or up-to) n like the user requested
+
+    return patches
+
+
+def log_dim_per_k_graph(metrics, prefix, estimates):
+    min_k = 5
+    max_k = len(estimates) + 1
+    df = pd.DataFrame(estimates[min_k - 1:], index=np.arange(min_k, max_k), columns=['k-th intrinsic-dimension'])
+    df.index.name = 'k'
+    metrics[f'{prefix}-int_dim_per_k'] = px.line(df)
+
+
+def log_singular_values(metrics, prefix, data):
+    n, d = data.shape
+    data_dict = {
+        'original_data': data,
+        'normalized_data': normalize_data(data),
+        'whitened_data': whiten_data(data),
+        'random_data': np.random.default_rng().multivariate_normal(mean=np.zeros(d), cov=np.eye(d), size=n)
+    }
+
+    singular_values = dict()
+    singular_values_ratio = dict()
+    explained_variance_ratio = dict()
+    variance_ratio = dict()
+    reconstruction_errors = dict()
+    for data_name in data_dict.keys():
+        data_orig = data_dict[data_name]
+        logger.debug(f'Calculating SVD for {data_name} with shape {tuple(data_orig.shape)}...')
+        # u is a n x n matrix, the columns are the left singular vectors.
+        # s is a vector of size min(n, d), containing the singular values.
+        # v is a d x d matrix, the *rows* are the right singular vectors.
+        u, s, v_t = np.linalg.svd(data_orig)
+        v = v_t.T  # d x d matrix, now the *columns* are the right singular vectors.
+        logger.debug('Finished calculating SVD')
+
+        singular_values[data_name] = s
+
+        # Inspiration taken from sklearn.decomposition._pca.PCA._fit_full
+        explained_variance = (s ** 2) / (n - 1)
+        explained_variance_ratio[data_name] = explained_variance / explained_variance.sum()
+
+        # Inspiration taken from "The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods"
+        variance_ratio[data_name] = np.cumsum(s) / np.sum(s)
+        singular_values_ratio[data_name] = s / s[0]
+
+        logger.debug('Calculating reconstruction error...')
+        transformed_data = np.dot(data_orig, v)  # n x d matrix (like the original)
+        reconstruction_errors_list = list()
+        for k in range(1, 101):
+            v_reduced = v[:, :k]  # d x k matrix
+            transformed_data_reduced = np.dot(transformed_data, v_reduced)  # n x k matrix
+            transformed_data_reconstructed = np.dot(transformed_data_reduced, v_reduced.T)  # n x d matrix
+            data_reconstructed = np.dot(transformed_data_reconstructed, v_t)  # n x d matrix
+            reconstruction_error = np.linalg.norm(data_orig - data_reconstructed)
+            reconstruction_errors_list.append(reconstruction_error)
+        logger.debug('Finished calculating reconstruction error.')
+
+        reconstruction_errors[data_name] = np.array(reconstruction_errors_list)
+
+    # Inspiration (and the name 'd_cov') taken from
+    # "The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods"
+    metrics[f'{prefix}-d_cov'] = np.where(variance_ratio['original_data'] > 0.95)[0][0]
+
+    fig_args = dict(markers=True)
+    metrics[f'{prefix}-singular_values'] = px.line(pd.DataFrame(singular_values), **fig_args)
+    metrics[f'{prefix}-singular_values_ratio'] = px.line(pd.DataFrame(singular_values_ratio), **fig_args)
+    metrics[f'{prefix}-variance_ratio'] = px.line(pd.DataFrame(variance_ratio), **fig_args)
+    metrics[f'{prefix}-explained_variance_ratio'] = px.line(pd.DataFrame(explained_variance_ratio), **fig_args)
+    metrics[f'{prefix}-reconstruction_errors'] = px.line(pd.DataFrame(reconstruction_errors), **fig_args)
+
+
+def log_final_estimate(metrics, estimates, extrinsic_dimension, block_name, k1, k2):
+    estimate_mean_over_k1_to_k2 = torch.mean(estimates[k1:k2 + 1])
+    intrinsic_dimension = estimate_mean_over_k1_to_k2.item()
+    dimensions_ratio = intrinsic_dimension / extrinsic_dimension
+
+    block_name = f'{block_name}-ext_dim_{extrinsic_dimension}'
+    metrics.update({f'{block_name}-int_dim': intrinsic_dimension,
+                    f'{block_name}-dim_ratio': dimensions_ratio})
+    return intrinsic_dimension, dimensions_ratio
+
 class IntrinsicDimensionCalculator(Callback):
 
     def __init__(self, args: DMHArgs, minimal_distance: float = 1e-05):
@@ -1130,84 +1256,6 @@ class IntrinsicDimensionCalculator(Callback):
         ratio_to_extend_n = 1.5 if self.args.estimate_dim_on_patches else 1.01  # Lower probability to get similar images.
         self.n_clusters_extended = math.ceil(self.args.n_clusters * ratio_to_extend_n)
 
-    @staticmethod
-    def log_dim_per_k_graph(metrics, block_name, estimates):
-        min_k = 5
-        max_k = len(estimates) + 1
-        df = pd.DataFrame(estimates[min_k - 1:], index=np.arange(min_k, max_k), columns=['k-th intrinsic-dimension'])
-        df.index.name = 'k'
-        metrics[f'{block_name}-int_dim_per_k'] = px.line(df)
-
-    @staticmethod
-    def log_singular_values(metrics, block_name, data):
-        n, d = data.shape
-        data_dict = {
-            'original_data': data,
-            'normalized_data': normalize_data(data),
-            'whitened_data': whiten_data(data),
-            'random_data': np.random.default_rng().multivariate_normal(mean=np.zeros(d), cov=np.eye(d), size=n)
-        }
-
-        singular_values = dict()
-        singular_values_ratio = dict()
-        explained_variance_ratio = dict()
-        variance_ratio = dict()
-        reconstruction_errors = dict()
-        for data_name in data_dict.keys():
-            data_orig = data_dict[data_name]
-            logger.debug(f'Calculating SVD for {data_name} with shape {tuple(data_orig.shape)}...')
-            # u is a n x n matrix, the columns are the left singular vectors.
-            # s is a vector of size min(n, d), containing the singular values.
-            # v is a d x d matrix, the *rows* are the right singular vectors.
-            u, s, v_t = np.linalg.svd(data_orig)
-            v = v_t.T  # d x d matrix, now the *columns* are the right singular vectors.
-            logger.debug('Finished calculating SVD')
-
-            singular_values[data_name] = s
-
-            # Inspiration taken from sklearn.decomposition._pca.PCA._fit_full
-            explained_variance = (s ** 2) / (n - 1)
-            explained_variance_ratio[data_name] = explained_variance / explained_variance.sum()
-
-            # Inspiration taken from "The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods"
-            variance_ratio[data_name] = np.cumsum(s) / np.sum(s)
-            singular_values_ratio[data_name] = s / s[0]
-
-            logger.debug('Calculating reconstruction error...')
-            transformed_data = np.dot(data_orig, v)  # n x d matrix (like the original)
-            reconstruction_errors_list = list()
-            for k in range(1, 101):
-                v_reduced = v[:, :k]  # d x k matrix
-                transformed_data_reduced = np.dot(transformed_data, v_reduced)  # n x k matrix
-                transformed_data_reconstructed = np.dot(transformed_data_reduced, v_reduced.T)  # n x d matrix
-                data_reconstructed = np.dot(transformed_data_reconstructed, v_t)  # n x d matrix
-                reconstruction_error = np.linalg.norm(data_orig - data_reconstructed)
-                reconstruction_errors_list.append(reconstruction_error)
-            logger.debug('Finished calculating reconstruction error.')
-
-            reconstruction_errors[data_name] = np.array(reconstruction_errors_list)
-
-        # Inspiration (and the name 'd_cov') taken from
-        # "The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods"
-        metrics[f'{block_name}-d_cov'] = np.where(variance_ratio['original_data'] > 0.95)[0][0]
-
-        fig_args = dict(markers=True)
-        metrics[f'{block_name}-singular_values'] = px.line(pd.DataFrame(singular_values), **fig_args)
-        metrics[f'{block_name}-singular_values_ratio'] = px.line(pd.DataFrame(singular_values_ratio), **fig_args)
-        metrics[f'{block_name}-variance_ratio'] = px.line(pd.DataFrame(variance_ratio), **fig_args)
-        metrics[f'{block_name}-explained_variance_ratio'] = px.line(pd.DataFrame(explained_variance_ratio), **fig_args)
-        metrics[f'{block_name}-reconstruction_errors'] = px.line(pd.DataFrame(reconstruction_errors), **fig_args)
-
-    def log_final_estimate(self, metrics, estimates, extrinsic_dimension, block_name):
-        estimate_mean_over_k1_to_k2 = torch.mean(estimates[self.args.k1:self.args.k2 + 1])
-        intrinsic_dimension = estimate_mean_over_k1_to_k2.item()
-        dimensions_ratio = intrinsic_dimension / extrinsic_dimension
-
-        block_name = f'{block_name}-ext_dim_{extrinsic_dimension}'
-        metrics.update({f'{block_name}-int_dim': intrinsic_dimension,
-                        f'{block_name}-dim_ratio': dimensions_ratio})
-        return intrinsic_dimension, dimensions_ratio
-
     def calc_int_dim_per_layer_on_dataloader(self, trainer, pl_module, dataloader, log_graphs: bool = False):
         """
         Given a VGG model, go over each block in it and calculates the intrinsic dimension of its input data.
@@ -1222,53 +1270,22 @@ class IntrinsicDimensionCalculator(Callback):
                 patch_size = -1
             else:
                 patch_size = pl_module.kernel_sizes[i]
-            patches = self.get_patches_not_too_close_to_one_another(dataloader, patch_size, pl_module.get_sub_model(i))
+            patches = get_patches_not_too_close_to_one_another(dataloader, self.args.n_clusters, patch_size, 
+                                                               self.minimal_distance,
+                                                               self.args.shuffle_before_estimate,
+                                                               pl_module.get_sub_model(i))
             
             estimates_matrix = get_estimates_matrix(patches, 8*self.args.k2 if log_graphs else self.args.k2)
             estimates = torch.mean(estimates_matrix, dim=0)
 
             if log_graphs:
-                IntrinsicDimensionCalculator.log_dim_per_k_graph(metrics, block_name, estimates.cpu().numpy())
-                IntrinsicDimensionCalculator.log_singular_values(metrics, block_name, patches.cpu().numpy())
+                log_dim_per_k_graph(metrics, block_name, estimates.cpu().numpy())
+                log_singular_values(metrics, block_name, patches.cpu().numpy())
 
-            mle_int_dim, ratio = self.log_final_estimate(metrics, estimates, patches.shape[1], block_name)
+            mle_int_dim, ratio = log_final_estimate(metrics, estimates, patches.shape[1], block_name, self.args.k1, self.args.k2)
             logger.debug(f'epoch {trainer.current_epoch:0>2d} block {i:0>2d} '
                          f'mle_int_dim {mle_int_dim:.2f} ({100 * ratio:.2f}% of ext_sim {patches.shape[1]})')
         trainer.logger.experiment.log(metrics, step=trainer.global_step, commit=False)
-
-    def get_patches_not_too_close_to_one_another(self, dataloader, patch_size, sub_model, device=None):
-        patches = self.get_flattened_patches(dataloader, patch_size, sub_model, device)
-        patches_to_keep_mask = self.get_patches_to_keep_mask(patches)
-        patches = patches[patches_to_keep_mask]
-
-        patches = patches[:self.args.n_clusters]  # This is done to get exactly (or up-to) n like the user requested
-
-        return patches
-
-    def get_flattened_patches(self, dataloader, kernel_size, sub_model, device=None):
-        patches = sample_random_patches(dataloader, self.n_clusters_extended, kernel_size, sub_model)
-        patches = patches.reshape(patches.shape[0], -1)  # a.k.a. flatten in NumPy
-
-        if self.args.shuffle_before_estimate:
-            patches = np.random.default_rng().permuted(patches, axis=1, out=patches)
-
-        patches = patches.astype(np.float64)  # Increase accuracy of calculations.
-        patches = torch.from_numpy(patches)
-
-        if device is not None:
-            patches = patches.to(device)
-
-        return patches
-
-    def get_patches_to_keep_mask(self, patches):
-        distance_matrix = torch.cdist(patches, patches)
-        small_distances_indices = torch.nonzero(torch.less(distance_matrix, self.minimal_distance))
-        different_patches_mask = (small_distances_indices[:, 0] != small_distances_indices[:, 1])
-        different_patches_close_indices_pairs = small_distances_indices[different_patches_mask]
-        different_patches_close_indices = different_patches_close_indices_pairs.unique()
-        patches_to_keep_mask = indices_to_mask(len(patches), different_patches_close_indices, negate=True)
-
-        return patches_to_keep_mask
 
     def calc_int_dim_per_layer(self, trainer, pl_module, log_graphs: bool = False):
         """
@@ -1301,7 +1318,6 @@ class IntrinsicDimensionCalculator(Callback):
         Since log_graphs=True takes a lot of time, we do it only in the beginning /end of the training process.
         """
         self.calc_int_dim_per_layer(trainer, pl_module, log_graphs=True)
-
 
 
 class LinearRegionsCalculator(Callback):
@@ -1414,10 +1430,13 @@ def initialize_wandb_logger(args: Args, name_suffix: str = ''):
 
 
 def initialize_trainer(args: Args, wandb_logger: WandbLogger):
-    checkpoint_callback = ModelCheckpoint(monitor='validate_no_aug_accuracy/dataloader_idx_1', mode='max')
+    checkpoint_callback = ModelCheckpoint(monitor='validate_accuracy', mode='max')
     model_summary_callback = ModelSummary(max_depth=3)
     callbacks = [checkpoint_callback, model_summary_callback]
-    trainer_kwargs = dict(gpus=[args.env.device_num]) if args.env.is_cuda else dict()
+    if isinstance(args.env.multi_gpu, list) or (args.env.multi_gpu != 0):
+        trainer_kwargs = dict(gpus=args.env.multi_gpu, strategy="dp")
+    else:
+        trainer_kwargs = dict(gpus=[args.env.device_num]) if args.env.is_cuda else dict()
     if args.env.debug:
         trainer_kwargs.update({f'limit_{t}_batches': 3 for t in ['train', 'val']})
         trainer_kwargs.update({'log_every_n_steps': 1})

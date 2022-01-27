@@ -128,7 +128,7 @@ class DMHArgs(ImmutableArgs):
 
     #: If depth = 2 it means that we build one model on top of the other.
     depth: int = 1
-    sum_logits: bool = True
+    sum_logits: bool = False
 
     #: Whether the input embedding to the deep model should have a residual connection (addition / concatenation).
     residual_add: Union[bool, List[bool]] = False

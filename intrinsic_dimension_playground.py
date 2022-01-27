@@ -1,18 +1,27 @@
 import torch
 import wandb
+import faiss
+import tikzplotlib
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.figure_factory as ff
+import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 from math import ceil
+from loguru import logger
 from scipy.stats import special_ortho_group
 from sklearn.decomposition import PCA
 
-from dmh import get_estimates_matrix
+from patches import sample_random_patches
+from dmh import (DataModule, 
+                 get_estimates_matrix, 
+                 get_patches_not_too_close_to_one_another, 
+                 log_final_estimate)
 from schemas.intrinsic_dimension_playground import Args
-from utils import get_args, configure_logger, log_args
+from utils import get_args, configure_logger, log_args, calc_whitening_from_dataloader
 
 
 def get_m_dimensional_gaussian_in_n_dimensional_space(m: int, n: int, n_points: int, noise_std: float = 0):
@@ -102,14 +111,218 @@ def gaussian_playground_main(args: Args):
     wandb.log(figures)
 
 
+def create_data_dict(patches: np.ndarray, whitening_matrix: np.ndarray,
+                     normalize_patches_to_unit_vectors: bool = False):
+    assert patches.ndim == 2, f'patches has shape {patches.shape}, it should have been flattened.'
+    n_patches, d = patches.shape
+    rng = np.random.default_rng()
+    patches_shuffled = rng.permuted(patches, axis=1)
+    patches_whitened = patches @ whitening_matrix
+    patches_whitened_shuffled = rng.permuted(patches_whitened, axis=1)
+    random_data = rng.multivariate_normal(mean=np.zeros(d), cov=np.eye(d), size=n_patches)
+
+    data_dict = {
+        'original': patches,
+        'whitened': patches_whitened,
+        'whitened_shuffled': patches_whitened_shuffled,
+        'shuffled': patches_shuffled,
+        'random': random_data
+    }
+
+    # faiss must receive float32 as input
+    data_dict = {data_name: data.astype(np.float32) for data_name, data in data_dict.items()}
+
+    if normalize_patches_to_unit_vectors:
+        return normalize_data(data_dict)
+    
+    return data_dict
+
+
+def normalize_data(data_dict):
+    norms_dict = {data_name: np.linalg.norm(data, axis=1) 
+                  for data_name, data in data_dict.items()}
+
+    low_norms_masks_dict = {data_name: (norms < np.percentile(norms, q=0.1)) 
+                            for data_name, norms in norms_dict.items()}
+
+    filtered_data_dict = {data_name: data[np.logical_not(low_norms_masks_dict[data_name])] 
+                          for data_name, data in data_dict.items()}
+
+    filtered_norms_dict = {data_name: norms[np.logical_not(low_norms_masks_dict[data_name])] 
+                           for data_name, norms in norms_dict.items()}
+
+    normalized_data_dict = {data_name: (filtered_data_dict[data_name] / filtered_norms_dict[data_name][:, np.newaxis])
+                            for data_name in data_dict.keys()}
+
+    return normalized_data_dict
+
+
+def cifar_mle_main(args: Args):
+    datamodule = DataModule(args.data, batch_size=128)
+    datamodule.prepare_data()
+    datamodule.setup(stage='fit')
+    dataloader = datamodule.train_dataloader_clean()
+    n_points_list = args.int_dim.n_points
+    patch_size_list = args.int_dim.patch_size
+    if isinstance(n_points_list, int):
+        n_points_list = [n_points_list]
+    if isinstance(patch_size_list, int):
+        patch_size_list = [patch_size_list]
+
+    figures = dict()
+
+    for patch_size in patch_size_list:
+        logger.info(f'Calculating the whitening-matrix for patch-size {patch_size}x{patch_size}...')
+        whitening_matrix = calc_whitening_from_dataloader(
+            dataloader, patch_size, args.int_dim.whitening_regularization_factor, args.int_dim.zca_whitening)
+        for n_points in n_points_list:
+            prefix = f'{n_points:,}_{patch_size}x{patch_size}_patches'
+            logger.info(f'Starting with {prefix}')
+
+            patches = get_patches_not_too_close_to_one_another(dataloader, n_points, patch_size).numpy()
+
+            if len(patches) < n_points:
+                logger.warning(f'Number of patches {len(patches)} is lower than requested {n_points}')
+        
+            data_dict = create_data_dict(patches, whitening_matrix, args.int_dim.normalize_patches_to_unit_vectors)
+            data_dict = {data_name: torch.from_numpy(data) for data_name, data in data_dict.items()}
+            estimates_matrices = {data_name: get_estimates_matrix(data, 8 * args.int_dim.k2) 
+                                  for data_name, data in data_dict.items()}
+            estimates_dict = {data_name: torch.mean(estimates_matrix, dim=0) 
+                               for data_name, estimates_matrix in estimates_matrices.items()}
+            
+            max_k = list(estimates_dict.values())[0].numel() + 1
+            df = pd.DataFrame({data_name: estimates[args.int_dim.start_k - 1:] 
+                               for data_name, estimates in estimates_dict.items()}, 
+                              index=np.arange(args.int_dim.start_k, max_k))
+            df.index.name = 'k'
+            df.columns.name = 'type-of-data'
+            figures[f'{prefix}-int_dim_per_k'] = px.line(df)
+
+            # mle_int_dim, ratio = log_final_estimate(figures, estimates, patches.shape[1], prefix, args.int_dim.k1, args.int_dim.k2)
+            # logger.info(f'{prefix}\tmle_int_dim {mle_int_dim:.2f} ({100 * ratio:.2f}% of ext_sim {patches.shape[1]})')
+    
+    wandb.log(figures, step=0)
+
+
+
+def cifar_elbow_main(args: Args):
+    datamodule = DataModule(args.data, batch_size=128)
+    datamodule.prepare_data()
+    datamodule.setup(stage='fit')
+    dataloader = datamodule.train_dataloader_clean()
+
+    n_points_list = args.int_dim.n_points
+    patch_size_list = args.int_dim.patch_size
+    if isinstance(n_points_list, int):
+        n_points_list = [n_points_list]
+    if isinstance(patch_size_list, int):
+        patch_size_list = [patch_size_list]
+
+    figures = dict()
+    n_centroids_list = list(range(args.int_dim.min_n_centroids, args.int_dim.max_n_centroids + 1))
+
+    for patch_size in patch_size_list:
+        logger.info(f'Calculating the whitening-matrix for patch-size {patch_size}x{patch_size}...')
+        whitening_matrix = calc_whitening_from_dataloader(
+            dataloader, patch_size, args.int_dim.whitening_regularization_factor, args.int_dim.zca_whitening)
+        for n_points in n_points_list:
+            prefix = f'{n_points:,}_{patch_size}x{patch_size}_patches'
+            logger.info(f'Starting with {prefix}')
+
+            patches = sample_random_patches(dataloader, n_points, patch_size, verbose=True)
+            patches_flat = patches.reshape(patches.shape[0], -1)
+            n_patches, patch_dim = patches_flat.shape
+
+            data_dict = create_data_dict(patches_flat, whitening_matrix)
+            normalized_data_dict = normalize_data(data_dict)
+
+            norms_dict = {data_name: np.linalg.norm(data, axis=1) 
+                          for data_name, data in data_dict.items()}
+            low_norms_masks_dict = {data_name: (norms < np.percentile(norms, q=0.1)) 
+                                    for data_name, norms in norms_dict.items()}
+
+            norms_df = pd.DataFrame(norms_dict)
+            for col in norms_df.columns:
+                figures[f'{prefix}_{col}_norms'] = px.histogram(norms_df, x=col, marginal='box')
+
+            # {'mean','max','median'} 
+            #     {'normalized-data', 'data'} 
+            #         {'normalized-distance', 'distance'}
+            #             {'original', 'shuffled', ...}
+            #                 A list of values.
+            dist_to_centroid = dict()  
+            norm_data_names = ['normalized-data']  # ['normalized-data', 'data']
+            norm_dist_names = ['distance']  # ['normalized-distance', 'distance']
+            agg_funcs = {'mean': np.mean, 'max': np.max, 'median': np.median}
+            for agg_name in agg_funcs.keys():
+                dist_to_centroid[agg_name] = dict()
+                for norm_data_name in norm_data_names:
+                    dist_to_centroid[agg_name][norm_data_name] = dict()
+                    for norm_dist_name in norm_dist_names:
+                        dist_to_centroid[agg_name][norm_data_name][norm_dist_name] = dict()
+                        for data_name in data_dict.keys():
+                            dist_to_centroid[agg_name][norm_data_name][norm_dist_name][data_name] = list()
+
+            for data_name in data_dict.keys():
+                for norm_data_name in norm_data_names:
+                    for k in tqdm(n_centroids_list, desc=f'Running k-means on {data_name} {norm_data_name} for different values of k'):
+                        if (norm_data_name == 'normalized-data'):
+                            data = normalized_data_dict[data_name]
+                        else:
+                            data = data_dict[data_name]
+                            
+                        kmeans = faiss.Kmeans(patch_dim, k)
+                        kmeans.train(data)
+                        distances, _ = kmeans.assign(data)
+
+                        for norm_dist_name in norm_dist_names:
+                            # If the data is already normalized, no need to divide by the norm.
+                            if (norm_dist_name == 'normalized-distance') and (norm_data_name != 'normalized-data'):
+                                not_low_norm_mask = np.logical_not(low_norms_masks_dict[data_name])
+                                distances_filtered = distances[not_low_norm_mask]
+                                norms_filtered = norms_dict[data_name][not_low_norm_mask]
+                                distances = distances_filtered / norms_filtered
+
+                            for agg_name, agg_func in agg_funcs.items():
+                                dist_to_centroid[agg_name][norm_data_name][norm_dist_name][data_name].append(agg_func(distances))
+            
+            for agg_name in agg_funcs.keys():
+                for norm_data_name in norm_data_names:
+                    for norm_dist_name in norm_dist_names:
+                        df = pd.DataFrame(data=dist_to_centroid[agg_name][norm_data_name][norm_dist_name], index=n_centroids_list)
+                        df.name = f'{norm_data_name}-{agg_name}-{norm_dist_name}-distance-to-centroid'
+                        df.index.name = 'k'
+                        df.columns.name = 'type-of-data'
+                        figures[f'{prefix}-{df.name}'] = px.line(df)
+
+                        plt.figure()
+                        plt.style.use("ggplot")
+                        for col in df.columns:
+                            plt.plot(n_centroids_list, df[col], label=col)
+                        plt.legend()
+                        plt.xlabel('k')
+                        plt.ylabel('mean-distance')
+                        plt.grid(True)
+                        tikzplotlib.save(f'{df.name}.tex')
+    
+    wandb.log(figures, step=0)
+ 
+
 def main():
     args = get_args(args_class=Args)
 
     configure_logger(args.env.path)
     log_args(args)
-    wandb.init(project='thesis', name='intrinsic_dimension_playground', config=args.flattened_dict())
+    wandb.init(project='thesis', name=args.env.wandb_run_name, config=args.flattened_dict())
 
-    gaussian_playground_main(args)
+    if args.int_dim.gaussian_playground:
+        gaussian_playground_main(args)
+    if args.int_dim.cifar_mle:
+        cifar_mle_main(args)
+    if args.int_dim.cifar_elbow:
+        cifar_elbow_main(args)
+    
 
 
 if __name__ == '__main__':

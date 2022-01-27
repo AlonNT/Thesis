@@ -1,13 +1,13 @@
 import datetime
 from pathlib import Path
-from typing import Literal, Optional
+from typing import List, Literal, Optional, Union
 
 import torch
 from pydantic import validator
 from pydantic.types import PositiveInt, DirectoryPath
 
 from consts import DATETIME_STRING_FORMAT
-from schemas.utils import ImmutableArgs
+from schemas.utils import ImmutableArgs, NonNegativeInt
 
 
 class EnvironmentArgs(ImmutableArgs):
@@ -23,6 +23,9 @@ class EnvironmentArgs(ImmutableArgs):
 
     #: Debug mode means limiting the number of batches during training, etc.
     debug: bool = False
+
+    #: Debug mode means limiting the number of batches during training, etc.
+    multi_gpu: Union[NonNegativeInt, List[NonNegativeInt]] = 0
 
     @validator('path', always=True)
     def create_out_dir(cls, v: Path):
