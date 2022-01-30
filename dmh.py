@@ -30,8 +30,10 @@ from pytorch_lightning.callbacks import ModelCheckpoint, ModelSummary
 
 from consts import N_CLASSES
 from patches import sample_random_patches
+from schemas.architecture import ArchitectureArgs
 from schemas.data import DataArgs
 from schemas.dmh import Args, DMHArgs
+from schemas.optimization import OptimizationArgs
 from utils import (configure_logger, get_args, get_model_device, power_minus_1, get_mlp, get_dataloaders, calc_whitening_from_dataloader,
                    whiten_data, normalize_data, get_covariance_matrix, get_whitening_matrix_from_covariance_matrix,
                    get_args_from_flattened_dict, get_model_output_shape, get_random_initialized_conv_kernel_and_bias)
@@ -39,50 +41,62 @@ from vgg import get_vgg_model_kernel_size, get_vgg_blocks, configs
 
 
 class KNearestPatchesEmbedding(nn.Module):
-    """
-    Calculating the k-nearest-neighbors is implemented as convolution with bias, as was done in
-    The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods
-    (https://arxiv.org/pdf/2101.07528.pdf)
-    Details can be found in Appendix B (page 13).
-    """
+    def __init__(self, kernel: np.ndarray, bias: np.ndarray, stride: int, padding: int, args: PatchesArgs):
+        """Calculating the k-nearest-neighbors for patches in the input image.
 
-    def __init__(self,
-                 kernel: np.ndarray,
-                 bias: np.ndarray,
-                 k: int = 1,
-                 up_to_k: bool = True,
-                 stride: int = 1,
-                 padding: int = 0,
-                 requires_grad: bool = False,
-                 random_embedding: bool = False,
-                 kmeans_triangle: bool = False):
+        Calculating the k-nearest-neighbors is implemented as a convolution layer, as in
+        The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods
+        (https://arxiv.org/pdf/2101.07528.pdf)
+        Details can be found in Appendix B (page 13).
+
+        Args:
+            kernel: The kernel that will be used during the embedding calculation.
+                For example, when using the embedding on the original patches (not-whitened) the kernel will
+                be the patches themselves in the patches-dictionary. if we use whitening then the kernel is
+                the patches multiplied by WW^T and the bias is the squared-norm of patches multiplied by W (no W^T).
+            bias: The bias that will be used during the embedding calculation.
+                For example, when using the embedding on the original patches (not-whitened) the bias will
+                be the squared-norms of the patches in the patches-dictionary.
+        """
         super(KNearestPatchesEmbedding, self).__init__()
 
-        self.k: int = k
-        self.up_to_k: bool = up_to_k
+        self.k: int = args.k
+        self.up_to_k: bool = args.up_to_k
         self.stride: int = stride
         self.padding: int = padding
-        self.kmeans_triangle: bool = kmeans_triangle
+        self.kmeans_triangle: bool = args.kmeans_triangle
+        self.random_embedding: bool = args.random_embedding
+        self.learnable_embedding: bool = args.learnable_embedding
 
-        if random_embedding:
+        if self.random_embedding:
             out_channels, in_channels, kernel_height, kernel_width = kernel.shape
             assert kernel_height == kernel_width, "the kernel should be square"
             kernel, bias = get_random_initialized_conv_kernel_and_bias(in_channels, out_channels, kernel_height)
 
-        self.kernel = nn.Parameter(torch.Tensor(kernel), requires_grad=requires_grad)
-        self.bias = nn.Parameter(torch.Tensor(bias), requires_grad=requires_grad)
+        self.kernel = nn.Parameter(torch.Tensor(kernel), requires_grad=self.learnable_embedding)
+        self.bias = nn.Parameter(torch.Tensor(bias), requires_grad=self.learnable_embedding)
 
-    def forward(self, images):
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        """Performs a forward pass.
+
+        Args:
+            images: The input tensor of shape (B, C, H, W) to calculate the k-nearest-neighbors.
+
+        Returns:
+            A tensor of shape (B, N, H, W) where N is the size of the patches-dictionary.
+            The ij spatial location will hold the mask indicating the k nearest neighbors of the patch centered at ij.
+        """
         # In every spatial location ij, we'll have a vector containing the squared distances to all the patches.
         # Note that it's not really the squared distance, but the squared distance minus the squared-norm of the
         # input patch in that location, but minimizing this value will minimize the distance
         # (since the norm of the input patch is the same among all patches in the bank).
         distances = F.conv2d(images, self.kernel, self.bias, self.stride, self.padding)
         values, indices = distances.kthvalue(k=self.k, dim=1, keepdim=True)
+
         if self.kmeans_triangle:
             mask = F.relu(torch.mean(distances, dim=1, keepdim=True) - distances)
         elif self.up_to_k:
-            mask = (distances <= values).float()
+            mask = torch.le(distances, values).float()
         else:
             mask = torch.zeros_like(distances).scatter_(dim=1, index=indices, value=1)
 
@@ -240,551 +254,17 @@ class LocallyLinearImitatorVGG(pl.LightningModule):
         return {'optimizer': optimizer, 'lr_scheduler': scheduler}
 
 
-class LocallyLinearNetwork(pl.LightningModule):
-
-    def __init__(self, 
-                 args: Args, 
-                 pre_model: Optional["LocallyLinearNetwork"] = None,
-                 input_shape: Optional[Tuple[int, int, int]] = None):
-        super(LocallyLinearNetwork, self).__init__()
-        self.args: Args = args
-        self.save_hyperparameters(args.flattened_dict())
-        self.pre_model: Optional["LocallyLinearNetwork"] = pre_model
-        self.whitening_matrix: Optional[np.ndarray] = None
-        self.patches_covariance_matrix: Optional[np.ndarray] = None
-        self.whitened_patches_covariance_matrix: Optional[np.ndarray] = None
-
-        self.input_shape = input_shape if (input_shape is not None) else self.get_input_shape()
-        self.input_channels = self.input_shape[0]
-        self.input_spatial_size = self.input_shape[1]
-
-        self.embedding = self.init_embedding()
-        self.conv = self.init_conv()
-        self.avg_pool = self.init_avg_pool()
-        self.adaptive_avg_pool = self.init_adaptive_avg_pool()
-        self.batch_norm = self.init_batch_norm()
-        self.bottle_neck = self.init_bottleneck()
-        self.bottle_neck_relu = self.init_bottleneck_relu()
-        self.linear = nn.Linear(in_features=self.calc_linear_in_features(), out_features=N_CLASSES)
-
-        self.loss = nn.CrossEntropyLoss()
-
-        # Apparently the Metrics must be an attribute of the LightningModule, and not inside a dictionary.
-        # This is why we have to set them separately here and then the dictionary will map to the attributes.
-        self.train_accuracy = tm.Accuracy()
-        self.validate_accuracy = tm.Accuracy()
-        self.accuracy = {RunningStage.TRAINING: self.train_accuracy,
-                         RunningStage.VALIDATING: self.validate_accuracy}
-
-        self.logits_prediction_mode: bool = True
-
-    def embedding_mode(self):
-        self.set_logits_prediction_mode(False)
-
-    def logits_mode(self):
-        self.set_logits_prediction_mode(True)
-
-    def set_logits_prediction_mode(self, mode: bool):
-        self.logits_prediction_mode = mode
-
-    def get_input_shape(self) -> Tuple[int, int, int]:
-        if self.pre_model is None:
-            shape = (self.args.data.n_channels,) + (self.args.data.spatial_size,) * 2
-        else:
-            shape = get_model_output_shape(self.pre_model)
-
-        assert shape[1] == shape[2], 'Should be square'
-        return shape
-
-    def init_embedding(self):
-        args = self.args.dmh
-
-        if args.replace_embedding_with_regular_conv_relu:
-            return nn.Sequential(
-                nn.Conv2d(in_channels=self.input_channels,
-                          out_channels=args.n_clusters,
-                          kernel_size=args.patch_size),
-                nn.ReLU()
-            )
-
-        kernel, bias = get_random_initialized_conv_kernel_and_bias(in_channels=self.input_channels,
-                                                                   out_channels=args.n_clusters,
-                                                                   kernel_size=args.patch_size)
-        return KNearestPatchesEmbedding(
-            kernel, bias, args.k, args.up_to_k,
-            stride=args.stride, padding=args.padding,
-            requires_grad=args.learnable_embedding,
-            random_embedding=args.random_embedding,
-            kmeans_triangle=args.kmeans_triangle
-        )
-
-    def calculate_embedding_from_data(self, dataloader, pre_model: Optional[nn.Module] = None):
-        assert not self.args.dmh.replace_embedding_with_regular_conv_relu, 'This function should not have been called'
-        kernel, bias = self.get_kernel_and_bias_from_data(dataloader, pre_model)
-        self.embedding = KNearestPatchesEmbedding(
-            kernel, bias, self.args.dmh.k, self.args.dmh.up_to_k,
-            stride=self.args.dmh.stride, padding=self.args.dmh.padding,
-            requires_grad=self.args.dmh.learnable_embedding,
-            random_embedding=self.args.dmh.random_embedding,
-            kmeans_triangle=self.args.dmh.kmeans_triangle
-        )
-
-    def init_whitening_matrix(self, dataloader: DataLoader, pre_model: Optional[nn.Module] = None) -> Optional[np.ndarray]:
-        args = self.args.dmh
-        if pre_model is None:
-            pre_model = self.pre_model
-
-        if not args.use_whitening:
-            return None
-
-        if args.random_gaussian_patches or args.random_uniform_patches or args.calc_whitening_from_sampled_patches:
-            return get_whitening_matrix_from_covariance_matrix(
-                self.patches_covariance_matrix, args.whitening_regularization_factor, args.zca_whitening
-            )
-
-        return calc_whitening_from_dataloader(dataloader, args.patch_size, 
-                                              args.whitening_regularization_factor, args.zca_whitening, 
-                                              pre_model)
-
-    def init_conv(self) -> Optional[nn.Conv2d]:
-        if not self.args.dmh.use_conv:
-            return None
-        return nn.Conv2d(in_channels=self.input_channels,
-                         out_channels=self.args.dmh.n_clusters * self.args.dmh.c,
-                         kernel_size=self.args.dmh.patch_size,
-                         stride=self.args.dmh.stride,
-                         padding=self.args.dmh.padding)
-
-    def init_adaptive_avg_pool(self) -> Optional[nn.AdaptiveAvgPool2d]:
-        if not self.args.dmh.use_adaptive_avg_pool:
-            return None
-        return nn.AdaptiveAvgPool2d(output_size=self.args.dmh.adaptive_pool_output_size)
-
-    def init_avg_pool(self) -> Optional[nn.AvgPool2d]:
-        if not self.args.dmh.use_avg_pool:
-            return None
-        return nn.AvgPool2d(kernel_size=self.args.dmh.pool_size,
-                            stride=self.args.dmh.pool_stride,
-                            ceil_mode=True)
-
-    def init_batch_norm(self) -> Optional[nn.BatchNorm2d]:
-        if not self.args.dmh.use_batch_norm:
-            return None
-        num_features = self.args.dmh.n_clusters if self.args.dmh.c == 1 else self.args.dmh.c
-        return nn.BatchNorm2d(num_features)
-
-    def init_bottleneck(self) -> Optional[nn.Conv2d]:
-        if not self.args.dmh.use_bottle_neck:
-            return None
-        return nn.Conv2d(in_channels=self.args.dmh.n_clusters if (self.args.dmh.c == 1) else self.args.dmh.c,
-                         out_channels=self.args.dmh.bottle_neck_dimension,
-                         kernel_size=self.args.dmh.bottle_neck_kernel_size)
-
-    def init_bottleneck_relu(self) -> Optional[nn.ReLU]:
-        if not self.args.dmh.use_relu_after_bottleneck:
-            return None
-        return nn.ReLU()
-
-    def calc_linear_in_features(self):
-        args = self.args.dmh
-
-        # Inspiration is taken from PyTorch Conv2d docs regarding the output shape
-        # https://pytorch.org/docs/1.10.1/generated/torch.nn.Conv2d.html
-        embedding_spatial_size = math.floor(
-            ((self.input_spatial_size + 2*args.padding - args.patch_size) / args.stride) + 1)
-
-        if args.use_adaptive_avg_pool:
-            intermediate_spatial_size = args.adaptive_pool_output_size
-        elif args.use_avg_pool:    # ceil and not floor, because we used `ceil_mode=True` in AvgPool2d
-            intermediate_spatial_size = math.ceil(1 + (embedding_spatial_size - args.pool_size) / args.pool_stride)
-        else:
-            intermediate_spatial_size = embedding_spatial_size
-
-        if args.full_embedding:
-            patch_dim = self.input_channels * args.patch_size ** 2
-            embedding_n_channels = args.n_clusters * patch_dim
-        elif args.c > 1:
-            embedding_n_channels = args.c
-        else:
-            embedding_n_channels = args.n_clusters
-
-        intermediate_n_features = embedding_n_channels * (intermediate_spatial_size ** 2)
-        bottleneck_output_spatial_size = intermediate_spatial_size - args.bottle_neck_kernel_size + 1
-        if args.residual_cat:
-            bottle_neck_dimension = args.bottle_neck_dimension + self.input_channels
-        else:
-            bottle_neck_dimension = args.bottle_neck_dimension
-        bottleneck_output_n_features = bottle_neck_dimension * (bottleneck_output_spatial_size ** 2)
-        linear_in_features = bottleneck_output_n_features if args.use_bottle_neck else intermediate_n_features
-        return linear_in_features
-
-    def get_kernel_and_bias_from_data(self, dataloader: DataLoader, pre_model: Optional[nn.Module] = None):
-        # Set the kernel and the bias of the embedding. Note that if we use whitening then the kernel is the patches
-        # multiplied by WW^T and the bias is the squared-norm of patches multiplied by W (no W^T).
-        kernel = self.get_clustered_patches(dataloader, pre_model)
-        bias = 0.5 * np.linalg.norm(kernel.reshape(kernel.shape[0], -1), axis=1) ** 2
-        if self.args.dmh.use_whitening:
-            kernel_flat = kernel.reshape(kernel.shape[0], -1)
-            kernel_flat = kernel_flat @ self.whitening_matrix.T
-            kernel = kernel_flat.reshape(kernel.shape)
-        kernel *= -1  # According to the formula as page 13 in https://arxiv.org/pdf/2101.07528.pdf
-
-        return kernel, bias
-
-    def get_full_embedding(self, x: torch.Tensor, features: torch.Tensor, args: DMHArgs):
-        x = F.unfold(x, kernel_size=args.patch_size, stride=args.stride, padding=args.padding)
-        batch_size, patch_dim, n_patches = x.shape
-        spatial_size = int(math.sqrt(n_patches))  # This is the spatial size (e.g. from 28 in CIFAR10 with patch-size 5)
-        
-        x = x.reshape(batch_size, patch_dim, spatial_size, spatial_size)
-        x = torch.repeat_interleave(x, repeats=args.n_clusters, dim=1)
-        x = x.reshape(batch_size, patch_dim, args.n_clusters, spatial_size, spatial_size)
-        x = x.transpose(1,2)
-        x = x.reshape(batch_size, patch_dim*args.n_clusters, spatial_size, spatial_size)
-
-        return x * torch.repeat_interleave(features, repeats=patch_dim, dim=1)
-
-    def forward(self, x: torch.Tensor):
-        args = self.args.dmh
-
-        if self.pre_model is not None:
-            x = self.pre_model(x)  # TODO remove self.pre_model
-
-        features = self.embedding(x)
-        if args.full_embedding:
-            features = self.get_full_embedding(x, features, args)
-        if args.c > 1:
-            features = torch.repeat_interleave(features, repeats=args.c, dim=1)
-        if args.use_conv:
-            features *= self.conv(x)
-        if args.c > 1:
-            features = features.view(features.shape[0], args.n_clusters, args.c, *features.shape[2:])
-            features = torch.sum(features, dim=1) / args.k
-        if args.use_avg_pool:
-            features = self.avg_pool(features)
-        if args.use_adaptive_avg_pool:
-            features = self.adaptive_avg_pool(features)
-        if args.use_batch_norm:
-            features = self.batch_norm(features)
-        if args.use_bottle_neck:
-            features = self.bottle_neck(features)
-        if args.use_relu_after_bottleneck:
-            features = self.bottle_neck_relu(features)
-        if args.residual_add or args.residual_cat:
-            if x.shape[-2:] != features.shape[-2:]:  # Spatial size might be slightly different due to lack of padding
-                x = center_crop(x, output_size=features.shape[-1])
-            features = torch.add(features, x) if args.residual_add else torch.cat((features, x), dim=1)
-
-        if not self.logits_prediction_mode:
-            return features
-
-        logits = self.linear(torch.flatten(features, start_dim=1))
-
-        return logits
-
-    def shared_step(self, batch, stage: RunningStage):
-        assert self.logits_prediction_mode, 'Can not do train/validation step when logits prediction mode is off'
-
-        x, labels = batch
-        logits = self(x)
-        loss = self.loss(logits, labels)
-
-        self.log(f'{stage.value}_loss', loss)
-
-        return {'loss': loss, 'logits': logits, 'labels': labels}
-    
-    def shared_step_end(self, batch_parts_outputs, stage: RunningStage):
-        """
-        When using multi-GPU, there is an error due to accumulating the Accuracy metric in different devices.
-        The solution (as proposed in the fillowing link) is the call the Accuracy in *_step_end.
-        https://github.com/PyTorchLightning/pytorch-lightning/issues/4353#issuecomment-716224855
-        """
-        loss = batch_parts_outputs['loss']
-        logits = batch_parts_outputs['logits']
-        labels = batch_parts_outputs['labels']
-
-        accuracy = self.accuracy[stage]
-        accuracy(logits, labels)
-
-        self.log(f'{stage.value}_accuracy', accuracy, metric_attribute=f'{stage.value}_accuracy')
-
-        return loss.mean()
-
-    def training_step(self, batch, batch_idx):
-        return self.shared_step(batch, RunningStage.TRAINING)
-
-    def training_step_end(self, batch_parts_outputs):
-        return self.shared_step_end(batch_parts_outputs, RunningStage.TRAINING)
-
-    def validation_step(self, batch, batch_idx):
-        return self.shared_step(batch, RunningStage.VALIDATING)
-
-    def validation_step_end(self, batch_parts_outputs):
-        return self.shared_step_end(batch_parts_outputs, RunningStage.VALIDATING)
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.SGD(self.parameters(),
-                                    self.args.opt.learning_rate,
-                                    self.args.opt.momentum,
-                                    weight_decay=self.args.opt.weight_decay)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                         milestones=self.args.opt.learning_rate_decay_steps,
-                                                         gamma=self.args.opt.learning_rate_decay_gamma)
-        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
-
-    @staticmethod
-    def get_diagonal_sum_vs_total_sum_ratio(covariance_matrix):
-        non_diagonal_elements_sum = np.sum(np.abs(covariance_matrix - np.diag((np.diagonal(covariance_matrix)))))
-        elements_sum = np.sum(np.abs(covariance_matrix))
-        ratio = non_diagonal_elements_sum / elements_sum
-        return ratio
-
-    def remove_low_norm_patches(self, patches):
-        minimal_norm = 0.01
-        low_norm_patches_mask = (np.linalg.norm(patches, axis=1) < minimal_norm)
-        patches = patches[np.logical_not(low_norm_patches_mask)]
-        patches = patches[:self.args.dmh.n_patches]  # Don't leave more than the requested patches
-
-        return patches
-
-    def get_clustered_patches(self, dataloader: DataLoader, pre_model: Optional[nn.Module] = None):
-        if pre_model is None:
-            pre_model = self.pre_model
-        n_patches_extended = math.ceil(1.01 * self.args.dmh.n_patches)
-        patches = sample_random_patches(dataloader, n_patches_extended, self.args.dmh.patch_size,
-                                        random_uniform_patches=self.args.dmh.random_uniform_patches,
-                                        random_gaussian_patches=self.args.dmh.random_gaussian_patches,
-                                        existing_model=pre_model)
-        patch_shape = patches.shape[1:]
-        patches = patches.reshape(patches.shape[0], -1)
-
-        # Low norm (even zero) patches will become problematic later when we normalize by dividing by the norm.
-        patches = self.remove_low_norm_patches(patches)
-
-        self.patches_covariance_matrix = get_covariance_matrix(patches)
-        self.whitening_matrix = self.init_whitening_matrix(dataloader, pre_model)
-
-        if self.args.dmh.use_whitening:
-            patches = patches @ self.whitening_matrix
-            self.whitened_patches_covariance_matrix = get_covariance_matrix(patches)
-
-        if self.args.dmh.n_patches == self.args.dmh.n_clusters:  # This means that we shouldn't do clustering
-            if self.args.dmh.normalize_patches_to_unit_vectors:
-                patches /= np.linalg.norm(patches, axis=1)[:, np.newaxis]
-            return patches.reshape(-1, *patch_shape)
-        else:
-            kmeans = faiss.Kmeans(d=patches.shape[1], k=self.args.dmh.n_clusters, verbose=True)
-            kmeans.train(patches)
-            centroids = kmeans.centroids
-            if self.args.dmh.normalize_patches_to_unit_vectors:
-                centroids /= np.linalg.norm(centroids, axis=1)[:, np.newaxis]
-            return centroids.reshape(-1, *patch_shape)
-
-    def unwhiten_patches(self, patches: np.ndarray, only_inv_t: bool = False) -> np.ndarray:
-        patches_flat = patches.reshape(patches.shape[0], -1)
-        whitening_matrix = np.eye(patches_flat.shape[1]) if (self.whitening_matrix is None) else self.whitening_matrix
-        matrix = whitening_matrix.T if only_inv_t else (whitening_matrix @ whitening_matrix.T)
-        patches_orig_flat = np.dot(patches_flat, np.linalg.inv(matrix))
-        patches_orig = patches_orig_flat.reshape(patches.shape)
-
-        return patches_orig
-
-    @staticmethod
-    def get_extreme_patches_indices(norms_numpy, number_of_extreme_patches_to_show):
-        partitioned_indices = np.argpartition(norms_numpy, number_of_extreme_patches_to_show)
-        worst_patches_indices = partitioned_indices[:number_of_extreme_patches_to_show]
-        partitioned_indices = np.argpartition(norms_numpy, len(norms_numpy) - number_of_extreme_patches_to_show)
-        best_patches_indices = partitioned_indices[-number_of_extreme_patches_to_show:]
-
-        return worst_patches_indices, best_patches_indices
-
-    def get_extreme_patches_unwhitened(self, worst_patches_indices, best_patches_indices, only_inv_t: bool = False):
-        if self.args.dmh.replace_embedding_with_regular_conv_relu:
-            kernel = self.embedding[0].weight
-        else:
-            kernel = self.embedding.kernel
-
-        all_patches = kernel.data.cpu().numpy()
-        worst_patches = all_patches[worst_patches_indices]
-        best_patches = all_patches[best_patches_indices]
-
-        both_patches = np.concatenate([worst_patches, best_patches])
-        both_patches_unwhitened = self.unwhiten_patches(both_patches, only_inv_t)
-
-        worst_patches_unwhitened = both_patches_unwhitened[:len(worst_patches)]
-        best_patches_unwhitened = both_patches_unwhitened[len(best_patches):]
-
-        return worst_patches_unwhitened, best_patches_unwhitened
-
-    def visualize_patches(self, n: int = 3):
-        if self.bottle_neck is not None:
-            bottleneck_weight = self.bottle_neck.weight.data
-            if self.args.dmh.bottle_neck_kernel_size > 1:
-                bottleneck_weight = bottleneck_weight.mean(dim=(2,3))
-            else:
-                bottleneck_weight = bottleneck_weight.squeeze(dim=3).squeeze(dim=2)
-            norms = torch.linalg.norm(bottleneck_weight, ord=2, dim=0).cpu().numpy()
-        else:
-            norms = np.random.default_rng().uniform(size=self.args.dmh.n_clusters).astype(np.float32)
-        
-        if n ** 2 >= len(norms) / 2:  # Otherwise we'll crash when asking for n**2 best/worth norms.
-            n = math.floor(math.sqrt(len(norms) / 2))
-        
-        worst_patches_indices, best_patches_indices = self.get_extreme_patches_indices(norms, n ** 2)
-        worst_patches_unwhitened, best_patches_unwhitened = self.get_extreme_patches_unwhitened(
-            worst_patches_indices, best_patches_indices)
-        worst_patches_whitened, best_patches_whitened = self.get_extreme_patches_unwhitened(
-            worst_patches_indices, best_patches_indices, only_inv_t=True)
-
-        # Normalize the values to be in [0, 1] for plotting (matplotlib just clips the values).
-        for a in [worst_patches_unwhitened, best_patches_unwhitened, worst_patches_whitened, best_patches_whitened]:
-            a[:] = (a - a.min()) / (a.max() - a.min())
-
-        worst_patches_fig, worst_patches_axs = plt.subplots(n, n)
-        best_patches_fig, best_patches_axs = plt.subplots(n, n)
-        worst_patches_whitened_fig, worst_patches_whitened_axs = plt.subplots(n, n)
-        best_patches_whitened_fig, best_patches_whitened_axs = plt.subplots(n, n)
-
-        for k in range(n ** 2):
-            i = k // n  # Row index
-            j = k % n  # Columns index
-            worst_patches_axs[i, j].imshow(worst_patches_unwhitened[k].transpose(1, 2, 0), vmin=0, vmax=1)
-            best_patches_axs[i, j].imshow(best_patches_unwhitened[k].transpose(1, 2, 0), vmin=0, vmax=1)
-            worst_patches_whitened_axs[i, j].imshow(worst_patches_whitened[k].transpose(1, 2, 0), vmin=0, vmax=1)
-            best_patches_whitened_axs[i, j].imshow(best_patches_whitened[k].transpose(1, 2, 0), vmin=0, vmax=1)
-
-            worst_patches_axs[i, j].axis('off')
-            best_patches_axs[i, j].axis('off')
-            worst_patches_whitened_axs[i, j].axis('off')
-            best_patches_whitened_axs[i, j].axis('off')
-
-        self.trainer.logger.experiment.log({'worst_patches': worst_patches_fig,
-                                            'best_patches': best_patches_fig,
-                                            'worst_patches_whitened': worst_patches_whitened_fig,
-                                            'best_patches_whitened': best_patches_whitened_fig},
-                                           step=self.trainer.global_step)
-        plt.close('all')  # Avoid memory consumption
-
-    def log_covariance_matrix(self, covariance_matrix: np.ndarray, name: str):
-        labels = [f'{i:0>3}' for i in range(covariance_matrix.shape[0])]
-        name = f'{name}_cov_matrix'
-        self.logger.experiment.log(
-            {name: wandb.plots.HeatMap(x_labels=labels, y_labels=labels, matrix_values=covariance_matrix)},
-            step=self.trainer.global_step)
-        self.logger.experiment.summary[f'{name}_ratio'] = self.get_diagonal_sum_vs_total_sum_ratio(covariance_matrix)
-
-    def on_train_start(self):
-        if self.input_channels == 3:
-            self.visualize_patches()
-        m = 64  # this is the maximal number of elements to take when calculating in covariance matrix
-        if self.patches_covariance_matrix is not None:
-            self.log_covariance_matrix(self.patches_covariance_matrix[:m, :m], name='patches')
-        if self.args.dmh.use_whitening and (self.whitened_patches_covariance_matrix is not None):
-            self.log_covariance_matrix(self.whitened_patches_covariance_matrix[:m, :m], name='whitened_patches')
-
-    def on_train_end(self):
-        if self.input_channels == 3:
-            self.visualize_patches()
-
-
-
-class DeepLocallyLinearNetwork(pl.LightningModule):
-
-    def __init__(self, args: Args, dataloader: DataLoader):
-        super(DeepLocallyLinearNetwork, self).__init__()
-        self.args: Args = args
-        self.dataloader: DataLoader = dataloader  # This is the dataloader for sampling patches
-        self.save_hyperparameters(args.flattened_dict())
-        self.input_channels = self.args.data.n_channels
-        self.input_spatial_size = self.args.data.spatial_size
-        self.input_shape = (self.input_channels,) + 2 * (self.input_spatial_size,)
-        
-        self.layers = nn.ModuleList()
-
-        self.loss = nn.CrossEntropyLoss()
-
-        self.train_accuracy = tm.Accuracy()
-        self.validate_accuracy = tm.Accuracy()
-        self.accuracy = {RunningStage.TRAINING: self.train_accuracy,
-                         RunningStage.VALIDATING: self.validate_accuracy}
-
-    def add_layer(self):
-        if len(self.layers) > 0:
-            self.layers[-1].eval()
-            self.layers[-1].requires_grad_(False)
-        
-        pre_model = nn.Sequential(*self.layers)
-
-        args = self.args.extract_single_depth_args(i=len(self.layers))
-        new_layer = LocallyLinearNetwork(args, input_shape=get_model_output_shape(pre_model))
-
-        if not args.dmh.replace_embedding_with_regular_conv_relu:
-            original_device = get_model_device(pre_model)
-            pre_model.to(self.args.env.device)
-            new_layer.calculate_embedding_from_data(self.dataloader, pre_model)
-            pre_model.to(original_device)
-
-        new_layer.embedding_mode()  # we'll run the linear layer explicitly in forward()
-        
-        # Remove these from the layer since we are not planning to train them separately.
-        # (The loss and accuracy will be those of the DeepLocallyLinearNetwork).
-        new_layer.loss = None
-        new_layer.train_accuracy = None
-        new_layer.validate_accuracy = None
-
-        self.layers.append(new_layer)
-    
-    def forward(self, x: torch.Tensor):
-        assert len(self.layers) > 0, 'Can not perform a forward-pass until at least one layer is added.'
-        logits = list()
-        for layer in self.layers:
-            x = layer(x)
-            if self.args.dmh.sum_logits:
-                logits.append(layer.linear(x.flatten(start_dim=1)))
-        
-        if self.args.dmh.sum_logits:
-            return sum(logits)
-        else:
-            logits = layer.linear(x.flatten(start_dim=1))
-            return logits
-
-    def shared_step(self, batch, stage: RunningStage):
-        x, labels = batch
-        logits = self(x)
-        loss = self.loss(logits, labels)
-
-        accuracy = self.accuracy[stage]
-        accuracy(logits, labels)
-
-        self.log(f'{stage.value}_loss', loss)
-        self.log(f'{stage.value}_accuracy', accuracy)
-
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        loss = self.shared_step(batch, RunningStage.TRAINING)
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        self.shared_step(batch, RunningStage.VALIDATING)
-
-    def configure_optimizers(self):
-        args = self.layers[-1].args.opt
-        optimizer = torch.optim.SGD(self.layers[-1].parameters(),
-                                    args.learning_rate,
-                                    args.momentum,
-                                    weight_decay=args.weight_decay)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                         milestones=args.learning_rate_decay_steps,
-                                                         gamma=args.learning_rate_decay_gamma)
-        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
-
 class ShufflePixels:
     def __init__(self, keep_rgb_triplets_intact: bool = True):
+        """A data transformation which shuffles the pixels of the input image.
+
+        Args:
+            keep_rgb_triplets_intact: If it's true, shuffle the RGB triplets and not each value separately.
+        """
         self.keep_rgb_triplets_intact = keep_rgb_triplets_intact
 
     def __call__(self, img):
-        assert img.shape == (3, 32, 32), "WTF is the shape of the input images?"
+        assert img.ndim == 3 and img.shape[0] == 3, "The input-image is expected to be of shape 3 x H x W"
         start_dim = 1 if self.keep_rgb_triplets_intact else 0
         img_flat = torch.flatten(img, start_dim=start_dim)
         permutation = torch.randperm(img_flat.shape[-1])
@@ -794,58 +274,14 @@ class ShufflePixels:
 
 
 class DataModule(LightningDataModule):
-
-    @staticmethod
-    def get_normalization_transform(plus_minus_one: bool = False, unit_gaussian: bool = False,
-                                    n_channels: int = 3):
-        if unit_gaussian:
-            if n_channels != 3:
-                raise NotImplementedError('Normalization for MNIST / FashionMNIST is not supported. ')
-            normalization_values = [(0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)]
-        elif plus_minus_one:
-            normalization_values = [(0.5, ) * n_channels] * 2  # times 2 because one is mean and one is std
-        else:
-            return None
-
-        return Normalize(*normalization_values)
-
-    @staticmethod
-    def get_augmentations_transforms(random_flip: bool = False, random_crop: bool = False, spatial_size: int = 32):
-        augmentations_transforms = list()
-
-        if random_flip:
-            augmentations_transforms.append(RandomHorizontalFlip())
-        if random_crop:
-            augmentations_transforms.append(RandomCrop(size=spatial_size, padding=4))
-
-        return augmentations_transforms
-
-    @staticmethod
-    def get_transforms_lists(args: DataArgs):
-        augmentations = DataModule.get_augmentations_transforms(args.random_horizontal_flip, args.random_crop,
-                                                                args.spatial_size)
-        normalization = DataModule.get_normalization_transform(args.normalization_to_plus_minus_one,
-                                                               args.normalization_to_unit_gaussian,
-                                                               args.n_channels)
-        normalizations_list = list() if (normalization is None) else [normalization]
-        crucial_transforms = [ToTensor()]
-        post_transforms = [ShufflePixels(args.keep_rgb_triplets_intact)] if args.shuffle_images else list()
-        transforms_list_no_aug = crucial_transforms + normalizations_list + post_transforms
-        transforms_list_with_aug = augmentations + crucial_transforms + normalizations_list + post_transforms
-
-        return transforms_list_no_aug, transforms_list_with_aug
-
-    def get_dataset_class(self, dataset_name: str):
-        if dataset_name == 'CIFAR10':
-            return CIFAR10
-        elif dataset_name == 'MNIST':
-            return MNIST
-        elif dataset_name == 'FashionMNIST':
-            return FashionMNIST
-        else:
-            raise NotImplementedError(f'Dataset {dataset_name} is not implemented.')
-
     def __init__(self, args: DataArgs, batch_size: int, data_dir: str = "./data"):
+        """A datamodule to be used with PyTorch Lightning modules.
+
+        Args:
+            args: The data's arguments-schema.
+            batch_size: The batch-size.
+            data_dir: The data directory to read the data from (if it's not there - downloads it).
+        """
         super().__init__()
 
         self.dataset_class = self.get_dataset_class(args.dataset_name)
@@ -862,11 +298,104 @@ class DataModule(LightningDataModule):
                          for stage in ('fit', 'validate')
                          for aug in ('aug', 'no_aug', 'clean')}
 
+    def get_dataset_class(self, dataset_name: str) -> Union[Type[CIFAR10], Type[MNIST], Type[FashionMNIST]]:
+        """Gets the class of the dataset, according to the given dataset name.
+
+        Args:
+            dataset_name: name of the dataset (CIFAR10, MNIST or FashionMNIST).
+
+        Returns:
+            The dataset class.
+        """
+        if dataset_name == 'CIFAR10':
+            return CIFAR10
+        elif dataset_name == 'MNIST':
+            return MNIST
+        elif dataset_name == 'FashionMNIST':
+            return FashionMNIST
+        else:
+            raise NotImplementedError(f'Dataset {dataset_name} is not implemented.')
+
+    @staticmethod
+    def get_transforms_lists(args: DataArgs) -> Tuple[list, list]:
+        """Gets the transformations list to be used in the dataloader.
+
+        Args:
+            args: The data's arguments-schema.
+
+        Returns:
+            One list is the transformations without augmentation,
+            and the other is the transformations with augmentations.
+        """
+        augmentations = DataModule.get_augmentations_transforms(args.random_horizontal_flip,
+                                                                args.random_crop,
+                                                                args.spatial_size)
+        normalization = DataModule.get_normalization_transform(args.normalization_to_plus_minus_one,
+                                                               args.normalization_to_unit_gaussian,
+                                                               args.n_channels)
+        normalizations_list = list() if (normalization is None) else [normalization]
+        crucial_transforms = [ToTensor()]
+        post_transforms = [ShufflePixels(args.keep_rgb_triplets_intact)] if args.shuffle_images else list()
+        transforms_list_no_aug = crucial_transforms + normalizations_list + post_transforms
+        transforms_list_with_aug = augmentations + crucial_transforms + normalizations_list + post_transforms
+
+        return transforms_list_no_aug, transforms_list_with_aug
+
+    @staticmethod
+    def get_augmentations_transforms(random_flip: bool, random_crop: bool, spatial_size: int) -> list:
+        """Gets the augmentations transformations list to be used in the dataloader.
+
+        Args:
+            random_flip: Whether to use random-flip augmentation.
+            random_crop: Whether to use random-crop augmentation.
+            spatial_size: The spatial-size of the input images (needed for the target-size of the random-crop).
+
+        Returns:
+            A list containing the augmentations transformations.
+        """
+        augmentations_transforms = list()
+
+        if random_flip:
+            augmentations_transforms.append(RandomHorizontalFlip())
+        if random_crop:
+            augmentations_transforms.append(RandomCrop(size=spatial_size, padding=4))
+
+        return augmentations_transforms
+
+    @staticmethod
+    def get_normalization_transform(plus_minus_one: bool, unit_gaussian: bool, n_channels: int) -> Optional[Normalize]:
+        """Gets the normalization transformation to be used in the dataloader (or None, if no normalization is needed).
+
+        Args:
+            plus_minus_one: Whether to normalize the input-images from [0,1] to [-1,+1].
+            unit_gaussian: Whether to normalize the input-images to have zero mean and std one (channels-wise).
+            n_channels: Number of input-channels for each input-image (3 for CIFAR10, 1 for MNIST/FashionMNIST).
+
+        Returns:
+            The normalization transformation (or None, if no normalization is needed).
+        """
+        assert not (plus_minus_one and unit_gaussian), 'Only one should be given'
+
+        if unit_gaussian:
+            if n_channels != 3:
+                raise NotImplementedError('Normalization for MNIST / FashionMNIST is not supported. ')
+            normalization_values = [(0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)]
+        elif plus_minus_one:
+            normalization_values = [(0.5,) * n_channels] * 2  # times 2 because one is mean and one is std
+        else:
+            return None
+
+        return Normalize(*normalization_values)
+
     def prepare_data(self):
+        """Download the dataset if it's not already in `self.data_dir`.
+        """
         for train_mode in [True, False]:
             self.dataset_class(self.data_dir, train=train_mode, download=True)
 
     def setup(self, stage: Optional[str] = None):
+        """Create the different datasets.
+        """
         if stage is None:
             return
 
@@ -879,41 +408,67 @@ class DataModule(LightningDataModule):
                                                           transform=self.transforms[aug])
 
     def train_dataloader(self):
+        """
+        Returns:
+             The train dataloader, which is the train-data with augmentations.
+        """
         return DataLoader(self.datasets['fit_aug'], batch_size=self.batch_size, num_workers=4, shuffle=True)
 
     def val_dataloader(self):
+        """
+        Returns:
+             The validation dataloader, which is the validation-data without augmentations
+             (but possibly has normalization, if the training-dataloader has one).
+        """
         return DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=4)
 
     def train_dataloader_no_aug(self):
+        """
+        Returns:
+             The train dataloader without augmentations.
+        """
         return DataLoader(self.datasets['fit_no_aug'], batch_size=self.batch_size, num_workers=4, shuffle=True)
 
     def train_dataloader_clean(self):
+        """
+        Returns:
+             The train dataloader without augmentations and normalizations (i.e. the original images in [0,1]).
+        """
         return DataLoader(self.datasets['fit_clean'], batch_size=self.batch_size, num_workers=4, shuffle=True)
 
 
 class LitVGG(pl.LightningModule):
+    def __init__(self, arch_args: ArchitectureArgs, opt_args: OptimizationArgs, data_args: DataArgs):
+        """A basic CNN, based on the VGG architecture (and some variants).
 
-    def __init__(self, args: Args):
+        Args:
+            arch_args: The arguments for the architecture.
+            opt_args: The arguments for the optimization process.
+            data_args: The arguments for the input data.
+        """
         super(LitVGG, self).__init__()
-        layers, n_features = get_vgg_blocks(
-            configs[args.arch.model_name],
-            args.data.n_channels,
-            args.data.spatial_size,
-            args.dmh.patch_size,
-            args.dmh.padding,
-            args.dmh.use_batch_norm,
-            args.dmh.bottle_neck_dimension if args.dmh.use_relu_after_bottleneck else 0
-        )
+        layers, n_features = get_vgg_blocks(configs[arch_args.model_name],
+                                            data_args.n_channels,
+                                            data_args.spatial_size,
+                                            arch_args.kernel_size,
+                                            arch_args.padding,
+                                            arch_args.use_batch_norm,
+                                            arch_args.bottle_neck_dimension)  # if args.patches.use_relu_after_bottleneck else 0 TODO remove
         self.features = nn.Sequential(*layers)
         self.mlp = get_mlp(input_dim=n_features,
                            output_dim=N_CLASSES,
-                           n_hidden_layers=args.arch.final_mlp_n_hidden_layers,
-                           hidden_dim=args.arch.final_mlp_hidden_dim,
-                           use_batch_norm=args.dmh.use_batch_norm,
+                           n_hidden_layers=arch_args.final_mlp_n_hidden_layers,
+                           hidden_dim=arch_args.final_mlp_hidden_dim,
+                           use_batch_norm=arch_args.use_batch_norm,
                            organize_as_blocks=True)
         self.loss = torch.nn.CrossEntropyLoss()
-        self.args: Args = args
-        self.save_hyperparameters(args.flattened_dict())
+
+        self.arch_args: ArchitectureArgs = arch_args
+        self.opt_args: OptimizationArgs = opt_args
+
+        self.save_hyperparameters(arch_args.dict())
+        self.save_hyperparameters(opt_args.dict())
+        self.save_hyperparameters(data_args.dict())
 
         self.num_blocks = len(self.features) + len(self.mlp)
 
@@ -922,15 +477,32 @@ class LitVGG(pl.LightningModule):
         self.accuracy = {RunningStage.TRAINING: self.train_accuracy,
                          RunningStage.VALIDATING: self.validate_accuracy}
 
-        self.kernel_sizes: List[int] = self.get_kernel_sizes()  # For each convolution/pooling block
-        self.shapes: List[tuple] = self.get_shapes()
+        self.kernel_sizes: List[int] = self.init_kernel_sizes()
+        self.shapes: List[tuple] = self.init_shapes()
 
     def forward(self, x: torch.Tensor):
+        """Performs a forward pass.
+
+        Args:
+            x: The input tensor.
+
+        Returns:
+            The output of the model, which is logits for the different classes.
+        """
         features = self.features(x)
         logits = self.mlp(features.flatten(start_dim=1))
         return logits
 
-    def shared_step(self, batch, stage: RunningStage):
+    def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], stage: RunningStage):
+        """Performs train/validation step, depending on the given `stage`.
+
+        Args:
+            batch: The batch to process (containing a tuple of tensors - inputs and labels).
+            stage: Indicating if this is a training-step or a validation-step.
+
+        Returns:
+            The loss.
+        """
         inputs, labels = batch
         logits = self(inputs)
         loss = self.loss(logits, labels)
@@ -942,14 +514,37 @@ class LitVGG(pl.LightningModule):
 
         return loss
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
+        """Performs a training step.
+
+        Args:
+            batch: The batch to process (containing a tuple of tensors - inputs and labels).
+            batch_idx: The index of the batch in the dataset.
+
+        Returns:
+            The loss.
+        """
         loss = self.shared_step(batch, RunningStage.TRAINING)
         return loss
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
+        """Performs a validation step.
+
+        Args:
+            batch: The batch to process (containing a tuple of tensors - inputs and labels).
+            batch_idx: The index of the batch in the dataset.
+        """
         self.shared_step(batch, RunningStage.VALIDATING)
 
     def get_sub_model(self, i: int) -> nn.Sequential:
+        """Extracts a sub-model up to the given layer index.
+
+        Args:
+            i: The maximal index to take in the sub-model
+
+        Returns:
+            The sub-model.
+        """
         if i < len(self.features):
             sub_model = self.features[:i]
         else:
@@ -959,16 +554,27 @@ class LitVGG(pl.LightningModule):
         return sub_model
 
     def configure_optimizers(self):
+        """Configure the optimizer and the learning-rate scheduler for the training process.
+
+        Returns:
+            A dictionary containing the optimizer and learning-rate scheduler.
+        """
         optimizer = torch.optim.SGD(self.parameters(),
-                                    self.args.opt.learning_rate,
-                                    self.args.opt.momentum,
-                                    weight_decay=self.args.opt.weight_decay)
+                                    self.opt_args.learning_rate,
+                                    self.opt_args.momentum,
+                                    weight_decay=self.opt_args.weight_decay)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                         milestones=self.args.opt.learning_rate_decay_steps,
-                                                         gamma=self.args.opt.learning_rate_decay_gamma)
+                                                         milestones=self.opt_args.learning_rate_decay_steps,
+                                                         gamma=self.opt_args.learning_rate_decay_gamma)
         return {'optimizer': optimizer, 'lr_scheduler': scheduler}
 
-    def get_kernel_sizes(self):
+    def init_kernel_sizes(self) -> List[int]:
+        """Initialize the kernel-size of each block in the model.
+
+        Returns:
+            A list of integers with the same length as `self.features`,
+            where the i-th element is the kernel size of the i-th block.
+        """
         kernel_sizes = list()
         for i in range(len(self.features)):
             kernel_size = get_vgg_model_kernel_size(self, i)
@@ -979,7 +585,12 @@ class LitVGG(pl.LightningModule):
         return kernel_sizes
 
     @torch.no_grad()
-    def get_shapes(self):
+    def init_shapes(self) -> List[Tuple[int, int, int]]:
+        """Initialize the input shapes of each block in the model.
+
+        Returns:
+            A list of shapes, with the same length as the sum of `self.features` and `self.mlp`.
+        """
         shapes = list()
 
         dataloader = get_dataloaders(batch_size=8)["train"]
@@ -1002,17 +613,28 @@ class LitVGG(pl.LightningModule):
 
 
 class LitMLP(pl.LightningModule):
+    def __init__(self, arch_args: ArchitectureArgs, opt_args: OptimizationArgs, data_args: DataArgs):
+        """A basic MLP, which consists of multiple linear layers with ReLU in-between.
 
-    def __init__(self, args: Args):
+        Args:
+            arch_args: The arguments for the architecture.
+            opt_args: The arguments for the optimization process.
+            data_args: The arguments for the input data.
+        """
         super(LitMLP, self).__init__()
-        self.args = args
-        self.input_dim = args.data.n_channels * args.data.spatial_size ** 2
+        self.input_dim = data_args.n_channels * data_args.spatial_size ** 2
         self.output_dim = N_CLASSES
-        self.n_hidden_layers = args.arch.final_mlp_n_hidden_layers
-        self.hidden_dim = args.arch.final_mlp_hidden_dim
+        self.n_hidden_layers = arch_args.final_mlp_n_hidden_layers
+        self.hidden_dim = arch_args.final_mlp_hidden_dim
         self.mlp = get_mlp(self.input_dim, self.output_dim, self.n_hidden_layers, self.hidden_dim,
                            use_batch_norm=True, organize_as_blocks=True)
         self.loss = torch.nn.CrossEntropyLoss()
+
+        self.arch_args = arch_args
+        self.opt_args = opt_args
+        self.save_hyperparameters(arch_args.dict())
+        self.save_hyperparameters(opt_args.dict())
+        self.save_hyperparameters(data_args.dict())
 
         self.num_blocks = len(self.mlp)
 
@@ -1049,13 +671,18 @@ class LitMLP(pl.LightningModule):
         return self.mlp[:i]
 
     def configure_optimizers(self):
+        """Configure the optimizer and the learning-rate scheduler for the training process.
+
+        Returns:
+            A dictionary containing the optimizer and learning-rate scheduler.
+        """
         optimizer = torch.optim.SGD(self.parameters(),
-                                    self.args.opt.learning_rate,
-                                    self.args.opt.momentum,
-                                    weight_decay=self.args.opt.weight_decay)
+                                    self.opt_args.learning_rate,
+                                    self.opt_args.momentum,
+                                    weight_decay=self.opt_args.weight_decay)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                         milestones=self.args.opt.learning_rate_decay_steps,
-                                                         gamma=self.args.opt.learning_rate_decay_gamma)
+                                                         milestones=self.opt_args.learning_rate_decay_steps,
+                                                         gamma=self.opt_args.learning_rate_decay_gamma)
         return {'optimizer': optimizer, 'lr_scheduler': scheduler}
 
 
@@ -1610,49 +1237,11 @@ def main():
     wandb_logger = initialize_wandb_logger(args)
     configure_logger(args.env.path, print_sink=sys.stdout, level='DEBUG')  # if args.env.debug else 'INFO')
 
-    if args.dmh.train_locally_linear_network:
-        if args.dmh.sample_patches_from_original_zero_one_values:
-            dataloader_for_sampling_patches = datamodule.train_dataloader_clean()
-        else:
-            dataloader_for_sampling_patches = datamodule.train_dataloader_no_aug()
-
-        if args.dmh.depth == 1:
-            # TODO delete
-            # pre_model = None if (args.dmh.depth == 1) else get_pre_model(wandb_logger, args)
-            model = LocallyLinearNetwork(args)
-            if not args.dmh.replace_embedding_with_regular_conv_relu:
-                model.to(args.env.device)
-                model.calculate_embedding_from_data(dataloader_for_sampling_patches)
-                model.cpu()
-            wandb_logger.watch(model, log='all')
-            trainer = initialize_trainer(args, wandb_logger)
-            trainer.fit(model, datamodule=datamodule)
-        else:
-            model = DeepLocallyLinearNetwork(args, dataloader_for_sampling_patches)
-            for i in range(args.dmh.depth):
-                model.add_layer()
-                wandb_logger = initialize_wandb_logger(args, name_suffix=f'_layer_{i+1}')
-                wandb_logger.watch(model, log='all')
-                trainer = initialize_trainer(args, wandb_logger)
-                trainer.fit(model, datamodule=datamodule)
-
-                # Prevents wandb error which they have a TO-DO for fixing in wandb/sdk/wandb_watch.py:123
-                # "  TO-DO: we should also remove recursively model._wandb_watch_called  "
-                # ValueError: You can only call `wandb.watch` once per model.  
-                # Pass a new instance of the model if you need to call wandb.watch again in your code.
-                wandb.unwatch(model)
-                for module in model.modules():
-                    if hasattr(module, "_wandb_watch_called"):
-                        delattr(module, "_wandb_watch_called")
-                if hasattr(module, "_wandb_watch_called"):
-                    delattr(model, "_wandb_watch_called")
-                wandb.finish()
-    else:
-        model = initialize_model(args, wandb_logger)
-        if not args.arch.use_pretrained:
-            wandb_logger.watch(model, log='all')
-            trainer = initialize_trainer(args, wandb_logger)
-            trainer.fit(model, datamodule=datamodule)
+    model = initialize_model(args, wandb_logger)
+    if not args.arch.use_pretrained:
+        wandb_logger.watch(model, log='all')
+        trainer = initialize_trainer(args, wandb_logger)
+        trainer.fit(model, datamodule=datamodule)
 
     if args.dmh.imitate_with_knn:
         # TODO do we want to set-up knn-imitator on data without augmentations?
