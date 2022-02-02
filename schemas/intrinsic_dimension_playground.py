@@ -29,7 +29,7 @@ class IntDimArgs(ImmutableArgs):
     
     cifar_elbow: bool = False
     min_n_centroids: PositiveInt = 2
-    max_n_centroids: PositiveInt = 100
+    max_n_centroids: PositiveInt = 1024
 
     linear_regions: bool = False
     model_path: str = 'alonnt/thesis/model-13dgm3zv:v0'  # 1024 channels

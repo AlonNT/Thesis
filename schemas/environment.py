@@ -27,6 +27,12 @@ class EnvironmentArgs(ImmutableArgs):
     #: Debug mode means limiting the number of batches during training, etc.
     multi_gpu: Union[NonNegativeInt, List[NonNegativeInt]] = 0
 
+    @validator('path', pre=True)
+    def create_parent_out_dir_if_not_exists(cls, v: str):
+        if not Path(v).exists():
+            Path(v).mkdir()
+        return v
+
     @validator('path', always=True)
     def create_out_dir(cls, v: Path):
         datetime_string = datetime.datetime.now().strftime(DATETIME_STRING_FORMAT)

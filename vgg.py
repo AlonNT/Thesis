@@ -126,16 +126,6 @@ def get_vgg_blocks(config: List[Union[int, str]],
                    padding: Union[int, List[int]] = 1,
                    use_batch_norm: Union[bool, List[bool]] = False,
                    bottleneck_dim: Union[int, List[int]] = 0) -> Tuple[List[nn.Module], int]:
-    """
-    Return a list of `blocks` which constitute the whole network,
-    Each block is a sequence of several layers (Conv, BatchNorm, ReLU, MaxPool2d and Dropout).
-
-    :param config: A list of integers / 'M' describing the architecture (see examples in the top of the file).
-    :param mlp_n_hidden_layers: Number of hidden layers in the final MLP sub-network (predicting the scores).
-    :param mlp_hidden_dim: The dimension of each hidden layer in the final MLP sub-network.
-    :param dropout_prob: When positive, add dropout after each non-linearity.
-    :return: The blocks and the dimension of the last layer (will be useful when feeding into a liner layer later).
-    """
     blocks: List[nn.Module] = list()
     
     kernel_size = get_list_of_arguments_for_config(config, kernel_size)
@@ -144,31 +134,37 @@ def get_vgg_blocks(config: List[Union[int, str]],
     bottleneck_dim = get_list_of_arguments_for_config(config, bottleneck_dim)
 
     for i in range(len(config)):
-        if config[i] == 'M':
-            blocks.append(nn.Sequential(nn.MaxPool2d(kernel_size=2, stride=2)))
-        elif config[i] == 'A':
-            continue  # The average-pooling was already added in the else section...
+        if isinstance(config[i], str):
+            continue  # The pooling was already added as the last layer of the previous block.
         else:
+            assert isinstance(config[i], int), f'Item {i} in config is {config[i]}, should be str or int.'
             out_channels = config[i]
 
             block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size[i], padding=padding[i]),
                             nn.ReLU()]
 
-            if (i+1 < len(config)) and (config[i+1] == 'A'):
-                block_layers.append(nn.AvgPool2d(kernel_size=2, stride=2))
-            
             if use_batch_norm[i]:
                 block_layers.append(nn.BatchNorm2d(out_channels))
+
+            spatial_size = spatial_size + 2*padding[i] - kernel_size[i] + 1
+
+            if (i+1 < len(config)) and (isinstance(config[i+1], str)):
+                spatial_size /= 2
+
+                if config[i+1] == 'M':
+                    pool_type = nn.MaxPool2d
+                elif config[i+1] == 'A':
+                    pool_type = nn.AvgPool2d
+                else:
+                    raise NotImplementedError(f'The letter {config[i+1]} is not supported, should be A or M.')
+
+                block_layers.append(pool_type(kernel_size=2, stride=2))
 
             if bottleneck_dim[i] > 0:
                 block_layers.append(nn.Conv2d(out_channels, bottleneck_dim[i], kernel_size=1))
                 out_channels = bottleneck_dim[i]
-            
+
             blocks.append(nn.Sequential(*block_layers))
-            
-            spatial_size = spatial_size + 2*padding[i] - kernel_size[i] + 1
-            if (i+1 < len(config)) and (config[i+1] == 'A'):
-                spatial_size /= 2
             in_channels = out_channels  # The input channels of the next convolution layer.
 
     n_features = int(out_channels * (spatial_size ** 2))

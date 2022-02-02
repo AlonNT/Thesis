@@ -16,7 +16,7 @@ import torch.nn.functional as F
 
 from functools import partial
 from tqdm import tqdm
-from typing import List, Optional, Dict, Callable, Tuple
+from typing import List, Optional, Dict, Callable, Tuple, Union
 from loguru import logger
 from datetime import timedelta
 from torch.utils.data import DataLoader
@@ -1107,11 +1107,11 @@ def log_epoch_end(epoch, epoch_time_elapsed, total_epochs, total_time,
                 f'acc={epoch_test_accuracy:.2f}%')
 
 
-def get_model_device(model: torch.nn.Module):
+def get_model_device(model: Union[None, nn.Module, Callable]):
     default_device = torch.device('cpu')
 
     # If the model is None, assume the model's device is CPU.
-    if model is None:
+    if (model is None) or (not isinstance(model, nn.Module)):
         return default_device
 
     try:
@@ -1127,7 +1127,7 @@ def power_minus_1(a: torch.Tensor):
 
 
 @torch.no_grad()
-def get_model_output_shape(model: nn.Module, dataloader: Optional[DataLoader] = None):
+def get_model_output_shape(model: Union[nn.Module, Callable], dataloader: Optional[DataLoader] = None):
     if dataloader is None:
         clean_dataloaders = get_dataloaders(batch_size=1)
         dataloader = clean_dataloaders["train"]

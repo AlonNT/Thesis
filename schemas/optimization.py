@@ -10,7 +10,7 @@ class OptimizationArgs(ImmutableArgs):
     epochs: Union[PositiveInt, List[PositiveInt]] = 200
 
     #: Mini batch size to use in each training-step.
-    batch_size: Union[PositiveInt, List[PositiveInt]] = 64
+    batch_size: Union[PositiveInt, List[PositiveInt]] = 32
 
     #: Momentum to use in SGD optimizer.
     momentum: ProperFraction = 0.9
@@ -19,7 +19,7 @@ class OptimizationArgs(ImmutableArgs):
     weight_decay: NonNegativeFloat = 0
 
     # The initial learning-rate which might later be decayed.
-    learning_rate: Union[ProperFraction, List[ProperFraction]] = 0.003
+    learning_rate: Union[ProperFraction, List[ProperFraction]] = 0.001
 
     #: Decay the learning-rate at these steps by a factor of `learning_rate_decay_gamma`.
     learning_rate_decay_steps: List[PositiveInt] = [100, 150]

@@ -20,7 +20,7 @@ from math import ceil
 from torchvision.transforms.functional import hflip
 from matplotlib.patches import Rectangle
 from loguru import logger
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, Union
 from datetime import timedelta
 
 from consts import N_CLASSES
@@ -271,7 +271,7 @@ class PatchBasedEmbedding(nn.Module):
 def sample_random_patches(data_loader,
                           n_patches,
                           patch_size,
-                          existing_model: Optional[nn.Module] = None,
+                          existing_model: Union[None, nn.Module, Callable] = None,
                           visualize: bool = False,
                           random_uniform_patches: bool = False,
                           random_gaussian_patches: bool = False,
