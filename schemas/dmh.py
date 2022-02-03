@@ -51,23 +51,6 @@ class DMHArgs(ImmutableArgs):
     #: The k-th nearest-neighbor will be used for the k-NN imitator.
     k: Union[PositiveInt, List[PositiveInt]] = 1
 
-    #: If it's true, when calculating the k-nearest-neighbors mask, there will be ones in the indices of the neighbors
-    #: 1, 2, ..., k. If it's false, there will be a single one in the index of the k-th nearest-neighbor.
-    up_to_k: Union[bool, List[bool]] = True
-
-    #: Initialize the patches-dictionary randomly from the same random distribution as PyTorch default for Conv2D.
-    random_embedding: Union[bool, List[bool]] = False
-
-    #: Taken from page 4 from Coates et al (2011)
-    #: An Analysis of Single-Layer Networks in Unsupervised Feature Learning
-    #: https://cs.stanford.edu/~acoates/papers/coatesleeng_aistats_2011.pdf
-    #: This activation function outputs 0 for any patch where the distance to the centroid  is “above average”.
-    #: In practice, this means that roughly half of the features will be set to 0.
-    kmeans_triangle: Union[bool, List[bool]] = False
-
-    #: If it's true, the embedding will have gradients and will change during training.
-    learnable_embedding: Union[bool, List[bool]] = False
-
     #: The regularization factor (a.k.a. lambda) of the whitening matrix.
     use_whitening: Union[bool, List[bool]] = True
 
@@ -84,7 +67,9 @@ class DMHArgs(ImmutableArgs):
     #: This cause the metric between patches to be minimal-angle instead of euclidean-distance.
     normalize_patches_to_unit_vectors: Union[bool, List[bool]] = False
 
-    sample_patches_from_original_zero_one_values: Union[bool, List[bool]] = True
+    dataset_type_for_patches_dictionary: Union[str, List[str]] = 'aug'
+
+    imitators_on_gpu: bool = False
 
     # #: Whether to imitate only the first convolution-layer in the block,
     # #: or the whole block (including ReLU and possibly MaxPool / BatchNorm, etc).

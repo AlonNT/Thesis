@@ -39,16 +39,7 @@ from vgg import get_vgg_model_kernel_size, get_vgg_blocks, configs
 
 
 class KNearestPatchesEmbedding(nn.Module):
-    def __init__(self,
-                 kernel: np.ndarray,
-                 bias: np.ndarray,
-                 stride: int,
-                 padding: int,
-                 k: int,
-                 up_to_k: bool,
-                 kmeans_triangle: bool,
-                 random_embedding: bool,
-                 learnable_embedding: bool):
+    def __init__(self, kernel: np.ndarray, bias: np.ndarray, stride: int, padding: int, k: int):
         """Calculating the k-nearest-neighbors for patches in the input image.
 
         Calculating the k-nearest-neighbors is implemented as a convolution layer, as in
@@ -68,20 +59,11 @@ class KNearestPatchesEmbedding(nn.Module):
         super(KNearestPatchesEmbedding, self).__init__()
 
         self.k: int = k
-        self.up_to_k: bool = up_to_k
         self.stride: int = stride
         self.padding: int = padding
-        self.kmeans_triangle: bool = kmeans_triangle
-        self.random_embedding: bool = random_embedding
-        self.learnable_embedding: bool = learnable_embedding
 
-        if self.random_embedding:
-            out_channels, in_channels, kernel_height, kernel_width = kernel.shape
-            assert kernel_height == kernel_width, "the kernel should be square"
-            kernel, bias = get_random_initialized_conv_kernel_and_bias(in_channels, out_channels, kernel_height)
-
-        self.kernel = nn.Parameter(torch.Tensor(kernel), requires_grad=self.learnable_embedding)
-        self.bias = nn.Parameter(torch.Tensor(bias), requires_grad=self.learnable_embedding)
+        self.kernel = nn.Parameter(torch.Tensor(kernel), requires_grad=False)
+        self.bias = nn.Parameter(torch.Tensor(bias), requires_grad=False)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         """Performs a forward pass.
@@ -98,36 +80,33 @@ class KNearestPatchesEmbedding(nn.Module):
         # input patch in that location, but minimizing this value will minimize the distance
         # (since the norm of the input patch is the same among all patches in the bank).
         distances = F.conv2d(images, self.kernel, self.bias, self.stride, self.padding)
-        values, indices = distances.kthvalue(k=self.k, dim=1, keepdim=True)
-
-        if self.kmeans_triangle:
-            mask = F.relu(torch.mean(distances, dim=1, keepdim=True) - distances)
-        elif self.up_to_k:
-            mask = torch.le(distances, values).float()
-        else:
-            mask = torch.zeros_like(distances).scatter_(dim=1, index=indices, value=1)
+        values = distances.kthvalue(k=self.k, dim=1, keepdim=True).values
+        mask = torch.le(distances, values).float()
 
         return mask
 
 
 class NeighborsValuesAssigner(nn.Module):
-    def __init__(self,
-                 kernel: np.ndarray,
-                 bias: np.ndarray,
-                 values: np.ndarray,
-                 stride: int,
-                 padding: int,
-                 k: int,
-                 up_to_k: bool,
-                 kmeans_triangle: bool,
-                 random_embedding: bool,
-                 learnable_embedding: bool):
+    def __init__(self, centroids: np.ndarray, values: np.ndarray, stride: int, padding: int, k: int, gpu: bool = False):
         super(NeighborsValuesAssigner, self).__init__()
-        self.knn_mask_calculator = KNearestPatchesEmbedding(kernel, bias, stride, padding, k, up_to_k,
-                                                            kmeans_triangle, random_embedding, learnable_embedding)
+        self.kernel_size = centroids.shape[-1]
+        self.stride = stride
+        self.padding = padding
+        self.k = k
+        self.gpu = gpu
+
+        if self.gpu:
+            kernel = -1 * centroids
+            bias = (0.5 * np.linalg.norm(centroids.reshape(centroids.shape[0], -1), axis=1) ** 2)
+            self.knn_mask_calculator = KNearestPatchesEmbedding(kernel, bias, stride, padding, k)
+        else:
+            centroids_flat = centroids.reshape(centroids.shape[0], -1)
+            self.index = faiss.IndexFlatL2(centroids_flat.shape[1])
+            self.index.add(centroids_flat)
+
         self.values = nn.Parameter(torch.Tensor(values), requires_grad=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_using_mask(self, x: torch.Tensor) -> torch.Tensor:
         # TODO Consider the following:
         #  Using torch.sparse to speed-up the calculations.
         #  Using a learnable 1x1 convolution instead of sum followed by division with k.
@@ -137,6 +116,35 @@ class NeighborsValuesAssigner(nn.Module):
         masked_values = mask * values  # TODO it takes A LOT of memory :(
         result = masked_values.sum(dim=1) / self.knn_mask_calculator.k
         return result
+
+    def forward_using_indices(self, x: torch.Tensor) -> torch.Tensor:
+        # TODO
+        #  Consider replacing with a learnable linear layer
+        #  Consider moving faiss index to the GPU.
+        #  Consider using PyTorch kthvalue function and using its indices, instead of faiss.
+        x_unfolded = F.unfold(x, kernel_size=self.kernel_size, padding=self.padding, stride=self.stride)
+        batch_size, patch_dim, n_patches = x_unfolded.shape
+        values_channels = self.values.shape[1]
+        output_spatial_size = int(math.sqrt(n_patches))
+
+        # Transpose from (N, C*H*W, M) to (N, M, C*H*W) and then reshape to (N*M, C*H*W) to have collection of vectors
+        # Also make contiguous in memory (required by function kmeans.search).
+        x_unfolded = x_unfolded.transpose(dim0=1, dim1=2).flatten(start_dim=0, end_dim=1).contiguous()
+        _, indices = self.index.search(x_unfolded.cpu().numpy(), self.k)
+        x_unfolded_outputs = self.values[indices]
+        x_unfolded_outputs = x_unfolded_outputs.mean(dim=1)
+        x_unfolded_outputs = x_unfolded_outputs.reshape(batch_size, n_patches, values_channels)
+        x_unfolded_outputs = x_unfolded_outputs.transpose(dim0=1, dim1=2)
+
+        x_output = x_unfolded_outputs.reshape(batch_size, values_channels, output_spatial_size, output_spatial_size)
+
+        return x_output
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.gpu:
+            return self.forward_using_mask(x)
+        else:
+            return self.forward_using_indices(x)
 
 # class LocallyLinearConvImitator(nn.Module):
 #     def __init__(self, patches: np.ndarray, out_channels: int, padding: int, k: int):
@@ -1145,9 +1153,15 @@ class ImitatorKNN(pl.LightningModule):
                                                 for k in ['kernel_size', 'dilation', 'padding', 'stride']})
 
         # TODO Consider doing the following:
-        #  Using dataloader without augmentations.
         #  Whitening / normalizing the patches.
-        patches = sample_random_patches(self.datamodule.train_dataloader(), self.args.dmh.n_patches,
+        if self.args.dmh.dataset_type_for_patches_dictionary == 'aug':
+            dataloader = self.datamodule.train_dataloader()
+        elif self.args.dmh.dataset_type_for_patches_dictionary == 'no_aug':
+            dataloader = self.datamodule.train_dataloader_no_aug()
+        else:  # self.args.dmh.dataset_type_for_patches_dictionary == 'clean'
+            dataloader = self.datamodule.train_dataloader_clean()
+
+        patches = sample_random_patches(dataloader, self.args.dmh.n_patches,
                                         teacher_conv.kernel_size[0], self.imitators,
                                         random_uniform_patches=self.args.dmh.random_uniform_patches,
                                         random_gaussian_patches=self.args.dmh.random_gaussian_patches,
@@ -1161,21 +1175,16 @@ class ImitatorKNN(pl.LightningModule):
         centroids_outputs = centroids_outputs.cpu().numpy().squeeze(axis=(2, 3))
 
         imitator = NeighborsValuesAssigner(
-            kernel=(-1 * centroids),
-            bias=(0.5 * np.linalg.norm(centroids.reshape(centroids.shape[0], -1), axis=1) ** 2),
+            centroids,
             values=centroids_outputs,
             stride=teacher_conv.stride[0],
             padding=teacher_conv.padding[0],
             k=self.args.dmh.k,
-            up_to_k=self.args.dmh.up_to_k,
-            kmeans_triangle=self.args.dmh.kmeans_triangle,
-            random_embedding=self.args.dmh.random_embedding,
-            learnable_embedding=self.args.dmh.learnable_embedding
-        ).to(self.device)
+            gpu=self.args.dmh.imitators_on_gpu
+        )
 
         loss = 0
         for inputs, _ in tqdm(self.datamodule.val_dataloader(), desc=f'Evaluating imitated block'):
-            inputs = inputs.to(self.device)
             inputs = self.imitators(inputs)
             batch_targets = teacher_block(inputs)
             batch_imitated_targets = imitator(inputs)
@@ -1305,12 +1314,7 @@ def main():
         datamodule_for_sampling = initialize_datamodule(args.data, batch_size=4)
         imitator = ImitatorKNN(model, args, datamodule_for_sampling)
         for i in range(len(imitator.features)):
-            # Move the imitator to the GPU since PyTorch Lightning didn't start its magic yet (in `fit`)
-            original_device = imitator.device
-            imitator = imitator.to(args.env.device)
             replaced_block_error = imitator.imitate_first_block()
-            imitator = imitator.to(original_device)
-
             wandb_logger = initialize_wandb_logger(args, name_suffix=f'_block_{i}')
             wandb_logger.watch(imitator, log='all')
             wandb_logger.experiment.summary['replaced_block_error'] = replaced_block_error
