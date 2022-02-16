@@ -4,7 +4,6 @@ import sys
 import wandb
 import torch
 import faiss
-import ipdb
 
 import numpy as np
 import pandas as pd
@@ -34,12 +33,13 @@ from schemas.data import DataArgs
 from schemas.dmh import Args, DMHArgs
 from schemas.optimization import OptimizationArgs
 from utils import (configure_logger, get_args, get_model_device, power_minus_1, get_mlp, get_dataloaders,
-                   whiten_data, normalize_data, get_random_initialized_conv_kernel_and_bias)
+                   whiten_data, normalize_data)
 from vgg import get_vgg_model_kernel_size, get_vgg_blocks, configs
 
 
 class KNearestPatchesEmbedding(nn.Module):
-    def __init__(self, kernel: np.ndarray, bias: np.ndarray, stride: int, padding: int, k: int):
+    def __init__(self, kernel: np.ndarray, bias: np.ndarray, stride: int, padding: int, k: int,
+                 return_as_mask: bool = True):
         """Calculating the k-nearest-neighbors for patches in the input image.
 
         Calculating the k-nearest-neighbors is implemented as a convolution layer, as in
@@ -61,6 +61,7 @@ class KNearestPatchesEmbedding(nn.Module):
         self.k: int = k
         self.stride: int = stride
         self.padding: int = padding
+        self.return_as_mask: bool = return_as_mask
 
         self.kernel = nn.Parameter(torch.Tensor(kernel), requires_grad=False)
         self.bias = nn.Parameter(torch.Tensor(bias), requires_grad=False)
@@ -80,48 +81,71 @@ class KNearestPatchesEmbedding(nn.Module):
         # input patch in that location, but minimizing this value will minimize the distance
         # (since the norm of the input patch is the same among all patches in the bank).
         distances = F.conv2d(images, self.kernel, self.bias, self.stride, self.padding)
-        values = distances.kthvalue(k=self.k, dim=1, keepdim=True).values
-        mask = torch.le(distances, values).float()
-
-        return mask
+        if self.return_as_mask:
+            values = distances.kthvalue(k=self.k, dim=1, keepdim=True).values
+            mask = torch.le(distances, values).float()
+            return mask
+        else:
+            indices = torch.topk(distances, k=self.k, dim=1, largest=False).indices
+            return indices
 
 
 class NeighborsValuesAssigner(nn.Module):
-    def __init__(self, centroids: np.ndarray, values: np.ndarray, stride: int, padding: int, k: int, gpu: bool = False):
+    def __init__(self, centroids: np.ndarray, values: np.ndarray, stride: int, padding: int, k: int,
+                 use_faiss: bool = False, no_reduction: bool = False, use_linear_function: str = 'none'):
         super(NeighborsValuesAssigner, self).__init__()
         self.kernel_size = centroids.shape[-1]
         self.stride = stride
         self.padding = padding
         self.k = k
-        self.gpu = gpu
+        self.use_faiss = use_faiss
+        self.no_reduction = no_reduction
+        self.use_linear_function = use_linear_function
 
-        if self.gpu:
-            kernel = -1 * centroids
-            bias = (0.5 * np.linalg.norm(centroids.reshape(centroids.shape[0], -1), axis=1) ** 2)
-            self.knn_mask_calculator = KNearestPatchesEmbedding(kernel, bias, stride, padding, k)
-        else:
+        if self.use_faiss:
             centroids_flat = centroids.reshape(centroids.shape[0], -1)
             self.index = faiss.IndexFlatL2(centroids_flat.shape[1])
             self.index.add(centroids_flat)
+        else:
+            kernel = -1 * centroids
+            bias = 0.5 * (np.linalg.norm(centroids.reshape(centroids.shape[0], -1), axis=1) ** 2)
+            self.knn_indices_calculator = KNearestPatchesEmbedding(kernel, bias, stride, padding, k,
+                                                                   return_as_mask=False)
 
         self.values = nn.Parameter(torch.Tensor(values), requires_grad=False)
+        if use_linear_function == 'full':
+            values_dim = self.values.shape[1]
+            self.conv = nn.Conv2d(in_channels=k*values_dim, out_channels=values_dim, kernel_size=(1, 1))
+        elif use_linear_function == 'partial':
+            self.conv = nn.Conv2d(in_channels=k, out_channels=1, kernel_size=(1, 1))
+        else:  # use_linear_function == 'none'
+            self.conv = None
 
-    def forward_using_mask(self, x: torch.Tensor) -> torch.Tensor:
-        # TODO Consider the following:
-        #  Using torch.sparse to speed-up the calculations.
-        #  Using a learnable 1x1 convolution instead of sum followed by division with k.
-        mask = self.knn_mask_calculator(x)
-        mask = mask.unsqueeze(2)  # To broadcast against the values
-        values = self.values.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
-        masked_values = mask * values  # TODO it takes A LOT of memory :(
-        result = masked_values.sum(dim=1) / self.knn_mask_calculator.k
+    def forward_using_torch(self, x: torch.Tensor) -> torch.Tensor:
+        values_dim = self.values.shape[1]
+        knn_indices = self.knn_indices_calculator(x)
+        batch_size, k, output_height, output_width = knn_indices.shape
+        assert k == self.k, f'self.knn_indices_calculator did not return {self.k} indices'
+
+        result = self.values[knn_indices]
+        result = torch.permute(result, dims=(0, 1, 4, 2, 3))
+        if self.no_reduction:
+            result = torch.flatten(result, start_dim=1, end_dim=2)
+        else:
+            if self.use_linear_function == 'full':
+                result = torch.flatten(result, start_dim=1, end_dim=2)
+                result = self.conv(result)
+            elif self.use_linear_function == 'partial':
+                result = torch.swapaxes(result, 1, 2)
+                result = torch.flatten(result, start_dim=0, end_dim=1)
+                result = self.conv(result)
+                result = torch.reshape(result, shape=(batch_size, values_dim, output_height, output_width))
+            else:
+                result = torch.mean(result, dim=1)
+
         return result
 
-    def forward_using_indices(self, x: torch.Tensor) -> torch.Tensor:
-        # TODO
-        #  Consider replacing with a learnable linear layer
-        #  Consider moving faiss index to the GPU.
-        #  Consider using PyTorch kthvalue function and using its indices, instead of faiss.
+    def forward_using_faiss(self, x: torch.Tensor) -> torch.Tensor:
         x_unfolded = F.unfold(x, kernel_size=self.kernel_size, padding=self.padding, stride=self.stride)
         batch_size, patch_dim, n_patches = x_unfolded.shape
         values_channels = self.values.shape[1]
@@ -141,10 +165,10 @@ class NeighborsValuesAssigner(nn.Module):
         return x_output
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.gpu:
-            return self.forward_using_mask(x)
+        if self.use_faiss:
+            return self.forward_using_faiss(x)
         else:
-            return self.forward_using_indices(x)
+            return self.forward_using_torch(x)
 
 # class LocallyLinearConvImitator(nn.Module):
 #     def __init__(self, patches: np.ndarray, out_channels: int, padding: int, k: int):
@@ -1057,7 +1081,6 @@ class LinearRegionsCalculator(Callback):
         metrics[f'block_{block_index}_fraction_good_patches_random_centroids'] = fraction_good_patches_random.item()
         metrics[f'block_{block_index}_sym_diff_mean_random_centroids'] = sym_diff_mean_random.item()
         metrics[f'block_{block_index}_sym_diff_median_random_centroids'] = sym_diff_median_random.item()
-        
 
     def log_linear_regions_respect_per_layer(self, trainer, pl_module: LitVGG, dataloader):
         """
@@ -1180,7 +1203,9 @@ class ImitatorKNN(pl.LightningModule):
             stride=teacher_conv.stride[0],
             padding=teacher_conv.padding[0],
             k=self.args.dmh.k,
-            gpu=self.args.dmh.imitators_on_gpu
+            use_faiss=self.args.dmh.use_faiss,
+            no_reduction=self.args.dmh.no_reduction,
+            use_linear_function=self.args.dmh.use_linear_function
         )
 
         loss = 0

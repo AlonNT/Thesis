@@ -1,4 +1,4 @@
-from typing import List, Union
+from typing import List, Union, Literal
 
 from pydantic import root_validator
 from pydantic.types import PositiveInt
@@ -67,13 +67,18 @@ class DMHArgs(ImmutableArgs):
     #: This cause the metric between patches to be minimal-angle instead of euclidean-distance.
     normalize_patches_to_unit_vectors: Union[bool, List[bool]] = False
 
-    dataset_type_for_patches_dictionary: Union[str, List[str]] = 'aug'
+    dataset_type_for_patches_dictionary: Literal['aug', 'no_aug', 'clean'] = 'aug'
 
-    imitators_on_gpu: bool = False
+    #: Whether to use faiss in calculating nearest-neighbors. If it's false native PyTorch will be used.
+    use_faiss: bool = False
 
-    # #: Whether to imitate only the first convolution-layer in the block,
-    # #: or the whole block (including ReLU and possibly MaxPool / BatchNorm, etc).
-    # imitate_whole_block: bool = True
+    #: If it's true, the k's vectors of the neighbors will be stacked and not reduced (by mean/linear-function).
+    no_reduction: bool = False
+
+    #: 'none' means simply mean will be used to reduce the k's vectors to a single vector, not a linear function.
+    #: 'partial' means a linear function (from k values to 1) will be used instead of mean over the k vectors.
+    #: 'full' means a linear function (from k*C values to C) will be used instead of mean over the k vectors.
+    use_linear_function: Literal['none', 'full', 'partial'] = 'none'
 
     @root_validator
     def validate_estimate_dim_on_images_or_patches(cls, values):
@@ -83,6 +88,12 @@ class DMHArgs(ImmutableArgs):
     @root_validator
     def validate_k1_and_k2(cls, values):
         assert values['k1'] < values['k2']  # <= values['n_patches']
+        return values
+
+    @root_validator
+    def validate_no_reduction(cls, values):
+        if values['no_reduction']:
+            assert values['use_linear_function'] == 'none', 'linear function reduces, so no sense no_reduction is true'
         return values
 
     # @root_validator
