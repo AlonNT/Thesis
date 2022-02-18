@@ -33,7 +33,7 @@ from schemas.data import DataArgs
 from schemas.dmh import Args, DMHArgs
 from schemas.optimization import OptimizationArgs
 from utils import (configure_logger, get_args, get_model_device, power_minus_1, get_mlp, get_dataloaders,
-                   whiten_data, normalize_data)
+                   whiten_data, normalize_data, calc_whitening_from_dataloader)
 from vgg import get_vgg_model_kernel_size, get_vgg_blocks, configs
 
 
@@ -91,24 +91,36 @@ class KNearestPatchesEmbedding(nn.Module):
 
 
 class NeighborsValuesAssigner(nn.Module):
-    def __init__(self, centroids: np.ndarray, values: np.ndarray, stride: int, padding: int, k: int,
-                 use_faiss: bool = False, no_reduction: bool = False, use_linear_function: str = 'none'):
+    def __init__(self, patches: np.ndarray, values: np.ndarray, stride: int, padding: int, k: int,
+                 use_faiss: bool = False, no_reduction: bool = False, use_linear_function: str = 'none',
+                 whitening_matrix: Optional[np.ndarray] = None):
         super(NeighborsValuesAssigner, self).__init__()
-        self.kernel_size = centroids.shape[-1]
+        self.kernel_size = patches.shape[-1]
         self.stride = stride
         self.padding = padding
         self.k = k
         self.use_faiss = use_faiss
         self.no_reduction = no_reduction
         self.use_linear_function = use_linear_function
+        self.whitening_matrix = whitening_matrix
+
+        patches_flat = patches.reshape(patches.shape[0], -1)
+        if self.whitening_matrix is not None:
+            patches_flat = patches_flat @ self.whitening_matrix
 
         if self.use_faiss:
-            centroids_flat = centroids.reshape(centroids.shape[0], -1)
-            self.index = faiss.IndexFlatL2(centroids_flat.shape[1])
-            self.index.add(centroids_flat)
+            self.index = faiss.IndexFlatL2(patches_flat.shape[1])
+            self.index.add(patches_flat)
         else:
-            kernel = -1 * centroids
-            bias = 0.5 * (np.linalg.norm(centroids.reshape(centroids.shape[0], -1), axis=1) ** 2)
+            if self.whitening_matrix is not None:
+                bias = 0.5 * (np.linalg.norm(patches_flat, axis=1) ** 2)
+                patches_flat = patches_flat @ self.whitening_matrix.T
+                patches = patches_flat.reshape(-1, *patches.shape[1:])
+                kernel = -1 * patches
+            else:
+                bias = 0.5 * (np.linalg.norm(patches_flat, axis=1) ** 2)
+                kernel = -1 * patches
+
             self.knn_indices_calculator = KNearestPatchesEmbedding(kernel, bias, stride, padding, k,
                                                                    return_as_mask=False)
 
@@ -153,8 +165,10 @@ class NeighborsValuesAssigner(nn.Module):
 
         # Transpose from (N, C*H*W, M) to (N, M, C*H*W) and then reshape to (N*M, C*H*W) to have collection of vectors
         # Also make contiguous in memory (required by function kmeans.search).
-        x_unfolded = x_unfolded.transpose(dim0=1, dim1=2).flatten(start_dim=0, end_dim=1).contiguous()
-        _, indices = self.index.search(x_unfolded.cpu().numpy(), self.k)
+        x_unfolded = x_unfolded.transpose(dim0=1, dim1=2).flatten(start_dim=0, end_dim=1).contiguous().cpu().numpy()
+        if self.whitening_matrix is not None:
+            x_unfolded = x_unfolded @ self.whitening_matrix
+        _, indices = self.index.search(x_unfolded, self.k)
         x_unfolded_outputs = self.values[indices]
         x_unfolded_outputs = x_unfolded_outputs.mean(dim=1)
         x_unfolded_outputs = x_unfolded_outputs.reshape(batch_size, n_patches, values_channels)
@@ -1189,24 +1203,43 @@ class ImitatorKNN(pl.LightningModule):
                                         random_uniform_patches=self.args.dmh.random_uniform_patches,
                                         random_gaussian_patches=self.args.dmh.random_gaussian_patches,
                                         verbose=True)
-        patches_flat = patches.reshape(patches.shape[0], -1)
-        kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=self.args.dmh.n_clusters, verbose=True)
-        kmeans.train(patches_flat)
-        centroids = kmeans.centroids.reshape(-1, *patches.shape[1:])
-        centroids_tensor = torch.from_numpy(centroids).to(self.device)
-        centroids_outputs = teacher_block(centroids_tensor)
-        centroids_outputs = centroids_outputs.cpu().numpy().squeeze(axis=(2, 3))
+        patches_shape = patches.shape
+        patches = patches.reshape(patches.shape[0], -1)
 
-        imitator = NeighborsValuesAssigner(
-            centroids,
-            values=centroids_outputs,
-            stride=teacher_conv.stride[0],
-            padding=teacher_conv.padding[0],
-            k=self.args.dmh.k,
-            use_faiss=self.args.dmh.use_faiss,
-            no_reduction=self.args.dmh.no_reduction,
-            use_linear_function=self.args.dmh.use_linear_function
-        )
+        whitening_matrix = None
+
+        if self.args.dmh.use_whitening:
+            # Calculates the whitening matrix and multiply each patch by this matrix,
+            # so the kmeans later will run on the whitened patches.
+            whitening_matrix = calc_whitening_from_dataloader(
+                dataloader,
+                patch_size=teacher_conv.kernel_size[0],
+                whitening_regularization_factor=self.args.dmh.whitening_regularization_factor,
+                zca_whitening=self.args.dmh.zca_whitening,
+                existing_model=self.imitators
+            )
+            patches = patches @ whitening_matrix
+
+        if self.args.dmh.n_patches > self.args.dmh.n_clusters:
+            kmeans = faiss.Kmeans(d=patches.shape[1], k=self.args.dmh.n_clusters, verbose=True)
+            kmeans.train(patches)
+            patches = kmeans.centroids
+
+        if self.args.dmh.use_whitening:
+            # We want to run the teacher block on the original patches,
+            # so only the whitening will be used only for the distance calculation.
+            patches = patches @ np.linalg.inv(whitening_matrix)
+
+        patches = patches.reshape(-1, *patches_shape[1:])
+        patches_tensor = torch.from_numpy(patches).to(self.device)
+        patches_outputs = teacher_block(patches_tensor)
+        patches_outputs = patches_outputs.cpu().numpy().squeeze(axis=(2, 3))
+
+        imitator = NeighborsValuesAssigner(patches, values=patches_outputs, stride=teacher_conv.stride[0],
+                                           padding=teacher_conv.padding[0], k=self.args.dmh.k,
+                                           use_faiss=self.args.dmh.use_faiss, no_reduction=self.args.dmh.no_reduction,
+                                           use_linear_function=self.args.dmh.use_linear_function,
+                                           whitening_matrix=whitening_matrix)
 
         loss = 0
         for inputs, _ in tqdm(self.datamodule.val_dataloader(), desc=f'Evaluating imitated block'):

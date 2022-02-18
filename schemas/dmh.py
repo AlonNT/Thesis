@@ -52,7 +52,7 @@ class DMHArgs(ImmutableArgs):
     k: Union[PositiveInt, List[PositiveInt]] = 1
 
     #: The regularization factor (a.k.a. lambda) of the whitening matrix.
-    use_whitening: Union[bool, List[bool]] = True
+    use_whitening: Union[bool, List[bool]] = False
 
     #: If it's false, use PCA-whitening. Otherwise, use ZCA whitening (which is a rotation of the PCA-whitening).
     zca_whitening: Union[bool, List[bool]] = False
