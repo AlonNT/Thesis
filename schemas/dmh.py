@@ -72,9 +72,6 @@ class DMHArgs(ImmutableArgs):
     #: Whether to use faiss in calculating nearest-neighbors. If it's false native PyTorch will be used.
     use_faiss: bool = False
 
-    #: If it's true, the k's vectors of the neighbors will be stacked and not reduced (by mean/linear-function).
-    no_reduction: bool = False
-
     #: 'none' means simply mean will be used to reduce the k's vectors to a single vector, not a linear function.
     #: 'partial' means a linear function (from k values to 1) will be used instead of mean over the k vectors.
     #: 'full' means a linear function (from k*C values to C) will be used instead of mean over the k vectors.

@@ -92,7 +92,7 @@ class KNearestPatchesEmbedding(nn.Module):
 
 class NeighborsValuesAssigner(nn.Module):
     def __init__(self, patches: np.ndarray, values: np.ndarray, stride: int, padding: int, k: int,
-                 use_faiss: bool = False, no_reduction: bool = False, use_linear_function: str = 'none',
+                 use_faiss: bool = False, use_linear_function: str = 'none',
                  whitening_matrix: Optional[np.ndarray] = None):
         super(NeighborsValuesAssigner, self).__init__()
         self.kernel_size = patches.shape[-1]
@@ -100,7 +100,6 @@ class NeighborsValuesAssigner(nn.Module):
         self.padding = padding
         self.k = k
         self.use_faiss = use_faiss
-        self.no_reduction = no_reduction
         self.use_linear_function = use_linear_function
         self.whitening_matrix = whitening_matrix
 
@@ -112,14 +111,11 @@ class NeighborsValuesAssigner(nn.Module):
             self.index = faiss.IndexFlatL2(patches_flat.shape[1])
             self.index.add(patches_flat)
         else:
+            bias = 0.5 * (np.linalg.norm(patches_flat, axis=1) ** 2)
             if self.whitening_matrix is not None:
-                bias = 0.5 * (np.linalg.norm(patches_flat, axis=1) ** 2)
                 patches_flat = patches_flat @ self.whitening_matrix.T
                 patches = patches_flat.reshape(-1, *patches.shape[1:])
-                kernel = -1 * patches
-            else:
-                bias = 0.5 * (np.linalg.norm(patches_flat, axis=1) ** 2)
-                kernel = -1 * patches
+            kernel = -1 * patches
 
             self.knn_indices_calculator = KNearestPatchesEmbedding(kernel, bias, stride, padding, k,
                                                                    return_as_mask=False)
@@ -141,19 +137,16 @@ class NeighborsValuesAssigner(nn.Module):
 
         result = self.values[knn_indices]
         result = torch.permute(result, dims=(0, 1, 4, 2, 3))
-        if self.no_reduction:
+        if self.use_linear_function == 'full':
             result = torch.flatten(result, start_dim=1, end_dim=2)
+            result = self.conv(result)
+        elif self.use_linear_function == 'partial':
+            result = torch.swapaxes(result, 1, 2)
+            result = torch.flatten(result, start_dim=0, end_dim=1)
+            result = self.conv(result)
+            result = torch.reshape(result, shape=(batch_size, values_dim, output_height, output_width))
         else:
-            if self.use_linear_function == 'full':
-                result = torch.flatten(result, start_dim=1, end_dim=2)
-                result = self.conv(result)
-            elif self.use_linear_function == 'partial':
-                result = torch.swapaxes(result, 1, 2)
-                result = torch.flatten(result, start_dim=0, end_dim=1)
-                result = self.conv(result)
-                result = torch.reshape(result, shape=(batch_size, values_dim, output_height, output_width))
-            else:
-                result = torch.mean(result, dim=1)
+            result = torch.mean(result, dim=1)
 
         return result
 
@@ -1237,7 +1230,7 @@ class ImitatorKNN(pl.LightningModule):
 
         imitator = NeighborsValuesAssigner(patches, values=patches_outputs, stride=teacher_conv.stride[0],
                                            padding=teacher_conv.padding[0], k=self.args.dmh.k,
-                                           use_faiss=self.args.dmh.use_faiss, no_reduction=self.args.dmh.no_reduction,
+                                           use_faiss=self.args.dmh.use_faiss,
                                            use_linear_function=self.args.dmh.use_linear_function,
                                            whitening_matrix=whitening_matrix)
 
