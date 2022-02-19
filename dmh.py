@@ -92,7 +92,7 @@ class KNearestPatchesEmbedding(nn.Module):
 
 class NeighborsValuesAssigner(nn.Module):
     def __init__(self, patches: np.ndarray, values: np.ndarray, stride: int, padding: int, k: int,
-                 use_faiss: bool = False, use_linear_function: str = 'none',
+                 use_faiss: bool = False, use_linear_function: str = 'none', use_angles: bool = False,
                  whitening_matrix: Optional[np.ndarray] = None):
         super(NeighborsValuesAssigner, self).__init__()
         self.kernel_size = patches.shape[-1]
@@ -101,11 +101,15 @@ class NeighborsValuesAssigner(nn.Module):
         self.k = k
         self.use_faiss = use_faiss
         self.use_linear_function = use_linear_function
+        self.use_angles = use_angles
         self.whitening_matrix = whitening_matrix
 
         patches_flat = patches.reshape(patches.shape[0], -1)
         if self.whitening_matrix is not None:
             patches_flat = patches_flat @ self.whitening_matrix
+
+        if self.use_angles:
+            patches_flat /= (np.linalg.norm(patches_flat, axis=1)[..., np.newaxis] + 0.001)
 
         if self.use_faiss:
             self.index = faiss.IndexFlatL2(patches_flat.shape[1])
@@ -546,11 +550,6 @@ class LitVGG(pl.LightningModule):
 
         self.num_blocks = len(self.features) + len(self.mlp)
 
-        self.train_accuracy = tm.Accuracy()
-        self.validate_accuracy = tm.Accuracy()
-        self.accuracy = {RunningStage.TRAINING: self.train_accuracy,
-                         RunningStage.VALIDATING: self.validate_accuracy}
-
         self.kernel_sizes: List[int] = self.init_kernel_sizes()
         self.shapes: List[tuple] = self.init_shapes()
 
@@ -580,11 +579,11 @@ class LitVGG(pl.LightningModule):
         inputs, labels = batch
         logits = self(inputs)
         loss = self.loss(logits, labels)
-
-        self.accuracy[stage](logits, labels)
+        predictions = torch.argmax(logits, dim=1)
+        accuracy = torch.sum(labels == predictions).item() / len(labels)
 
         self.log(f'{stage.value}_loss', loss)
-        self.log(f'{stage.value}_accuracy', self.accuracy[stage])
+        self.log(f'{stage.value}_accuracy', accuracy, on_epoch=True, on_step=False)
 
         return loss
 
@@ -711,13 +710,6 @@ class LitMLP(pl.LightningModule):
 
         self.num_blocks = len(self.mlp)
 
-        # Apparently the Metrics must be an attribute of the LightningModule, and not inside a dictionary.
-        # This is why we have to set them separately here and then the dictionary will map to the attributes.
-        self.train_accuracy = tm.Accuracy()
-        self.validate_accuracy = tm.Accuracy()
-        self.accuracy = {RunningStage.TRAINING: self.train_accuracy,
-                         RunningStage.VALIDATING: self.validate_accuracy}
-
     def forward(self, x: torch.Tensor):
         return self.mlp(x)
 
@@ -725,11 +717,11 @@ class LitMLP(pl.LightningModule):
         inputs, labels = batch
         logits = self(inputs)
         loss = self.loss(logits, labels)
-
-        self.accuracy[stage](logits, labels)
+        predictions = torch.argmax(logits, dim=1)
+        accuracy = torch.sum(labels == predictions).item() / len(labels)
 
         self.log(f'{stage.value}_loss', loss)
-        self.log(f'{stage.value}_accuracy', self.accuracy[stage])
+        self.log(f'{stage.value}_accuracy', accuracy, on_epoch=True, on_step=False)
 
         return loss
 
@@ -1232,6 +1224,7 @@ class ImitatorKNN(pl.LightningModule):
                                            padding=teacher_conv.padding[0], k=self.args.dmh.k,
                                            use_faiss=self.args.dmh.use_faiss,
                                            use_linear_function=self.args.dmh.use_linear_function,
+                                           use_angles=self.args.dmh.use_angles,
                                            whitening_matrix=whitening_matrix)
 
         loss = 0

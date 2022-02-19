@@ -72,6 +72,10 @@ class DMHArgs(ImmutableArgs):
     #: Whether to use faiss in calculating nearest-neighbors. If it's false native PyTorch will be used.
     use_faiss: bool = False
 
+    #: Whether to use angles as the metric
+    #: (done by normalizing the vectors to be unit-vectors before calculating euclidean distance).
+    use_angles: bool = False
+
     #: 'none' means simply mean will be used to reduce the k's vectors to a single vector, not a linear function.
     #: 'partial' means a linear function (from k values to 1) will be used instead of mean over the k vectors.
     #: 'full' means a linear function (from k*C values to C) will be used instead of mean over the k vectors.
@@ -85,12 +89,6 @@ class DMHArgs(ImmutableArgs):
     @root_validator
     def validate_k1_and_k2(cls, values):
         assert values['k1'] < values['k2']  # <= values['n_patches']
-        return values
-
-    @root_validator
-    def validate_no_reduction(cls, values):
-        if values['no_reduction']:
-            assert values['use_linear_function'] == 'none', 'linear function reduces, so no sense no_reduction is true'
         return values
 
     # @root_validator
