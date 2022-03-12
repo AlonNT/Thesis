@@ -91,8 +91,15 @@ class KNearestPatchesEmbedding(nn.Module):
 
 
 class NeighborsValuesAssigner(nn.Module):
-    def __init__(self, patches: np.ndarray, values: np.ndarray, stride: int, padding: int, k: int,
-                 use_faiss: bool = False, use_linear_function: str = 'none', use_angles: bool = False,
+    def __init__(self,
+                 patches: np.ndarray,
+                 values: np.ndarray,
+                 stride: int,
+                 padding: int,
+                 k: int,
+                 use_faiss: bool = False,
+                 use_linear_function: str = 'none',
+                 use_angles: bool = False,
                  whitening_matrix: Optional[np.ndarray] = None):
         super(NeighborsValuesAssigner, self).__init__()
         self.kernel_size = patches.shape[-1]
@@ -123,8 +130,13 @@ class NeighborsValuesAssigner(nn.Module):
 
             self.knn_indices_calculator = KNearestPatchesEmbedding(kernel, bias, stride, padding, k,
                                                                    return_as_mask=False)
+        if values.ndim > 2:
+            assert use_linear_function == 'none', 'the argument use_linear_function is for values assigner mode.'
+            assert not use_faiss, 'Can not use faiss when using linear function per neighbor mode.'
+            assert values.ndim == 3, f'values has {values.ndim} dimensions, should be 2 or 3.'
+        values_requires_grad = (values.ndim == 3)
+        self.values = nn.Parameter(torch.Tensor(values), requires_grad=values_requires_grad)
 
-        self.values = nn.Parameter(torch.Tensor(values), requires_grad=False)
         if use_linear_function == 'full':
             values_dim = self.values.shape[1]
             self.conv = nn.Conv2d(in_channels=k*values_dim, out_channels=values_dim, kernel_size=(1, 1))
@@ -133,14 +145,9 @@ class NeighborsValuesAssigner(nn.Module):
         else:  # use_linear_function == 'none'
             self.conv = None
 
-    def forward_using_torch(self, x: torch.Tensor) -> torch.Tensor:
-        values_dim = self.values.shape[1]
-        knn_indices = self.knn_indices_calculator(x)
-        batch_size, k, output_height, output_width = knn_indices.shape
-        assert k == self.k, f'self.knn_indices_calculator did not return {self.k} indices'
-
-        result = self.values[knn_indices]
-        result = torch.permute(result, dims=(0, 1, 4, 2, 3))
+    def reduce_across_neighbors(self, result: torch.Tensor):
+        batch_size, k, values_dim, height, width = result.shape
+        assert k == self.k, f'Dimension 1 in argument `result` should equal {self.k=} but it is {k}'
         if self.use_linear_function == 'full':
             result = torch.flatten(result, start_dim=1, end_dim=2)
             result = self.conv(result)
@@ -148,11 +155,54 @@ class NeighborsValuesAssigner(nn.Module):
             result = torch.swapaxes(result, 1, 2)
             result = torch.flatten(result, start_dim=0, end_dim=1)
             result = self.conv(result)
-            result = torch.reshape(result, shape=(batch_size, values_dim, output_height, output_width))
-        else:
+            result = torch.reshape(result, shape=(batch_size, values_dim, height, width))
+        else:  # self.use_linear_function == 'none'
             result = torch.mean(result, dim=1)
 
         return result
+
+    def neighbors_linear_functions(self, x: torch.Tensor) -> torch.Tensor:
+        values_dim, patch_dim = self.values.shape[1:]
+        knn_indices = self.knn_indices_calculator(x)
+        batch_size, k, output_height, output_width = knn_indices.shape
+        assert k == self.k, f'self.knn_indices_calculator did not return {self.k} indices'
+
+        x_unfold = F.unfold(x, kernel_size=self.kernel_size, padding=self.padding, stride=self.stride)
+        batch_size, patch_dim, n_patches = x_unfold.shape
+        x_unfold = x_unfold.transpose(1, 2)
+        x_unfold = x_unfold.flatten(start_dim=0, end_dim=1)
+        x_unfold = x_unfold.unsqueeze(-1)  # Now (batch_size * n_patches, patch_dim, 1)
+
+        matrices = self.values[knn_indices]
+        matrices = matrices.permute(0, 2, 3, 1, 4, 5)
+        matrices = matrices.flatten(start_dim=0, end_dim=2)
+        matrices = matrices.flatten(start_dim=1, end_dim=2)  # Now (batch_size * n_patches, k * values_dim, patch_dim)
+
+        result = torch.bmm(matrices, x_unfold)
+        result = result.reshape(batch_size, output_height, output_width, self.k, values_dim)
+        result = result.permute(0, 3, 4, 1, 2)  # Now (batch_size, k, values_dim, output_height, output_width)
+
+        result = self.reduce_across_neighbors(result)
+
+        return result
+
+    def neighbors_values_assigner(self, x: torch.Tensor) -> torch.Tensor:
+        knn_indices = self.knn_indices_calculator(x)
+        batch_size, k, output_height, output_width = knn_indices.shape
+        assert k == self.k, f'self.knn_indices_calculator did not return {self.k} indices'
+
+        result = self.values[knn_indices]
+        result = torch.permute(result, dims=(0, 1, 4, 2, 3))
+
+        result = self.reduce_across_neighbors(result)
+
+        return result
+
+    def forward_using_torch(self, x: torch.Tensor) -> torch.Tensor:
+        if self.values.ndim == 2:
+            return self.neighbors_values_assigner(x)
+        else:  # self.values.ndim == 3
+            return self.neighbors_linear_functions(x)
 
     def forward_using_faiss(self, x: torch.Tensor) -> torch.Tensor:
         x_unfolded = F.unfold(x, kernel_size=self.kernel_size, padding=self.padding, stride=self.stride)
@@ -1114,10 +1164,8 @@ def initialize_model(args: Args, wandb_logger: WandbLogger):
 
 
 def initialize_wandb_logger(args: Args, name_suffix: str = ''):
-    return WandbLogger(project='thesis',
-                       config=args.flattened_dict(),
-                       name=args.env.wandb_run_name + name_suffix,
-                       log_model=True)
+    run_name = None if (args.env.wandb_run_name is None) else args.env.wandb_run_name + name_suffix
+    return WandbLogger(project='thesis', config=args.flattened_dict(), name=run_name, log_model=True)
 
 
 def initialize_trainer(args: Args, wandb_logger: WandbLogger):
@@ -1157,6 +1205,17 @@ class ImitatorKNN(pl.LightningModule):
 
         self.loss = nn.CrossEntropyLoss()
 
+    def get_dataloader_for_patches_sampling(self):
+        # TODO Consider whitening / normalizing the patches.
+        if self.args.dmh.dataset_type_for_patches_dictionary == 'aug':
+            dataloader = self.datamodule.train_dataloader()
+        elif self.args.dmh.dataset_type_for_patches_dictionary == 'no_aug':
+            dataloader = self.datamodule.train_dataloader_no_aug()
+        else:  # self.args.dmh.dataset_type_for_patches_dictionary == 'clean'
+            dataloader = self.datamodule.train_dataloader_clean()
+
+        return dataloader
+
     @torch.no_grad()
     def imitate_first_block(self):
         assert len(self.features) > 0, "This function should be called when there is some block to imitate."
@@ -1172,16 +1231,9 @@ class ImitatorKNN(pl.LightningModule):
 
         self.imitated_blocks_output_channels.append(teacher_conv.out_channels)
         self.imitated_blocks_conv_kwargs.append({k: getattr(teacher_conv, k)
-                                                for k in ['kernel_size', 'dilation', 'padding', 'stride']})
+                                                 for k in ['kernel_size', 'dilation', 'padding', 'stride']})
 
-        # TODO Consider doing the following:
-        #  Whitening / normalizing the patches.
-        if self.args.dmh.dataset_type_for_patches_dictionary == 'aug':
-            dataloader = self.datamodule.train_dataloader()
-        elif self.args.dmh.dataset_type_for_patches_dictionary == 'no_aug':
-            dataloader = self.datamodule.train_dataloader_no_aug()
-        else:  # self.args.dmh.dataset_type_for_patches_dictionary == 'clean'
-            dataloader = self.datamodule.train_dataloader_clean()
+        dataloader = self.get_dataloader_for_patches_sampling()
 
         patches = sample_random_patches(dataloader, self.args.dmh.n_patches,
                                         teacher_conv.kernel_size[0], self.imitators,
@@ -1212,20 +1264,38 @@ class ImitatorKNN(pl.LightningModule):
 
         if self.args.dmh.use_whitening:
             # We want to run the teacher block on the original patches,
-            # so only the whitening will be used only for the distance calculation.
+            # so the whitening will be used only for the distance calculation.
             patches = patches @ np.linalg.inv(whitening_matrix)
 
         patches = patches.reshape(-1, *patches_shape[1:])
-        patches_tensor = torch.from_numpy(patches).to(self.device)
-        patches_outputs = teacher_block(patches_tensor)
-        patches_outputs = patches_outputs.cpu().numpy().squeeze(axis=(2, 3))
 
-        imitator = NeighborsValuesAssigner(patches, values=patches_outputs, stride=teacher_conv.stride[0],
+        if self.args.dmh.imitate_with_knn:
+            patches_tensor = torch.from_numpy(patches).to(self.device)
+            patches_outputs = teacher_block(patches_tensor)
+            patches_outputs = patches_outputs.cpu().numpy().squeeze(axis=(2, 3))
+            values = patches_outputs
+        elif self.args.dmh.imitate_with_locally_linear_model:
+            patches_dict_size, patches_channels, patches_height, patches_width = patches.shape
+            patches_dim = patches_channels * patches_height * patches_width
+            out_channels = teacher_block[0].out_channels
+            values = torch.empty(patches_dict_size, out_channels, patches_dim,
+                                 requires_grad=True, device=self.device, dtype=torch.float32)
+
+            # In order to define each linear layer with proper weights initialization (correct fan-in and fan-out)
+            # it's being done in a for-loop using PyTorch default linear-layer initialization.
+            for i in range(patches_dict_size):
+                tmp_linear = torch.nn.Linear(in_features=patches_dim, out_features=out_channels,
+                                             bias=False,  # TODO consider using bias=True
+                                             device=self.device)
+                values[i] = tmp_linear.weight.data
+        else:
+            raise ValueError('One of imitate_with_knn or imitate_with_locally_linear_model must be true.')
+
+        imitator = NeighborsValuesAssigner(patches, values=values, stride=teacher_conv.stride[0],
                                            padding=teacher_conv.padding[0], k=self.args.dmh.k,
                                            use_faiss=self.args.dmh.use_faiss,
                                            use_linear_function=self.args.dmh.use_linear_function,
-                                           use_angles=self.args.dmh.use_angles,
-                                           whitening_matrix=whitening_matrix)
+                                           use_angles=self.args.dmh.use_angles, whitening_matrix=whitening_matrix)
 
         loss = 0
         for inputs, _ in tqdm(self.datamodule.val_dataloader(), desc=f'Evaluating imitated block'):
@@ -1354,7 +1424,7 @@ def main():
         trainer.fit(model, datamodule=datamodule)
         unwatch_model(model)
 
-    if args.dmh.imitate_with_knn:
+    if args.dmh.imitate_with_knn or args.dmh.imitate_with_locally_linear_model:
         datamodule_for_sampling = initialize_datamodule(args.data, batch_size=4)
         imitator = ImitatorKNN(model, args, datamodule_for_sampling)
         for i in range(len(imitator.features)):
@@ -1365,12 +1435,6 @@ def main():
             trainer = initialize_trainer(args, wandb_logger)
             trainer.fit(imitator, datamodule=datamodule)
             unwatch_model(imitator)
-
-    # if args.dmh.imitate_with_locally_linear_model:
-    #     imitator = LocallyLinearImitatorVGG(model, datamodule, args)
-    #     wandb_logger.watch(imitator, log='all')
-    #     trainer = initialize_trainer(args, wandb_logger)
-    #     trainer.fit(imitator, datamodule=datamodule)
 
 
 if __name__ == '__main__':
