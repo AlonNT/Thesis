@@ -15,8 +15,12 @@ class DMHArgs(ImmutableArgs):
     #: Whether to imitate network performance using knn-estimator.
     imitate_with_knn: bool = False
 
-    #: Whether to imitate network performance using knn-estimator.  TODO consider working on this mode as well.
+    #: Whether to imitate network performance using a linear function per patch in the dictionary.
     imitate_with_locally_linear_model: bool = False
+
+    #: Whether to train the linear functions per patch in a supervised fashion end-to-end,
+    #: or to imitate the teacher's block outputs (when this argument is False).
+    train_linear_functions_by_imitation: bool = True
 
     #: Whether to enable estimating intrinsic-dimension.
     estimate_intrinsic_dimension: bool = False

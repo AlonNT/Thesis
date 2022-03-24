@@ -10,7 +10,7 @@ from schemas.utils import ImmutableArgs, MyBaseModel
 class IntDimArgs(ImmutableArgs):
     k1: PositiveInt = 10
     k2: PositiveInt = 20
-    n_points: Union[PositiveInt, List[PositiveInt]] = 1048576
+    n_points: PositiveInt = 1048576
     whitening_regularization_factor: float = 0.001
     zca_whitening: bool = False
 
@@ -22,7 +22,7 @@ class IntDimArgs(ImmutableArgs):
     noise_std: List[float] = [0, 0.01, 0.1, 1]
     start_k: PositiveInt = 10
 
-    patch_size: Union[PositiveInt, List[PositiveInt]] = 5
+    patch_size: PositiveInt = 5
     normalize_patches_to_unit_vectors: bool = False
     
     cifar_mle: bool = False

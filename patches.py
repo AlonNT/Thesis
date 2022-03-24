@@ -29,11 +29,11 @@ from utils import (configure_logger,
                    get_dataloaders,
                    Accumulator,
                    perform_train_step_regular,
-                   evaluate_model, 
-                   get_args, 
-                   log_args, 
-                   get_model_device, 
-                   get_model_output_shape)
+                   evaluate_model,
+                   get_args,
+                   log_args,
+                   get_model_output_shape,
+                   sample_random_patches)
 
 """
 Ideas
@@ -265,114 +265,6 @@ class PatchBasedEmbedding(nn.Module):
                 return k_nearest_patches_mask, k_nearest_negative_patches_mask
             else:
                 return k_nearest_patches_mask
-
-
-@torch.no_grad()
-def sample_random_patches(data_loader,
-                          n_patches,
-                          patch_size,
-                          existing_model: Union[None, nn.Module, Callable] = None,
-                          visualize: bool = False,
-                          random_uniform_patches: bool = False,
-                          random_gaussian_patches: bool = False,
-                          verbose: bool = False):
-    """
-    This function sample random patches from the data, given by the data-loader object.
-    It samples random indices for the patches and then iterates over the dataset to extract them.
-    It returns a (NumPy) array containing the patches.
-    """
-    batch_size = data_loader.batch_size
-    n_images = data_loader.dataset.data.shape[0]
-    patch_shape = data_loader.dataset.data.shape[1:]
-    if len(patch_shape) == 2:  # Add dimension of channels which will be 1
-        patch_shape += (1, )
-    patch_shape = np.roll(patch_shape, shift=1)  # In the dataset it's H x W x C but in the model it's C x H x W
-    if existing_model is not None:
-        device = get_model_device(existing_model)
-        patch_shape = get_model_output_shape(existing_model, data_loader)
-
-    if len(patch_shape) > 1:
-        assert len(patch_shape) == 3 and (patch_shape[1] == patch_shape[2]), "Should be C x H x W where H = W"
-        spatial_size = patch_shape[-1]
-        if patch_size == -1:  # -1 means the patch size is the whole size of the image (or down-sampled activation)
-            patch_size = spatial_size
-        n_patches_per_row_or_col = spatial_size - patch_size + 1
-        patch_shape = (patch_shape[0],) + 2 * (patch_size,)
-    else:
-        assert patch_size == -1, "When working with fully-connected the patch 'size' must be -1 i.e. the whole size."
-        n_patches_per_row_or_col = 1
-
-    n_patches_per_image = n_patches_per_row_or_col ** 2
-    n_patches_in_dataset = n_images * n_patches_per_image
-
-    if n_patches >= n_patches_in_dataset:
-        n_patches = n_patches_in_dataset
-    patches_indices_in_dataset = np.random.default_rng().choice(n_patches_in_dataset, size=n_patches, replace=False)
-
-    images_indices = patches_indices_in_dataset % n_images
-    patches_indices_in_images = patches_indices_in_dataset // n_images
-    patches_x_indices_in_images = patches_indices_in_images % n_patches_per_row_or_col
-    patches_y_indices_in_images = patches_indices_in_images // n_patches_per_row_or_col
-
-    batches_indices = images_indices // batch_size
-    images_indices_in_batches = images_indices % batch_size
-
-    patches = np.empty(shape=(n_patches, ) + patch_shape, dtype=np.float32)
-
-    if random_uniform_patches:
-        return np.random.default_rng().uniform(low=-1, high=+1, size=patches.shape).astype(np.float32)
-    if random_gaussian_patches:
-        patch_dim = math.prod(patch_shape)
-        return np.random.default_rng().multivariate_normal(
-            mean=np.zeros(patch_dim), cov=np.eye(patch_dim), size=n_patches).astype(np.float32).reshape(patches.shape)
-
-    iterator = enumerate(data_loader)
-    if verbose:
-        iterator = tqdm(iterator, total=len(data_loader), desc='Sampling patches from the dataset')
-    for batch_index, (inputs, _) in iterator:
-        if batch_index not in batches_indices:
-            continue
-
-        relevant_patches_mask = (batch_index == batches_indices)
-        relevant_patches_indices = np.where(relevant_patches_mask)[0]
-
-        if existing_model is not None:
-            inputs = inputs.to(device)
-            inputs = existing_model(inputs)
-        inputs = inputs.cpu().numpy()
-
-        for i in relevant_patches_indices:
-            image_index_in_batch = images_indices_in_batches[i]
-            if len(patch_shape) > 1:
-                patch_x_start = patches_x_indices_in_images[i]
-                patch_y_start = patches_y_indices_in_images[i]
-                patch_x_slice = slice(patch_x_start, patch_x_start + patch_size)
-                patch_y_slice = slice(patch_y_start, patch_y_start + patch_size)
-
-                patches[i] = inputs[image_index_in_batch, :, patch_x_slice, patch_y_slice]
-
-                if visualize:
-                    visualize_image_patch_pair(image=inputs[image_index_in_batch], patch=patches[i],
-                                               patch_x_start=patch_x_start, patch_y_start=patch_y_start)
-            else:
-                patches[i] = inputs[image_index_in_batch]
-
-    return patches
-
-
-def visualize_image_patch_pair(image, patch, patch_x_start, patch_y_start):
-    patch_size = patch.shape[-1]
-    rect = Rectangle(xy=(patch_y_start, patch_x_start),  # x and y are reversed on purpose...
-                     width=patch_size, height=patch_size,
-                     linewidth=1, edgecolor='red', facecolor='none')
-
-    plt.figure()
-    ax = plt.subplot(2, 1, 1)
-    ax.imshow(np.transpose(image, axes=(1, 2, 0)))
-    ax.add_patch(rect)
-    ax = plt.subplot(2, 1, 2)
-    ax.imshow(np.transpose(patch, axes=(1, 2, 0)))
-    plt.show()
 
 
 def unwhiten_patches(patches: np.ndarray, args: Args) -> np.ndarray:

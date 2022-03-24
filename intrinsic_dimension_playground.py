@@ -116,6 +116,16 @@ def gaussian_playground_main(args: Args):
 
 def create_data_dict(patches: np.ndarray, whitening_matrix: np.ndarray,
                      normalize_patches_to_unit_vectors: bool = False):
+    """Creates a dictionary containing the different datasets (original, whitened, whitened_shuffled, shuffled, random).
+
+    Args:
+        patches: The "data" - a NumPy array of shape (n, d) containing flattened patches.
+        whitening_matrix: The whitening matrix defining the whitening operator.
+        normalize_patches_to_unit_vectors: Whether to normalize the data to unit vectors.
+
+    Returns:
+        The dictionary containing the different datasets.
+    """
     assert patches.ndim == 2, f'patches has shape {patches.shape}, it should have been flattened.'
     n_patches, d = patches.shape
     rng = np.random.default_rng()
@@ -142,6 +152,17 @@ def create_data_dict(patches: np.ndarray, whitening_matrix: np.ndarray,
 
 
 def normalize_data(data_dict):
+    """Normalize each data in the given data dictionary to be a unit vector.
+
+    Note that the data-points with extremely low norms (percentile 0.1%) are filtered out,
+    since their norms cause numeric issues (they can even be actually zero so we can divide by it later).
+
+    Args:
+        data_dict: A dictionary containing datasets, each is a NumPy array of shape (n, d).
+
+    Returns:
+        A dictionary where each dataset is normalized.
+    """
     norms_dict = {data_name: np.linalg.norm(data, axis=1) 
                   for data_name, data in data_dict.items()}
 
@@ -208,107 +229,103 @@ def cifar_mle_main(args: Args):
     wandb.log(figures, step=0)
 
 
-
 def cifar_elbow_main(args: Args):
+    """The main function, producing the different graphs (logging to wandb and to locally .tex files).
+    """
     datamodule = DataModule(args.data, batch_size=128)
     datamodule.prepare_data()
     datamodule.setup(stage='fit')
     dataloader = datamodule.train_dataloader_clean()
 
-    n_points_list = args.int_dim.n_points
-    patch_size_list = args.int_dim.patch_size
-    if isinstance(n_points_list, int):
-        n_points_list = [n_points_list]
-    if isinstance(patch_size_list, int):
-        patch_size_list = [patch_size_list]
-
     figures = dict()
     n_centroids_list = list(range(args.int_dim.min_n_centroids, args.int_dim.max_n_centroids + 1))
 
-    for patch_size in patch_size_list:
-        logger.info(f'Calculating the whitening-matrix for patch-size {patch_size}x{patch_size}...')
-        whitening_matrix = calc_whitening_from_dataloader(
-            dataloader, patch_size, args.int_dim.whitening_regularization_factor, args.int_dim.zca_whitening)
-        for n_points in n_points_list:
-            prefix = f'{n_points:,}_{patch_size}x{patch_size}_patches'
-            logger.info(f'Starting with {prefix}')
+    logger.info(f'Calculating the whitening-matrix for patch-size '
+                f'{args.int_dim.patch_size}x{args.int_dim.patch_size}.')
+    whitening_matrix = calc_whitening_from_dataloader(dataloader,
+                                                      args.int_dim.patch_size,
+                                                      args.int_dim.whitening_regularization_factor,
+                                                      args.int_dim.zca_whitening)
+    prefix = f'{args.int_dim.n_points:,}_{args.int_dim.patch_size}x{args.int_dim.patch_size}_patches'
+    logger.info(f'Starting with {prefix}')
 
-            patches = sample_random_patches(dataloader, n_points, patch_size, verbose=True)
-            patches_flat = patches.reshape(patches.shape[0], -1)
-            n_patches, patch_dim = patches_flat.shape
+    patches = sample_random_patches(dataloader, args.int_dim.n_points, args.int_dim.patch_size, verbose=True)
+    patches_flat = patches.reshape(patches.shape[0], -1)
+    n_patches, patch_dim = patches_flat.shape
 
-            data_dict = create_data_dict(patches_flat, whitening_matrix)
-            normalized_data_dict = normalize_data(data_dict)
+    data_dict = create_data_dict(patches_flat, whitening_matrix)
+    normalized_data_dict = normalize_data(data_dict)
 
-            norms_dict = {data_name: np.linalg.norm(data, axis=1) 
-                          for data_name, data in data_dict.items()}
-            low_norms_masks_dict = {data_name: (norms < np.percentile(norms, q=0.1)) 
-                                    for data_name, norms in norms_dict.items()}
+    norms_dict = {data_name: np.linalg.norm(data, axis=1)
+                  for data_name, data in data_dict.items()}
+    low_norms_masks_dict = {data_name: (norms < np.percentile(norms, q=0.1))
+                            for data_name, norms in norms_dict.items()}
 
-            norms_df = pd.DataFrame(norms_dict)
-            for col in norms_df.columns:
-                figures[f'{prefix}_{col}_norms'] = px.histogram(norms_df, x=col, marginal='box')
+    norms_df = pd.DataFrame(norms_dict)
+    for col in norms_df.columns:
+        figures[f'{prefix}_{col}_norms'] = px.histogram(norms_df, x=col, marginal='box')
 
-            # {'mean','max','median'} 
-            #     {'normalized-data', 'data'} 
-            #         {'normalized-distance', 'distance'}
-            #             {'original', 'shuffled', ...}
-            #                 A list of values.
-            dist_to_centroid = dict()  
-            norm_data_names = ['normalized-data']  # ['normalized-data', 'data']
-            norm_dist_names = ['distance']  # ['normalized-distance', 'distance']
-            agg_funcs = {'mean': np.mean, 'max': np.max, 'median': np.median}
-            for agg_name in agg_funcs.keys():
-                dist_to_centroid[agg_name] = dict()
-                for norm_data_name in norm_data_names:
-                    dist_to_centroid[agg_name][norm_data_name] = dict()
-                    for norm_dist_name in norm_dist_names:
-                        dist_to_centroid[agg_name][norm_data_name][norm_dist_name] = dict()
-                        for data_name in data_dict.keys():
-                            dist_to_centroid[agg_name][norm_data_name][norm_dist_name][data_name] = list()
+    # `dist_to_centroid` will be in the following structure:
+    #     {'mean','max','median'}:
+    #         {'normalized-data', 'data'}:
+    #             {'normalized-distance', 'distance'}:
+    #                 {'original', 'shuffled', ...}:
+    #                     [--values--]
+    dist_to_centroid = dict()
+    norm_data_names = ['normalized-data']  # ['normalized-data', 'data']
+    norm_dist_names = ['distance']  # ['normalized-distance', 'distance']
+    agg_funcs = {'mean': np.mean, 'max': np.max, 'median': np.median}
+    for agg_name in agg_funcs.keys():
+        dist_to_centroid[agg_name] = dict()
+        for norm_data_name in norm_data_names:
+            dist_to_centroid[agg_name][norm_data_name] = dict()
+            for norm_dist_name in norm_dist_names:
+                dist_to_centroid[agg_name][norm_data_name][norm_dist_name] = dict()
+                for data_name in data_dict.keys():
+                    dist_to_centroid[agg_name][norm_data_name][norm_dist_name][data_name] = list()
 
-            for data_name in data_dict.keys():
-                for norm_data_name in norm_data_names:
-                    for k in tqdm(n_centroids_list, desc=f'Running k-means on {data_name} {norm_data_name} for different values of k'):
-                        if (norm_data_name == 'normalized-data'):
-                            data = normalized_data_dict[data_name]
-                        else:
-                            data = data_dict[data_name]
-                            
-                        kmeans = faiss.Kmeans(patch_dim, k)
-                        kmeans.train(data)
-                        distances, _ = kmeans.assign(data)
+    for data_name in data_dict.keys():
+        for norm_data_name in norm_data_names:
+            for k in tqdm(n_centroids_list,
+                          desc=f'Running k-means on {data_name} {norm_data_name} for different values of k'):
+                data = normalized_data_dict[data_name] if norm_data_name == 'normalized-data' else data_dict[data_name]
 
-                        for norm_dist_name in norm_dist_names:
-                            # If the data is already normalized, no need to divide by the norm.
-                            if (norm_dist_name == 'normalized-distance') and (norm_data_name != 'normalized-data'):
-                                not_low_norm_mask = np.logical_not(low_norms_masks_dict[data_name])
-                                distances_filtered = distances[not_low_norm_mask]
-                                norms_filtered = norms_dict[data_name][not_low_norm_mask]
-                                distances = distances_filtered / norms_filtered
+                kmeans = faiss.Kmeans(patch_dim, k)
+                kmeans.train(data)
+                distances, _ = kmeans.assign(data)
 
-                            for agg_name, agg_func in agg_funcs.items():
-                                dist_to_centroid[agg_name][norm_data_name][norm_dist_name][data_name].append(agg_func(distances))
-            
-            for agg_name in agg_funcs.keys():
-                for norm_data_name in norm_data_names:
-                    for norm_dist_name in norm_dist_names:
-                        df = pd.DataFrame(data=dist_to_centroid[agg_name][norm_data_name][norm_dist_name], index=n_centroids_list)
-                        df.name = f'{norm_data_name}-{agg_name}-{norm_dist_name}-distance-to-centroid'
-                        df.index.name = 'k'
-                        df.columns.name = 'type-of-data'
-                        figures[f'{prefix}-{df.name}'] = px.line(df)
+                for norm_dist_name in norm_dist_names:
+                    # If the data is already normalized, no need to divide by the norm.
+                    if (norm_dist_name == 'normalized-distance') and (norm_data_name != 'normalized-data'):
+                        not_low_norm_mask = np.logical_not(low_norms_masks_dict[data_name])
+                        distances_filtered = distances[not_low_norm_mask]
+                        norms_filtered = norms_dict[data_name][not_low_norm_mask]
+                        distances = distances_filtered / norms_filtered
 
-                        plt.figure()
-                        plt.style.use("ggplot")
-                        for col in df.columns:
-                            plt.plot(n_centroids_list, df[col], label=col)
-                        plt.legend()
-                        plt.xlabel('k')
-                        plt.ylabel('mean-distance')
-                        plt.grid(True)
-                        tikzplotlib.save(f'{df.name}.tex')
-    
+                    for agg_name, agg_func in agg_funcs.items():
+                        dist_to_centroid[agg_name][norm_data_name][norm_dist_name][data_name].append(
+                            agg_func(distances))
+
+    for agg_name in agg_funcs.keys():
+        for norm_data_name in norm_data_names:
+            for norm_dist_name in norm_dist_names:
+                df = pd.DataFrame(data=dist_to_centroid[agg_name][norm_data_name][norm_dist_name],
+                                  index=n_centroids_list)
+                df.name = f'{norm_data_name}-{agg_name}-{norm_dist_name}-distance-to-centroid'
+                df.index.name = 'k'
+                df.columns.name = 'type-of-data'
+                figures[f'{prefix}-{df.name}'] = px.line(df)
+
+                plt.figure()
+                plt.style.use("ggplot")
+                for col in df.columns:
+                    plt.plot(n_centroids_list, df[col], label=col)
+                plt.legend()
+                plt.xlabel('k')
+                plt.ylabel('mean-distance')
+                plt.grid(True)
+                tikzplotlib.save(f'{df.name}.tex')
+
     wandb.log(figures, step=0)
  
 

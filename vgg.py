@@ -1,13 +1,12 @@
 import torch
 import torch.nn as nn
-
-from typing import List, Optional, Union, Tuple
+from typing import List, Union, Tuple, Optional
 
 from consts import CLASSES
 from utils import get_mlp, get_cnn
 
 # Configurations for the VGG models family.
-# A number indicates number of channels in a convolution block, and M denotes a MaxPool layer.
+# A number indicates number of channels in a convolution block, and M/A denotes a MaxPool/AvgPool layer.
 configs = {
     'VGGc16d1': [16],
     'VGGc32d1': [32],
@@ -108,7 +107,10 @@ def get_ssl_aux_net(channels: int,
     return nn.Sequential(*layers)
 
 
-def get_list_of_arguments_for_config(config: List[Union[int, str]], arg):
+def get_list_of_arguments_for_config(config: List[Union[int, str]], arg) -> list:
+    """Given an argument `arg`, returns a list of arguments for a given config of a VGG model,
+    where this argument is repeated for conv blocks (and None in the positions of non-conv blocks).
+    """
     if isinstance(arg, list):
         non_conv_indices = [i for i, l in enumerate(config) if isinstance(l, str)]
         for non_conv_index in non_conv_indices:
@@ -126,6 +128,21 @@ def get_vgg_blocks(config: List[Union[int, str]],
                    padding: Union[int, List[int]] = 1,
                    use_batch_norm: Union[bool, List[bool]] = False,
                    bottleneck_dim: Union[int, List[int]] = 0) -> Tuple[List[nn.Module], int]:
+    """Gets a list containing the blocks of the given VGG model config.
+
+    Args:
+        config: One of the lists in the dictionary `configs` above, describing the architecture of the network.
+        in_channels: Number of input channels (3 for RGB images).
+        spatial_size: The size of the input tensor for the network (32 for CIFAR10, 28 for MNIST, etc).
+        kernel_size: The kernel size to use in each conv block. If it's a single variable, the same one is used.
+        padding: The amount of padding to use in each conv block. If it's a single variable, the same one is used.
+        use_batch_norm: Whether to use batch-norm in each conv block. If it's a single variable, the same one is used.
+        bottleneck_dim: The dimension of the bottleneck layer to use in the end of each conv block
+            (0 means no bottleneck is added). If it's a single variable, the same one is used.
+    Returns:
+        A tuple containing the list of nn.Modules, and an integers which is the number of input features
+        (will be useful later when feeding to a linear layer).
+    """
     blocks: List[nn.Module] = list()
     
     kernel_size = get_list_of_arguments_for_config(config, kernel_size)
@@ -134,14 +151,18 @@ def get_vgg_blocks(config: List[Union[int, str]],
     bottleneck_dim = get_list_of_arguments_for_config(config, bottleneck_dim)
 
     for i in range(len(config)):
-        if isinstance(config[i], str):
-            continue  # The pooling was already added as the last layer of the previous block.
+        if config[i] == 'M':
+            blocks.append(nn.Sequential(nn.MaxPool2d(kernel_size=2, stride=2)))
+        elif config[i] == 'A':
+            continue  # The average-pooling was already added in the else section...
         else:
-            assert isinstance(config[i], int), f'Item {i} in config is {config[i]}, should be str or int.'
             out_channels = config[i]
 
             block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size[i], padding=padding[i]),
                             nn.ReLU()]
+
+            if (i+1 < len(config)) and (config[i+1] == 'A'):
+                block_layers.append(nn.AvgPool2d(kernel_size=2, stride=2))
 
             if use_batch_norm[i]:
                 block_layers.append(nn.BatchNorm2d(out_channels))

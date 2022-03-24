@@ -8,7 +8,6 @@ import faiss
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import torchmetrics as tm
 import pytorch_lightning as pl
 import torch.nn as nn
 import torch.nn.functional as F
@@ -230,156 +229,6 @@ class NeighborsValuesAssigner(nn.Module):
             return self.forward_using_faiss(x)
         else:
             return self.forward_using_torch(x)
-
-# class LocallyLinearConvImitator(nn.Module):
-#     def __init__(self, patches: np.ndarray, out_channels: int, padding: int, k: int):
-#         super(LocallyLinearConvImitator, self).__init__()
-#
-#         self.k = k
-#         self.out_channels = out_channels
-#         self.n_patches, self.in_channels, kernel_height, kernel_width = patches.shape
-#         self.kernel_size = kernel_height
-#         assert kernel_height == kernel_width, "the patches should be square"
-#         self.padding = padding
-#
-#         # TODO DEBUG, since we changed the API to get kernel and bias
-#         ipdb.set_trace()
-#         self.k_nearest_neighbors_embedding = KNearestPatchesEmbedding(kernel, bias, k, padding=padding)
-#
-#         # This convolution layer can be thought of as linear function per patch in the patch-dict,
-#         # each function is from (in_channels x kernel_size^2) to the reals.
-#         self.conv = nn.Conv2d(in_channels=self.in_channels,
-#                               out_channels=self.n_patches,  # * self.out_channels,
-#                               kernel_size=self.kernel_size,
-#                               padding=self.padding)
-#
-#         # This convolution layer can be thought of as transforming each vector containing the output of
-#         # the linear classifier corresponding to the nearest-patch in its index and zero elsewhere.
-#         # to a vector of size `out_channels` (the objective is the corresponding teacher conv layer).
-#         self.conv_1x1 = nn.Conv2d(in_channels=self.n_patches,
-#                                   out_channels=self.out_channels,
-#                                   kernel_size=(1, 1))
-#
-#     def forward(self, x):
-#         mask = self.k_nearest_neighbors_embedding(x)
-#         patches_linear_outputs = self.conv(x)
-#         kth_nearest_patch_linear_output = mask * patches_linear_outputs
-#         output = self.conv_1x1(kth_nearest_patch_linear_output)
-#         return output
-#
-#
-# def is_conv_block(block: nn.Module):
-#     return isinstance(block, nn.Sequential) and isinstance(block[0], nn.Conv2d)
-#
-#
-# class LocallyLinearImitatorVGG(pl.LightningModule):
-#
-#     def __init__(self, teacher: "LitVGG", datamodule: pl.LightningDataModule, args: Args):
-#         super(LocallyLinearImitatorVGG, self).__init__()
-#         self.args: Args = args
-#         self.save_hyperparameters(args.flattened_dict())
-#
-#         self.teacher: LitVGG = teacher.requires_grad_(False)
-#
-#         losses: List[Union[nn.MSELoss, None]] = list()
-#         layers: List[Union[LocallyLinearConvImitator, nn.MaxPool2d]] = list()
-#         for i, block in enumerate(teacher.features):
-#             if is_conv_block(block):
-#                 conv_layer: nn.Conv2d = block[0]
-#                 patches = sample_random_patches(datamodule.train_dataloader(),
-#                                                 args.dmh.n_patches,
-#                                                 conv_layer.kernel_size[0],
-#                                                 teacher.get_sub_model(i),
-#                                                 random_patches=args.dmh.random_patches)
-#                 patches_flat = patches.reshape(patches.shape[0], -1)
-#                 kmeans = faiss.Kmeans(d=patches_flat.shape[1], k=args.dmh.n_clusters, verbose=True)
-#                 kmeans.train(patches_flat)
-#                 centroids = kmeans.centroids.reshape(-1, *patches.shape[1:])
-#                 conv_imitator = LocallyLinearConvImitator(centroids,
-#                                                           conv_layer.out_channels,
-#                                                           conv_layer.padding[0],
-#                                                           args.dmh.k)
-#                 layers.append(conv_imitator)
-#                 losses.append(nn.MSELoss())
-#             else:
-#                 layers.append(block)
-#                 losses.append(None)
-#
-#         self.features = nn.Sequential(*layers)
-#         self.losses = nn.ModuleList(losses)
-#
-#         self.mlp = copy.deepcopy(teacher.mlp)
-#         self.mlp.requires_grad_(False)
-#
-#         # Apparently the Metrics must be an attribute of the LightningModule, and not inside a dictionary.
-#         # This is why we have to set them separately here and then the dictionary will map to the attributes.
-#         self.train_accuracy = tm.Accuracy()
-#         self.validate_accuracy = tm.Accuracy()
-#         self.accuracy = {RunningStage.TRAINING: self.train_accuracy,
-#                          RunningStage.VALIDATING: self.validate_accuracy}
-#
-#         # self.state_dict_copy = copy.deepcopy(self.state_dict())
-#
-#     def forward(self, x: torch.Tensor):
-#         features = self.features(x)
-#         logits = self.mlp(features)
-#         return logits
-#
-#     def shared_step(self, batch, stage: RunningStage):
-#         x, labels = batch  # Note that we do not use the labels for training, only for logging training accuracy.
-#         intermediate_losses = list()
-#
-#         # Prevent BatchNorm layers from changing `running_mean`, `running_var` and `num_batches_tracked`
-#         self.teacher.eval()
-#
-#         for i, layer in enumerate(self.features):
-#             x_output = layer(x)
-#             if isinstance(layer, LocallyLinearConvImitator):
-#                 x_teacher_output = self.teacher.features[i](x).detach()  # TODO should we really detach here?
-#                 curr_loss = self.losses[i](x_output, x_teacher_output)
-#                 intermediate_losses.append(curr_loss)
-#                 self.log(f'{stage.value}_loss_{i}', curr_loss.item())
-#             x = x_output.detach()  # TODO Is it the right way?
-#
-#         loss = sum(intermediate_losses)
-#         self.log(f'{stage.value}_loss', loss / len(intermediate_losses))
-#
-#         logits = self.mlp(x)
-#         accuracy = self.accuracy[stage]
-#         accuracy(logits, labels)
-#         self.log(f'{stage.value}_accuracy', accuracy)
-#
-#         # if stage == RunningStage.TRAINING:
-#         #     # For debugging purposes - verify that the weights of the model changed.
-#         #     new_model_state = copy.deepcopy(self.state_dict())
-#         #     for weight_name in new_model_state.keys():
-#         #         old_weight = self.state_dict_copy[weight_name]
-#         #         new_weight = new_model_state[weight_name]
-#         #         if torch.allclose(old_weight, new_weight):
-#         #             pass
-#         #             # logger.debug(f'Weight \'{weight_name}\' of shape {tuple(new_weight.size())} did not change.')
-#         #         else:
-#         #             logger.debug(f'Weight \'{weight_name}\' of shape {tuple(new_weight.size())} changed.')
-#         #     self.state_dict_copy = copy.deepcopy(new_model_state)
-#
-#         return loss
-#
-#     def training_step(self, batch, batch_idx):
-#         loss = self.shared_step(batch, RunningStage.TRAINING)
-#         return loss
-#
-#     def validation_step(self, batch, batch_idx):
-#         self.shared_step(batch, RunningStage.VALIDATING)
-#
-#     def configure_optimizers(self):
-#         optimizer = torch.optim.SGD(self.features.parameters(),  # Explicitly optimize only the imitators parameters
-#                                     self.args.opt.learning_rate,
-#                                     self.args.opt.momentum,
-#                                     weight_decay=self.args.opt.weight_decay)
-#         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-#                                                          milestones=self.args.opt.learning_rate_decay_steps,
-#                                                          gamma=self.args.opt.learning_rate_decay_gamma)
-#         return {'optimizer': optimizer, 'lr_scheduler': scheduler}
 
 
 class ShufflePixels:
@@ -804,11 +653,16 @@ class LitMLP(pl.LightningModule):
 def get_estimates_matrix(data: torch.Tensor, k: int):
     """Calculates a matrix containing the intrinsic-dimension estimators.
 
-    The ij-th cell contains the j-th estimate for the i-th data-point.
-    In the notation of the paper below it's $\\hat(m)_j(x_i)$.
-
     See `Maximum Likelihood Estimation of Intrinsic Dimension
     <https://papers.nips.cc/paper/2004/file/74934548253bcab8490ebd74afed7031-Paper.pdf>`_
+
+    Args:
+        data: The data of shape (n, d) i.e. n d-dimensional vectors.
+        k: The number of neighbors which define the size of the estimates-matrix.
+
+    Returns:
+        A matrix of shape (n, k) where the ij-th cell contains the j-th estimate for the i-th data-point.
+        In the notation of the paper it's $\\hat(m)_j(x_i)$.
     """
     assert data.ndim == 2, f"data has shape {tuple(data.shape)}, expected (n, d) i.e. n d-dimensional vectors. "
 
@@ -838,6 +692,14 @@ def calc_intrinsic_dimension(data: torch.Tensor, k1: int, k2: int) -> float:
 
     See the end of section 3 in `Maximum Likelihood Estimation of Intrinsic Dimension
     <https://papers.nips.cc/paper/2004/file/74934548253bcab8490ebd74afed7031-Paper.pdf>`_
+
+    Args:
+        data: The data of shape (n, d) i.e. n d-dimensional vectors.
+        k1: The nearest-neighbor index to begin the mean with.
+        k1: The nearest-neighbor index to end the mean with.
+
+    Returns:
+        The intrinsic-dimension of the given data.
     """
     estimates = get_estimates_matrix(data, k2)
     estimate_mean_over_data_points = torch.mean(estimates, dim=0)
@@ -847,8 +709,6 @@ def calc_intrinsic_dimension(data: torch.Tensor, k1: int, k2: int) -> float:
 
 
 def indices_to_mask(n, indices, negate=False):
-    # TODO Report PyTorch BUG when indices is empty :(
-    # mask = torch.scatter(torch.zeros(n, dtype=torch.bool), dim=0, index=indices, value=1)
     mask = torch.zeros(n, dtype=torch.bool, device=indices.device).scatter_(dim=0, index=indices, value=1)
     if negate:
         mask = torch.bitwise_not(mask)
@@ -1200,10 +1060,14 @@ class ImitatorKNN(pl.LightningModule):
         self.flatten: nn.Flatten = nn.Flatten()
         self.mlp: nn.Sequential = copy.deepcopy(teacher.mlp)
 
+        # This is the teacher's block that will be used to train the linear functions imitating the removed block.
+        self.teacher_block: Optional[nn.Sequential] = None
+
         self.imitated_blocks_output_channels: List[int] = list()
         self.imitated_blocks_conv_kwargs: List[Dict[str, int]] = list()
 
         self.loss = nn.CrossEntropyLoss()
+        self.imitator_loss = nn.L1Loss()
 
     def get_dataloader_for_patches_sampling(self):
         # TODO Consider whitening / normalizing the patches.
@@ -1219,15 +1083,13 @@ class ImitatorKNN(pl.LightningModule):
     @torch.no_grad()
     def imitate_first_block(self):
         assert len(self.features) > 0, "This function should be called when there is some block to imitate."
-        teacher_block = self.features[0]
+        self.teacher_block = self.features[0]
         self.features = self.features[1:]
 
-        teacher_block.requires_grad_(False)
-        teacher_block.eval()
+        self.teacher_block.requires_grad_(False)
+        self.teacher_block.eval()
 
-        assert isinstance(teacher_block, nn.Sequential), 'No support for MaxPool/AvgPool as a separate block.'
-        teacher_conv = teacher_block[0]
-        assert isinstance(teacher_conv, nn.Conv2d), 'First layer in the block must be convolution-layer.'
+        teacher_conv: nn.Conv2d = self.teacher_block[0]
 
         self.imitated_blocks_output_channels.append(teacher_conv.out_channels)
         self.imitated_blocks_conv_kwargs.append({k: getattr(teacher_conv, k)
@@ -1271,13 +1133,13 @@ class ImitatorKNN(pl.LightningModule):
 
         if self.args.dmh.imitate_with_knn:
             patches_tensor = torch.from_numpy(patches).to(self.device)
-            patches_outputs = teacher_block(patches_tensor)
+            patches_outputs = self.teacher_block(patches_tensor)
             patches_outputs = patches_outputs.cpu().numpy().squeeze(axis=(2, 3))
             values = patches_outputs
         elif self.args.dmh.imitate_with_locally_linear_model:
             patches_dict_size, patches_channels, patches_height, patches_width = patches.shape
             patches_dim = patches_channels * patches_height * patches_width
-            out_channels = teacher_block[0].out_channels
+            out_channels = self.teacher_block[0].out_channels
             values = torch.empty(patches_dict_size, out_channels, patches_dim,
                                  requires_grad=True, device=self.device, dtype=torch.float32)
 
@@ -1298,14 +1160,21 @@ class ImitatorKNN(pl.LightningModule):
                                            use_angles=self.args.dmh.use_angles, whitening_matrix=whitening_matrix)
 
         loss = 0
-        for inputs, _ in tqdm(self.datamodule.val_dataloader(), desc=f'Evaluating imitated block'):
-            inputs = self.imitators(inputs)
-            batch_targets = teacher_block(inputs)
-            batch_imitated_targets = imitator(inputs)
-            loss += F.l1_loss(batch_targets, batch_imitated_targets)
-        loss /= len(self.datamodule.val_dataloader())
+        # If the mode is imitating with k-nearest-neighbors, evaluate the performance.
+        # When imitating with locally linear functions, it needs to be trained because it's initialized randomly.
+        if self.args.dmh.imitate_with_knn:
+            for inputs, _ in tqdm(self.datamodule.val_dataloader(), desc=f'Evaluating imitated block'):
+                inputs = self.imitators(inputs)
+                batch_targets = self.teacher_block(inputs)
+                batch_imitated_targets = imitator(inputs)
+                loss += F.l1_loss(batch_targets, batch_imitated_targets)
+            loss /= len(self.datamodule.val_dataloader())
 
         self.imitators = nn.Sequential(*self.imitators, imitator)
+
+        # self.teacher_block is needed only for mode = imitate_with_locally_linear_model
+        if not self.args.dmh.train_linear_functions_by_imitation:
+            self.teacher_block = None
 
         return loss
 
@@ -1333,9 +1202,17 @@ class ImitatorKNN(pl.LightningModule):
         """
         x, labels = batch
         logits = self(x)
-        loss = self.loss(logits, labels)
         predictions = torch.argmax(logits, dim=1)
         accuracy = torch.sum(labels == predictions).item() / len(labels)
+
+        if (self.teacher_block is not None) and self.args.dmh.train_linear_functions_by_imitation:
+            # This means the training-mode is to train the linear functions imitating the teacher_block.
+            last_imitator_input = self.imitators[:-1](x)
+            imitator_output = self.imitators[-1](last_imitator_input)
+            teacher_block_output = self.teacher_block(last_imitator_input)
+            loss = self.imitator_loss(imitator_output, teacher_block_output)
+        else:
+            loss = self.loss(logits, labels)
 
         self.log(f'{stage.value}_loss', loss)
         self.log(f'{stage.value}_accuracy', accuracy, on_epoch=True, on_step=False)
@@ -1372,8 +1249,14 @@ class ImitatorKNN(pl.LightningModule):
         Returns:
             A dictionary containing the optimizer and learning-rate scheduler.
         """
+        # When training the linear functions to imitate the teacher block, the gradients are tiny.
+        # That's why we increase the learning-rate dramatically for this phase of the training.
+        learning_rate = self.args.opt.learning_rate
+        if (self.teacher_block is not None) and self.args.dmh.train_linear_functions_by_imitation:
+            learning_rate *= 10000
+
         optimizer = torch.optim.SGD(self.parameters(),
-                                    self.args.opt.learning_rate,
+                                    learning_rate,
                                     self.args.opt.momentum,
                                     weight_decay=self.args.opt.weight_decay)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
@@ -1429,6 +1312,18 @@ def main():
         imitator = ImitatorKNN(model, args, datamodule_for_sampling)
         for i in range(len(imitator.features)):
             replaced_block_error = imitator.imitate_first_block()
+
+            if args.dmh.train_linear_functions_by_imitation:
+                assert imitator.teacher_block is not None
+                wandb_logger = initialize_wandb_logger(args, name_suffix=f'_block_{i}_imitator')
+                wandb_logger.watch(imitator, log='all')
+                trainer = initialize_trainer(args, wandb_logger)
+                trainer.fit(imitator, datamodule=datamodule)
+                imitator.teacher_block = None  # This will cause fine-tuning the `features` modules in the next `fit`
+                imitator.imitators[-1].requires_grad_(False)
+                imitator.imitators[-1].eval()
+                unwatch_model(imitator)
+
             wandb_logger = initialize_wandb_logger(args, name_suffix=f'_block_{i}')
             wandb_logger.watch(imitator, log='all')
             wandb_logger.experiment.summary['replaced_block_error'] = replaced_block_error
