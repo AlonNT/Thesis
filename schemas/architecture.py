@@ -14,6 +14,9 @@ class ArchitectureArgs(ImmutableArgs):
     #: The model name for the network architecture.
     model_name: str = 'VGG11c'
 
+    #: Whether to put the (avg/max) pool layers as separate blocks, or in the end of the previous conv block.
+    pool_as_separate_blocks: bool = True
+
     #: Use pretrained model, or train from scratch.
     use_pretrained: bool = False
 
@@ -33,23 +36,23 @@ class ArchitectureArgs(ImmutableArgs):
     input_spatial_size: PositiveInt = 32
 
     #: The kernel-size to use in each convolution-layer.
-    kernel_size: Union[PositiveInt, List[PositiveInt]] = 5
+    kernel_size: Union[PositiveInt, List[PositiveInt]] = 3
 
     #: Stride to use in the convolution-layer.
     stride: Union[PositiveInt, List[PositiveInt]] = 1
 
     #: The padding amount to use in each convolution-layer.
-    padding: Union[NonNegativeInt, List[NonNegativeInt]] = 0
+    padding: Union[NonNegativeInt, List[NonNegativeInt]] = 1
 
     #: The pooling size and stride to use in the AvgPool / MaxPool layers.
     pool_size: Union[PositiveInt, List[PositiveInt]] = 4
     pool_stride: Union[PositiveInt, List[PositiveInt]] = 4
 
     #: Whether to use batch-normalization layer after the Conv -> ReLU (and possible pool) part in the block.
-    use_batch_norm: Union[bool, List[bool]] = True
+    use_batch_norm: Union[bool, List[bool]] = False
 
     #: If it's greater than zero, adds a 1x1 convolution layer ("bottleneck") in the end of the block.
-    bottle_neck_dimension: Union[NonNegativeInt, List[NonNegativeInt]] = 32
+    bottle_neck_dimension: Union[NonNegativeInt, List[NonNegativeInt]] = 0
 
     #: The size for the bottleneck layer(s).
     bottle_neck_kernel_size: Union[PositiveInt, List[PositiveInt]] = 1

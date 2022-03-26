@@ -121,13 +121,29 @@ def get_list_of_arguments_for_config(config: List[Union[int, str]], arg) -> list
     return arg
 
 
+def get_pool_layer(letter):
+    """
+    Returns:
+        A pooling layer with kernel_size 2 and stride 2 - AvgPool if `letter` is 'A' and MaxPool if `letter` is 'M'.
+    """
+    if letter == 'M':
+        pool_type = nn.MaxPool2d
+    elif letter == 'A':
+        pool_type = nn.AvgPool2d
+    else:
+        raise NotImplementedError(f'{letter=} is not supported, should be A or M.')
+
+    return pool_type(kernel_size=2, stride=2)
+
+
 def get_vgg_blocks(config: List[Union[int, str]],
                    in_channels: int = 3,
                    spatial_size: int = 32,
                    kernel_size: Union[int, List[int]] = 3,
                    padding: Union[int, List[int]] = 1,
                    use_batch_norm: Union[bool, List[bool]] = False,
-                   bottleneck_dim: Union[int, List[int]] = 0) -> Tuple[List[nn.Module], int]:
+                   bottleneck_dim: Union[int, List[int]] = 0,
+                   pool_as_separate_blocks: bool = True) -> Tuple[List[nn.Module], int]:
     """Gets a list containing the blocks of the given VGG model config.
 
     Args:
@@ -139,11 +155,14 @@ def get_vgg_blocks(config: List[Union[int, str]],
         use_batch_norm: Whether to use batch-norm in each conv block. If it's a single variable, the same one is used.
         bottleneck_dim: The dimension of the bottleneck layer to use in the end of each conv block
             (0 means no bottleneck is added). If it's a single variable, the same one is used.
+        pool_as_separate_blocks: Whether to put the (avg/max) pool layers as separate blocks,
+            or in the end of the previous conv block.
     Returns:
-        A tuple containing the list of nn.Modules, and an integers which is the number of input features
+        A tuple containing the list of nn.Modules, and an integers which is the number of output features
         (will be useful later when feeding to a linear layer).
     """
     blocks: List[nn.Module] = list()
+    out_channels = in_channels
     
     kernel_size = get_list_of_arguments_for_config(config, kernel_size)
     padding = get_list_of_arguments_for_config(config, padding)
@@ -151,42 +170,27 @@ def get_vgg_blocks(config: List[Union[int, str]],
     bottleneck_dim = get_list_of_arguments_for_config(config, bottleneck_dim)
 
     for i in range(len(config)):
-        if config[i] == 'M':
-            blocks.append(nn.Sequential(nn.MaxPool2d(kernel_size=2, stride=2)))
-        elif config[i] == 'A':
-            continue  # The average-pooling was already added in the else section...
-        else:
-            out_channels = config[i]
+        if isinstance(config[i], str):
+            spatial_size /= 2
+            if pool_as_separate_blocks:
+                blocks.append(nn.Sequential(get_pool_layer(config[i])))
+            continue
 
-            block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size[i], padding=padding[i]),
-                            nn.ReLU()]
+        out_channels = config[i]
+        block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size[i], padding=padding[i]),
+                        nn.ReLU()]
+        if use_batch_norm[i]:
+            block_layers.append(nn.BatchNorm2d(out_channels))
+        if (i + 1 < len(config)) and (isinstance(config[i + 1], str)) and (not pool_as_separate_blocks):
+            block_layers.append(get_pool_layer(config[i + 1]))
+        if bottleneck_dim[i] > 0:
+            block_layers.append(nn.Conv2d(out_channels, bottleneck_dim[i], kernel_size=1))
+            out_channels = bottleneck_dim[i]
 
-            if (i+1 < len(config)) and (config[i+1] == 'A'):
-                block_layers.append(nn.AvgPool2d(kernel_size=2, stride=2))
+        blocks.append(nn.Sequential(*block_layers))
 
-            if use_batch_norm[i]:
-                block_layers.append(nn.BatchNorm2d(out_channels))
-
-            spatial_size = spatial_size + 2*padding[i] - kernel_size[i] + 1
-
-            if (i+1 < len(config)) and (isinstance(config[i+1], str)):
-                spatial_size /= 2
-
-                if config[i+1] == 'M':
-                    pool_type = nn.MaxPool2d
-                elif config[i+1] == 'A':
-                    pool_type = nn.AvgPool2d
-                else:
-                    raise NotImplementedError(f'The letter {config[i+1]} is not supported, should be A or M.')
-
-                block_layers.append(pool_type(kernel_size=2, stride=2))
-
-            if bottleneck_dim[i] > 0:
-                block_layers.append(nn.Conv2d(out_channels, bottleneck_dim[i], kernel_size=1))
-                out_channels = bottleneck_dim[i]
-
-            blocks.append(nn.Sequential(*block_layers))
-            in_channels = out_channels  # The input channels of the next convolution layer.
+        in_channels = out_channels
+        spatial_size = spatial_size + 2 * padding[i] - kernel_size[i] + 1
 
     n_features = int(out_channels * (spatial_size ** 2))
     return blocks, n_features
@@ -314,19 +318,15 @@ def get_vgg_model_kernel_size(model, block_index: int):
 
     block = model.features[block_index]
 
-    if isinstance(block, nn.MaxPool2d):
-        pool_layer = block
-        return pool_layer.kernel_size
-
     if not isinstance(block, nn.Sequential):
         raise ValueError(f"block_index {block_index} is not a sequential module (i.e. \'block\'), it's {type(block)}.")
 
-    conv_layer = block[0]
+    first_layer = block[0]
 
-    if not isinstance(conv_layer, nn.Conv2d):
-        raise ValueError(f"first layer of the block is not a conv layer, it's {type(conv_layer)}")
+    if not any(isinstance(first_layer, cls) for cls in [nn.Conv2d, nn.MaxPool2d, nn.AvgPool2d]):
+        raise ValueError(f"first layer of the block is not a Conv/MaxPool/AvgPool layer, it's {type(first_layer)}")
 
-    return conv_layer.kernel_size
+    return first_layer.kernel_size
 
 
 class VGGwDGL(nn.Module):

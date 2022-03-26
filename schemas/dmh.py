@@ -35,6 +35,9 @@ class DMHArgs(ImmutableArgs):
     k1: PositiveInt = 10
     k2: PositiveInt = 20
 
+    #: The minimal distance between adjacent data-points (i.e. patches/images) when estimating their dimension.
+    minimal_distance: NonNegativeFloat = 1e-05
+
     #: Indicator to shuffle the patches/images before calculating the intrinsic-dimension.
     shuffle_before_estimate: bool = False
 

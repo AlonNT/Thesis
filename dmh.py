@@ -430,7 +430,8 @@ class LitVGG(pl.LightningModule):
                                             arch_args.kernel_size,
                                             arch_args.padding,
                                             arch_args.use_batch_norm,
-                                            arch_args.bottle_neck_dimension)
+                                            arch_args.bottle_neck_dimension,
+                                            arch_args.pool_as_separate_blocks)
         self.features = nn.Sequential(*layers)
         self.mlp = get_mlp(input_dim=n_features,
                            output_dim=N_CLASSES,
@@ -717,13 +718,30 @@ def indices_to_mask(n, indices, negate=False):
 
 def get_flattened_patches(dataloader, n_patches, kernel_size,
                           shuffle_before_estimate: bool = False, sub_model=None, device=None):
+    """Sample patches from the given data and flatten them, possibly shuffling their content.
+
+    Args:
+        dataloader: The given dataloader to sample from.
+        n_patches: The number of patches to sample.
+        kernel_size: The size of the patches to sample (-1 means the whole image).
+        shuffle_before_estimate: Whether to shuffle the pixels in each patch
+            (used as a "baseline" for the intrinsic-dimension estimation)
+        sub_model: The sub-model to run on the images generated from the dataloader
+            (used when sampling patches in deeper layer and not in the first one)
+        device: If given, move the patches to this device before returning them.
+
+    Returns:
+        A 2-dimensional tensor containing `n_patches` flattened patches.
+    """
     patches = sample_random_patches(dataloader, n_patches, kernel_size, sub_model)
     patches = patches.reshape(patches.shape[0], -1)  # a.k.a. flatten in NumPy
 
     if shuffle_before_estimate:
+        # Use a fresh new sampled permutation for each patch (i.e. row in the matrix).
+        # This functionality does not exist in PyTorch and that's why it's being done in NumPy.
         patches = np.random.default_rng().permuted(patches, axis=1, out=patches)
 
-    patches = patches.astype(np.float64)  # Increase accuracy of calculations.
+    patches = patches.astype(np.float64)  # Increase accuracy of calculations later.
     patches = torch.from_numpy(patches)
 
     if device is not None:
@@ -733,6 +751,15 @@ def get_flattened_patches(dataloader, n_patches, kernel_size,
 
 
 def get_patches_to_keep_mask(patches, minimal_distance: float = 1e-05):
+    """Calculates a mask indicating the patches to keep (distant from one another) from the given patches tensor.
+
+    Args:
+        patches: The given patches to analyze.
+        minimal_distance: The minimal distance to allow between different patches.
+
+    Returns:
+        A boolean mask (as a tensor) indicating patches to keep (distant at least `minimal_distance` from one another).
+    """
     distance_matrix = torch.cdist(patches, patches)
     small_distances_indices = torch.nonzero(torch.less(distance_matrix, minimal_distance))
     different_patches_mask = (small_distances_indices[:, 0] != small_distances_indices[:, 1])
@@ -747,7 +774,33 @@ def get_patches_not_too_close_to_one_another(dataloader, n_patches, patch_size,
                                              minimal_distance: float = 1e-5,
                                              shuffle_before_estimate: bool = False,
                                              sub_model=None, 
-                                             device=None):
+                                             device=None) -> torch.Tensor:
+    """Sample patches from the given data, such that they are at least `minimal_distance` apart from one another.
+
+    Since the intrinsic-dimension calculation takes logarithm of the distances,
+    if they are zero (or very small) it can cause numerical issues (NaN).
+    The solution is to sample a bit more patches than requested,
+    and later we remove patches that are really close to one another,
+    and we want our final number of patches to be the desired one.
+    Since there is a lower probability to get similar images rather than patches,
+    the exact number is different.
+
+    Args:
+        dataloader: The dataloader to sample patches from.
+        n_patches: Number of patches to sample.
+        patch_size: The side of the patches to sample (-1 means the whole image).
+        minimal_distance: The minimal distance to allow between adjacent patches.
+        shuffle_before_estimate: Whether to shuffle the pixels in each patch
+            (used as a "baseline" for the intrinsic-dimension estimation)
+        sub_model: The sub-model to run on the images generated from the dataloader
+            (used when sampling patches in deeper layer and not in the first one)
+        device: The device to run the forward-pass of the sub-model.
+
+    Returns:
+        A tensor containing the sampled patches (will be exactly `n_patches` as requested,
+        but it might be a bit less if for some reason a lot of sampled patches were too
+        close to each other).
+    """
     ratio_to_extend_n = 1.5
     n_patches_extended = math.ceil(n_patches * ratio_to_extend_n)
     patches = get_flattened_patches(dataloader, n_patches_extended, patch_size, 
@@ -760,15 +813,50 @@ def get_patches_not_too_close_to_one_another(dataloader, n_patches, patch_size,
     return patches
 
 
-def log_dim_per_k_graph(metrics, prefix, estimates):
+def log_dim_per_k_graph(estimates: np.ndarray):
+    """Creates a graph of the k-th intrinsic dimension per k and adds it to the given `metrics` dictionary
+
+    Args:
+        estimates: A NumPy vector containing the k-th intrinsic-dimension estimates for k=1,2,...,K
+            (where K is the maximal k chosen to calculate the intrinsic-dimension).
+
+    Returns:
+        A plotly-express line object.
+    """
     min_k = 5
     max_k = len(estimates) + 1
     df = pd.DataFrame(estimates[min_k - 1:], index=np.arange(min_k, max_k), columns=['k-th intrinsic-dimension'])
     df.index.name = 'k'
-    metrics[f'{prefix}-int_dim_per_k'] = px.line(df)
+    return px.line(df)
 
 
-def log_singular_values(metrics, prefix, data):
+def log_singular_values(metrics: dict, prefix: str, data: np.ndarray):
+    """Create several graphs analyzing the data singular values (and adding them to the given `metrics` dictionary).
+
+    The graphs that are being added to the `metrics` dictionary (with the prefix f'{prefix}-') are:
+    - d_cov: "The covariance dimension" which is the smallest number of dimensions
+        needed to explain 95% of the total variance.
+        Inspiration (and the name 'd_cov') taken from
+        "The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods"
+    - singular_values: The singular values of the data (i.e. X = USV^T and it's the values in the diagonal matrix S).
+    - singular_values_ratio: The singular values, normalized by the largest one (i.e. \lambda_1).
+        Inspiration (and the name 'd_cov') taken from
+        "The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods"
+    - variance_ratio: The sum of the singular values until i, divided by the total sum of the singular values.
+    - explained_variance_ratio: The squared singular values divided by the number of data-points, divided by
+        the sum of all of these values.
+        Inspiration taken from sklearn.decomposition._pca.PCA._fit_full
+    - reconstruction_errors: The error (l2 distance) between the original data-points and the reconstruced ones.
+        The reconstruction is being done by transforming to R^k (for k=1,2,...,min{100, patches-dimension})
+        using the first k singular vectors, then transforming it back to the original dimension.
+    - normalized_reconstruction_errors: The reconstruction error, now normalized by the norm of the data-point.
+
+    Args:
+        metrics: The dictionary containing the different metrics that will be logged to wandb.
+            The different plots will be added to this dictionary.
+        prefix: The prefix of the keys that the generated plots will be inserted to the `metrics` dictionary with.
+        data: The data as a NumPy array of shape (n_samples, n_features), i.e. a collection of row-vectors.
+    """
     n, d = data.shape
     data_dict = {
         'original_data': data,
@@ -782,6 +870,7 @@ def log_singular_values(metrics, prefix, data):
     explained_variance_ratio = dict()
     variance_ratio = dict()
     reconstruction_errors = dict()
+    normalized_reconstruction_errors = dict()
     for data_name in data_dict.keys():
         data_orig = data_dict[data_name]
         logger.debug(f'Calculating SVD for {data_name} with shape {tuple(data_orig.shape)}...')
@@ -794,30 +883,30 @@ def log_singular_values(metrics, prefix, data):
 
         singular_values[data_name] = s
 
-        # Inspiration taken from sklearn.decomposition._pca.PCA._fit_full
         explained_variance = (s ** 2) / (n - 1)
         explained_variance_ratio[data_name] = explained_variance / explained_variance.sum()
 
-        # Inspiration taken from "The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods"
         variance_ratio[data_name] = np.cumsum(s) / np.sum(s)
         singular_values_ratio[data_name] = s / s[0]
 
         logger.debug('Calculating reconstruction error...')
         transformed_data = np.dot(data_orig, v)  # n x d matrix (like the original)
         reconstruction_errors_list = list()
+        normalized_reconstruction_errors_list = list()
         for k in range(1, 101):
             v_reduced = v[:, :k]  # d x k matrix
             transformed_data_reduced = np.dot(transformed_data, v_reduced)  # n x k matrix
             transformed_data_reconstructed = np.dot(transformed_data_reduced, v_reduced.T)  # n x d matrix
             data_reconstructed = np.dot(transformed_data_reconstructed, v_t)  # n x d matrix
             reconstruction_error = np.linalg.norm(data_orig - data_reconstructed)
+            normalized_reconstruction_error = reconstruction_error / (np.linalg.norm(data_orig) + 0.0001)
             reconstruction_errors_list.append(reconstruction_error)
+            normalized_reconstruction_errors_list.append(normalized_reconstruction_error)
         logger.debug('Finished calculating reconstruction error.')
 
         reconstruction_errors[data_name] = np.array(reconstruction_errors_list)
+        normalized_reconstruction_errors[data_name] = np.array(reconstruction_errors_list)
 
-    # Inspiration (and the name 'd_cov') taken from
-    # "The Unreasonable Effectiveness of Patches in Deep Convolutional Kernels Methods"
     metrics[f'{prefix}-d_cov'] = np.where(variance_ratio['original_data'] > 0.95)[0][0]
 
     fig_args = dict(markers=True)
@@ -826,9 +915,32 @@ def log_singular_values(metrics, prefix, data):
     metrics[f'{prefix}-variance_ratio'] = px.line(pd.DataFrame(variance_ratio), **fig_args)
     metrics[f'{prefix}-explained_variance_ratio'] = px.line(pd.DataFrame(explained_variance_ratio), **fig_args)
     metrics[f'{prefix}-reconstruction_errors'] = px.line(pd.DataFrame(reconstruction_errors), **fig_args)
+    metrics[f'{prefix}-normalized_reconstruction_errors'] = px.line(pd.DataFrame(normalized_reconstruction_errors),
+                                                                    **fig_args)
 
 
-def log_final_estimate(metrics, estimates, extrinsic_dimension, block_name, k1, k2):
+def log_final_estimate(metrics: dict,
+                       estimates: torch.Tensor,
+                       extrinsic_dimension: int,
+                       block_name: str,
+                       k1: int,
+                       k2: int):
+    """Logs the final MLE estimator for the intrinsic dimension (mean of the k-th estimates from `k1` to `k2`),
+    both as the original number and as a fraction of the extrinsic-dimension.
+
+    Args:
+        metrics: The dictionary containing the different metrics that will be logged to wandb.
+            returned values from the function will also be added to this dictionary.
+        estimates: A NumPy vector containing the k-th intrinsic-dimension estimates for k=1,2,...,K
+            (where K is the maximal k chosen to calculate the intrinsic-dimension).
+        extrinsic_dimension: The extrinsic-dimension of the patches.
+        block_name: The name of the block, will be the prefix of the keys that will be added to `metrics` dictionary.
+        k1: The minimal k to take the mean to get the final MLP estimate.
+        k2: The maximal k (inclusive) to take the mean to get the final MLP estimate.
+
+    Returns:
+        Two numbers - the intrinsic-dimension, and the ratio between it and the extrinsic-dimension.
+    """
     estimate_mean_over_k1_to_k2 = torch.mean(estimates[k1:k2 + 1])
     intrinsic_dimension = estimate_mean_over_k1_to_k2.item()
     dimensions_ratio = intrinsic_dimension / extrinsic_dimension
@@ -841,51 +953,51 @@ def log_final_estimate(metrics, estimates, extrinsic_dimension, block_name, k1, 
 
 class IntrinsicDimensionCalculator(Callback):
 
-    def __init__(self, args: DMHArgs, minimal_distance: float = 1e-05):
-        """
-        Since the intrinsic-dimension calculation takes logarithm of the distances,
-        if they are zero (or very small) it can cause numerical issues (NaN).
+    def __init__(self, args: DMHArgs):
+        """Initialize a new instance of the intrinsic-dimension-calculator callback.
+
+        This callback calculates the intrinsic-dimension of the input distribution to each layer in the model.
+        It runs after each epoch (on_validation_epoch_end) and in the beginning and the end of the whole
+        training process (on_fit_begin and on_fit_end) where it also does more heavy compute to generate graphs.
+
+        Args:
+            args: The arguments schema
         """
         self.args: DMHArgs = args
-        self.minimal_distance = minimal_distance
-
-        # Since the intrinsic-dimension calculation takes logarithm of the distances,
-        # if they are zero (or very small) it can cause numerical issues (NaN).
-        # The solution is to sample a bit more patches than requested,
-        # and later we remove patches that are really close to one another,
-        # and we want our final number of patches to be the desired one.
-        ratio_to_extend_n = 1.5 if self.args.estimate_dim_on_patches else 1.01  # Lower probability to get similar images.
-        self.n_clusters_extended = math.ceil(self.args.n_clusters * ratio_to_extend_n)
 
     def calc_int_dim_per_layer_on_dataloader(self, trainer, pl_module, dataloader, log_graphs: bool = False):
-        """
-        Given a VGG model, go over each block in it and calculates the intrinsic dimension of its input data.
-        """
+        """The main function of the callback - iterate the model's layers and estimate the intrinsic dimension
+        of their input data distribution.
 
-        log_graphs = log_graphs or (trainer.global_step == 0)
-
+        Args:
+            trainer: The trainer
+            pl_module: The model (expected to be LitVGG or LitMLP)
+            dataloader: The dataloader to sample data-points from.
+            log_graphs: Whether to log graphs or not (heavy compute, that's why it happens only in
+                beginning or in the end of the whole training process).
+        """
         metrics = dict()
         for i in range(pl_module.num_blocks):
             block_name = f'block_{i}'
-            if self.args.estimate_dim_on_images or (i >= len(pl_module.kernel_sizes)):
-                patch_size = -1
-            else:
-                patch_size = pl_module.kernel_sizes[i]
-            patches = get_patches_not_too_close_to_one_another(dataloader, self.args.n_clusters, patch_size, 
-                                                               self.minimal_distance,
+            estimate_dim_on_whole_image = self.args.estimate_dim_on_images or (i >= len(pl_module.kernel_sizes))
+            patch_size = -1 if estimate_dim_on_whole_image else pl_module.kernel_sizes[i]
+            patches = get_patches_not_too_close_to_one_another(dataloader, self.args.n_clusters,
+                                                               patch_size, self.args.minimal_distance,
                                                                self.args.shuffle_before_estimate,
                                                                pl_module.get_sub_model(i))
-            
+
             estimates_matrix = get_estimates_matrix(patches, 8*self.args.k2 if log_graphs else self.args.k2)
             estimates = torch.mean(estimates_matrix, dim=0)
 
             if log_graphs:
-                log_dim_per_k_graph(metrics, block_name, estimates.cpu().numpy())
+                metrics[f'{block_name}-int_dim_per_k'] = log_dim_per_k_graph(estimates.cpu().numpy())
                 log_singular_values(metrics, block_name, patches.cpu().numpy())
 
-            mle_int_dim, ratio = log_final_estimate(metrics, estimates, patches.shape[1], block_name, self.args.k1, self.args.k2)
+            mle_int_dim, ratio = log_final_estimate(metrics, estimates, patches.shape[1], block_name,
+                                                    self.args.k1, self.args.k2)
             logger.debug(f'epoch {trainer.current_epoch:0>2d} block {i:0>2d} '
                          f'mle_int_dim {mle_int_dim:.2f} ({100 * ratio:.2f}% of ext_sim {patches.shape[1]})')
+
         trainer.logger.experiment.log(metrics, step=trainer.global_step, commit=False)
 
     def calc_int_dim_per_layer(self, trainer, pl_module, log_graphs: bool = False):
@@ -899,24 +1011,24 @@ class IntrinsicDimensionCalculator(Callback):
         training_mode = pl_module.training
         pl_module.eval()
         self.calc_int_dim_per_layer_on_dataloader(trainer, pl_module,
-                                                  dataloader=trainer.request_dataloader(RunningStage.VALIDATING)[1],
+                                                  dataloader=trainer.request_dataloader(RunningStage.VALIDATING),
                                                   log_graphs=log_graphs)
         pl_module.train(training_mode)
 
     def on_validation_epoch_end(self, trainer, pl_module):
         if trainer.global_step == 0:  # This happens in the end of validation loop sanity-check before training,
-            return  # and we do not want to treat it the same as actual validation-epoch end.
+            return                    # and we do not want to treat it the same as actual validation-epoch end.
         self.calc_int_dim_per_layer(trainer, pl_module)
 
     def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
         """
-        Since log_graphs=True takes a lot of time, we do it only in the beginning /end of the training process.
+        Since log_graphs=True takes a lot of time, we do it only in the beginning / end of the training process.
         """
         self.calc_int_dim_per_layer(trainer, pl_module, log_graphs=True)
 
     def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
         """
-        Since log_graphs=True takes a lot of time, we do it only in the beginning /end of the training process.
+        Since log_graphs=True takes a lot of time, we do it only in the beginning / end of the training process.
         """
         self.calc_int_dim_per_layer(trainer, pl_module, log_graphs=True)
 
