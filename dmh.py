@@ -893,19 +893,22 @@ def log_singular_values(metrics: dict, prefix: str, data: np.ndarray):
         transformed_data = np.dot(data_orig, v)  # n x d matrix (like the original)
         reconstruction_errors_list = list()
         normalized_reconstruction_errors_list = list()
-        for k in range(1, 101):
+        for k in range(1, min(d+1, 101)):
             v_reduced = v[:, :k]  # d x k matrix
             transformed_data_reduced = np.dot(transformed_data, v_reduced)  # n x k matrix
             transformed_data_reconstructed = np.dot(transformed_data_reduced, v_reduced.T)  # n x d matrix
             data_reconstructed = np.dot(transformed_data_reconstructed, v_t)  # n x d matrix
-            reconstruction_error = np.linalg.norm(data_orig - data_reconstructed)
-            normalized_reconstruction_error = reconstruction_error / (np.linalg.norm(data_orig) + 0.0001)
+            reconstruction_errors = np.linalg.norm(data_orig - data_reconstructed, axis=1)
+            data_points_norms = np.linalg.norm(data_orig, axis=1)
+            normalized_reconstruction_errors = reconstruction_errors / data_points_norms
+            reconstruction_error = np.mean(reconstruction_errors)
+            normalized_reconstruction_error = np.mean(normalized_reconstruction_errors)
             reconstruction_errors_list.append(reconstruction_error)
             normalized_reconstruction_errors_list.append(normalized_reconstruction_error)
         logger.debug('Finished calculating reconstruction error.')
 
         reconstruction_errors[data_name] = np.array(reconstruction_errors_list)
-        normalized_reconstruction_errors[data_name] = np.array(reconstruction_errors_list)
+        normalized_reconstruction_errors[data_name] = np.array(normalized_reconstruction_errors_list)
 
     metrics[f'{prefix}-d_cov'] = np.where(variance_ratio['original_data'] > 0.95)[0][0]
 
