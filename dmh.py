@@ -898,11 +898,11 @@ def log_singular_values(metrics: dict, prefix: str, data: np.ndarray):
             transformed_data_reduced = np.dot(transformed_data, v_reduced)  # n x k matrix
             transformed_data_reconstructed = np.dot(transformed_data_reduced, v_reduced.T)  # n x d matrix
             data_reconstructed = np.dot(transformed_data_reconstructed, v_t)  # n x d matrix
-            reconstruction_errors = np.linalg.norm(data_orig - data_reconstructed, axis=1)
+            error_per_data_point = np.linalg.norm(data_orig - data_reconstructed, axis=1)
             data_points_norms = np.linalg.norm(data_orig, axis=1)
-            normalized_reconstruction_errors = reconstruction_errors / data_points_norms
-            reconstruction_error = np.mean(reconstruction_errors)
-            normalized_reconstruction_error = np.mean(normalized_reconstruction_errors)
+            normalized_error_per_data_point = error_per_data_point / data_points_norms
+            reconstruction_error = np.mean(error_per_data_point)
+            normalized_reconstruction_error = np.mean(normalized_error_per_data_point)
             reconstruction_errors_list.append(reconstruction_error)
             normalized_reconstruction_errors_list.append(normalized_reconstruction_error)
         logger.debug('Finished calculating reconstruction error.')
