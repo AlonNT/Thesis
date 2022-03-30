@@ -49,7 +49,7 @@ class ArchitectureArgs(ImmutableArgs):
     pool_stride: Union[PositiveInt, List[PositiveInt]] = 4
 
     #: Whether to use batch-normalization layer after the Conv -> ReLU (and possible pool) part in the block.
-    use_batch_norm: Union[bool, List[bool]] = False
+    use_batch_norm: Union[bool, List[bool]] = True
 
     #: If it's greater than zero, adds a 1x1 convolution layer ("bottleneck") in the end of the block.
     bottle_neck_dimension: Union[NonNegativeInt, List[NonNegativeInt]] = 0

@@ -177,10 +177,10 @@ def get_vgg_blocks(config: List[Union[int, str]],
             continue
 
         out_channels = config[i]
-        block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size[i], padding=padding[i]),
-                        nn.ReLU()]
+        block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size[i], padding=padding[i])]
         if use_batch_norm[i]:
             block_layers.append(nn.BatchNorm2d(out_channels))
+        block_layers.append(nn.ReLU())
         if (i + 1 < len(config)) and (isinstance(config[i + 1], str)) and (not pool_as_separate_blocks):
             block_layers.append(get_pool_layer(config[i + 1]))
         if bottleneck_dim[i] > 0:

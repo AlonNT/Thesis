@@ -773,8 +773,7 @@ def get_patches_to_keep_mask(patches, minimal_distance: float = 1e-05):
 def get_patches_not_too_close_to_one_another(dataloader, n_patches, patch_size,
                                              minimal_distance: float = 1e-5,
                                              shuffle_before_estimate: bool = False,
-                                             sub_model=None, 
-                                             device=None) -> torch.Tensor:
+                                             sub_model=None, device=None) -> torch.Tensor:
     """Sample patches from the given data, such that they are at least `minimal_distance` apart from one another.
 
     Since the intrinsic-dimension calculation takes logarithm of the distances,
