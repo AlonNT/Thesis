@@ -26,7 +26,10 @@ class DataArgs(ImmutableArgs):
 
     #: Indicator to keep the RGB triplet intact when shuffling the image:
     #: sample a permutation from (32*32)! and not from (3*32*32)!
-    keep_rgb_triplets_intact: bool = False
+    keep_rgb_triplets_intact: bool = True
+
+    #: If it's true, a fixed permutation will be used every time and not a fresh new sampled permutation.
+    fixed_permutation: bool = True
 
     @validator('n_channels', always=True, pre=True)
     def calculate_n_channels(cls, v, values):

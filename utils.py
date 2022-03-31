@@ -1438,3 +1438,43 @@ def log_epoch_end(epoch, epoch_time_elapsed, total_epochs, total_time,
                 f'Test '
                 f'loss={epoch_test_loss:.4f} '
                 f'acc={epoch_test_accuracy:.2f}%')
+
+
+class ShuffleTensor(nn.Module):
+    def __init__(self,
+                 spatial_size: int = 32,
+                 channels: int = 3,
+                 spatial_only: bool = True,
+                 fixed_permutation: bool = True):
+        """A data transformation which shuffles the pixels of the input image.
+
+        Args:
+            spatial_size: The spatial size of the input tensor (it's assumed to be square so height=width=spatial_size).
+            channels: The number of channels of the input tensor.
+            spatial_only: If it's true, shuffle the spatial locations only and the channels dimension will stay intact.
+            fixed_permutation: If it's true, a fixed permutation will be used every time this module is called.
+        """
+        super().__init__()
+        self.spatial_size = spatial_size
+        self.channels = channels
+        self.spatial_only = spatial_only
+
+        permutation_size = self.spatial_size ** 2
+        if not self.spatial_only:
+            permutation_size *= self.channels
+        self.permutation = torch.randperm(permutation_size) if fixed_permutation else None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # The number of dimensions can be 4 (batched tensors) or 3 (a single tensor, e.g. when used as data
+        # preprocessing function a.k.a. `transform`). Anyway, last three dimensions are C x H x W.
+        assert x.shape[-1] == x.shape[-2] == self.spatial_size, f'{x.shape=} ; {self.spatial_size=}'
+        assert x.shape[-3] == self.channels, f'{x.shape=} ; {self.channels=}'
+        start_dim = -2 if self.spatial_only else -3
+        x_flat = torch.flatten(x, start_dim=start_dim)
+        permutation = torch.randperm(x_flat.shape[-1]) if (self.permutation is None) else self.permutation
+        permuted_x_flat = x_flat[..., permutation]
+        permuted_x = torch.reshape(permuted_x_flat, shape=x.shape)
+        return permuted_x
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward(x)  # When used as a data transform it's required to be "callable".

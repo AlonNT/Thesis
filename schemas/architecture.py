@@ -17,6 +17,18 @@ class ArchitectureArgs(ImmutableArgs):
     #: Whether to put the (avg/max) pool layers as separate blocks, or in the end of the previous conv block.
     pool_as_separate_blocks: bool = True
 
+    #: If it's true - shuffle the output of each block in the network.
+    #: The output will be shuffled spatially only, meaning that the channels dimension will stay intact.
+    #: For example, if the output is of shape 64x28x28 a random permutation from all (28*28)! possibilities
+    #: is sampled and applied to the input tensor.
+    shuffle_each_block_output: bool = False
+
+    #: If it's true, shuffle the spatial locations only and the channels dimension will stay intact.
+    spatial_shuffle_only: bool = True
+
+    #: If it's true - shuffle the output of each block in the network.
+    fixed_permutation_per_block: bool = True
+
     #: Use pretrained model, or train from scratch.
     use_pretrained: bool = False
 

@@ -32,7 +32,7 @@ from schemas.data import DataArgs
 from schemas.dmh import Args, DMHArgs
 from schemas.optimization import OptimizationArgs
 from utils import (configure_logger, get_args, get_model_device, power_minus_1, get_mlp, get_dataloaders,
-                   whiten_data, normalize_data, calc_whitening_from_dataloader)
+                   whiten_data, normalize_data, calc_whitening_from_dataloader, ShuffleTensor)
 from vgg import get_vgg_model_kernel_size, get_vgg_blocks, configs
 
 
@@ -231,25 +231,6 @@ class NeighborsValuesAssigner(nn.Module):
             return self.forward_using_torch(x)
 
 
-class ShufflePixels:
-    def __init__(self, keep_rgb_triplets_intact: bool = True):
-        """A data transformation which shuffles the pixels of the input image.
-
-        Args:
-            keep_rgb_triplets_intact: If it's true, shuffle the RGB triplets and not each value separately.
-        """
-        self.keep_rgb_triplets_intact = keep_rgb_triplets_intact
-
-    def __call__(self, img):
-        assert img.ndim == 3 and img.shape[0] == 3, "The input-image is expected to be of shape 3 x H x W"
-        start_dim = 1 if self.keep_rgb_triplets_intact else 0
-        img_flat = torch.flatten(img, start_dim=start_dim)
-        permutation = torch.randperm(img_flat.shape[-1])
-        permuted_img_flat = img_flat[..., permutation]
-        permuted_img = torch.reshape(permuted_img_flat, shape=img.shape)
-        return permuted_img
-
-
 class DataModule(LightningDataModule):
     def __init__(self, args: DataArgs, batch_size: int, data_dir: str = "./data"):
         """A datamodule to be used with PyTorch Lightning modules.
@@ -312,9 +293,13 @@ class DataModule(LightningDataModule):
                                                                args.n_channels)
         normalizations_list = list() if (normalization is None) else [normalization]
         crucial_transforms = [ToTensor()]
-        post_transforms = [ShufflePixels(args.keep_rgb_triplets_intact)] if args.shuffle_images else list()
+        if args.shuffle_images:
+            post_transforms = [ShuffleTensor(args.spatial_size,  args.n_channels,
+                                             args.keep_rgb_triplets_intact, args.fixed_permutation)]
+        else:
+            post_transforms = list()
         transforms_list_no_aug = crucial_transforms + normalizations_list + post_transforms
-        transforms_list_with_aug = augmentations + crucial_transforms + normalizations_list + post_transforms
+        transforms_list_with_aug = augmentations + transforms_list_no_aug
 
         return transforms_list_no_aug, transforms_list_with_aug
 
@@ -424,15 +409,18 @@ class LitVGG(pl.LightningModule):
             data_args: The arguments for the input data.
         """
         super(LitVGG, self).__init__()
-        layers, n_features = get_vgg_blocks(configs[arch_args.model_name],
+        blocks, n_features = get_vgg_blocks(configs[arch_args.model_name],
                                             data_args.n_channels,
                                             data_args.spatial_size,
                                             arch_args.kernel_size,
                                             arch_args.padding,
                                             arch_args.use_batch_norm,
                                             arch_args.bottle_neck_dimension,
-                                            arch_args.pool_as_separate_blocks)
-        self.features = nn.Sequential(*layers)
+                                            arch_args.pool_as_separate_blocks,
+                                            arch_args.shuffle_each_block_output,
+                                            arch_args.spatial_shuffle_only,
+                                            arch_args.fixed_permutation_per_block)
+        self.features = nn.Sequential(*blocks)
         self.mlp = get_mlp(input_dim=n_features,
                            output_dim=N_CLASSES,
                            n_hidden_layers=arch_args.final_mlp_n_hidden_layers,

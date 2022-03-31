@@ -3,7 +3,7 @@ import torch.nn as nn
 from typing import List, Union, Tuple, Optional
 
 from consts import CLASSES
-from utils import get_mlp, get_cnn
+from utils import get_mlp, get_cnn, ShuffleTensor
 
 # Configurations for the VGG models family.
 # A number indicates number of channels in a convolution block, and M/A denotes a MaxPool/AvgPool layer.
@@ -143,7 +143,10 @@ def get_vgg_blocks(config: List[Union[int, str]],
                    padding: Union[int, List[int]] = 1,
                    use_batch_norm: Union[bool, List[bool]] = False,
                    bottleneck_dim: Union[int, List[int]] = 0,
-                   pool_as_separate_blocks: bool = True) -> Tuple[List[nn.Module], int]:
+                   pool_as_separate_blocks: bool = True,
+                   shuffle_each_block_output: bool = False,
+                   spatial_shuffle_only: bool = False,
+                   fixed_permutation_per_block: bool = False) -> Tuple[List[nn.Module], int]:
     """Gets a list containing the blocks of the given VGG model config.
 
     Args:
@@ -157,6 +160,12 @@ def get_vgg_blocks(config: List[Union[int, str]],
             (0 means no bottleneck is added). If it's a single variable, the same one is used.
         pool_as_separate_blocks: Whether to put the (avg/max) pool layers as separate blocks,
             or in the end of the previous conv block.
+        shuffle_each_block_output: If it's true - shuffle the input for each block in the network.
+            The input will be shuffled spatially only, meaning that the channels dimension will stay intact.
+            For example, if the input is of shape 28x28x64 a random permutation from all (28*28)! possibilities
+            is sampled and applied to the input tensor.
+        spatial_shuffle_only: Shuffle the spatial locations only and the channels dimension will stay intact.
+        fixed_permutation_per_block: A fixed permutation will be used every time this module is called.
     Returns:
         A tuple containing the list of nn.Modules, and an integers which is the number of output features
         (will be useful later when feeding to a linear layer).
@@ -172,12 +181,17 @@ def get_vgg_blocks(config: List[Union[int, str]],
     for i in range(len(config)):
         if isinstance(config[i], str):
             spatial_size /= 2
+            assert spatial_size == int(spatial_size), f'spatial_size is not an integer after dividing by 2'
+            spatial_size = int(spatial_size)
+
             if pool_as_separate_blocks:
                 blocks.append(nn.Sequential(get_pool_layer(config[i])))
             continue
 
+        block_layers: List[nn.Module] = list()
         out_channels = config[i]
-        block_layers = [nn.Conv2d(in_channels, out_channels, kernel_size[i], padding=padding[i])]
+
+        block_layers.append(nn.Conv2d(in_channels, out_channels, kernel_size[i], padding=padding[i]))
         if use_batch_norm[i]:
             block_layers.append(nn.BatchNorm2d(out_channels))
         block_layers.append(nn.ReLU())
@@ -186,6 +200,9 @@ def get_vgg_blocks(config: List[Union[int, str]],
         if bottleneck_dim[i] > 0:
             block_layers.append(nn.Conv2d(out_channels, bottleneck_dim[i], kernel_size=1))
             out_channels = bottleneck_dim[i]
+        if shuffle_each_block_output:
+            block_layers.append(ShuffleTensor(spatial_size, out_channels,
+                                              spatial_shuffle_only, fixed_permutation_per_block))
 
         blocks.append(nn.Sequential(*block_layers))
 
