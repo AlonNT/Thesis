@@ -426,7 +426,8 @@ class LitVGG(pl.LightningModule):
                            n_hidden_layers=arch_args.final_mlp_n_hidden_layers,
                            hidden_dim=arch_args.final_mlp_hidden_dim,
                            use_batch_norm=arch_args.use_batch_norm,
-                           organize_as_blocks=True)
+                           shuffle_each_block_output=arch_args.shuffle_each_block_output,
+                           fixed_permutation_per_block=arch_args.fixed_permutation_per_block)
         self.loss = torch.nn.CrossEntropyLoss()
 
         self.arch_args: ArchitectureArgs = arch_args
@@ -586,8 +587,13 @@ class LitMLP(pl.LightningModule):
         self.output_dim = N_CLASSES
         self.n_hidden_layers = arch_args.final_mlp_n_hidden_layers
         self.hidden_dim = arch_args.final_mlp_hidden_dim
-        self.mlp = get_mlp(self.input_dim, self.output_dim, self.n_hidden_layers, self.hidden_dim,
-                           use_batch_norm=True, organize_as_blocks=True)
+        self.mlp = get_mlp(self.input_dim,
+                           self.output_dim,
+                           self.n_hidden_layers,
+                           self.hidden_dim,
+                           use_batch_norm=arch_args.use_batch_norm,
+                           shuffle_each_block_output=arch_args.shuffle_each_block_output,
+                           fixed_permutation_per_block=arch_args.fixed_permutation_per_block)
         self.loss = torch.nn.CrossEntropyLoss()
 
         self.arch_args = arch_args

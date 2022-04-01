@@ -86,7 +86,8 @@ def get_args(args_class):
 
 
 def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_dim: int = 0,
-            use_batch_norm: bool = False, organize_as_blocks: bool = False) -> torch.nn.Sequential:
+            use_batch_norm: bool = False, organize_as_blocks: bool = True,
+            shuffle_each_block_output: bool = False, fixed_permutation_per_block: bool = False) -> torch.nn.Sequential:
     """Create an MLP (i.e. Multi-Layer-Perceptron) and return it as a PyTorch's sequential model.
 
     Args:
@@ -96,6 +97,9 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_di
         hidden_dim: The dimension of each hidden layer.
         use_batch_norm: Whether to use BatchNormalization after each layer or not.
         organize_as_blocks: Whether to organize the model as blocks of Linear->(BatchNorm)->ReLU.
+        shuffle_each_block_output: If it's true - shuffle the output of each block in the network.
+        fixed_permutation_per_block: If it's true - use a fixed permutation per block in the network
+            and not sample a new one each time.
 
     Returns:
         A sequential model which is the constructed MLP.
@@ -116,6 +120,10 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_di
         if use_batch_norm:
             current_layers.append(torch.nn.BatchNorm1d(hidden_dim))
         current_layers.append(torch.nn.ReLU())
+
+        if shuffle_each_block_output:
+            current_layers.append(ShuffleTensor(spatial_size=1, channels=out_features,
+                                                fixed_permutation=fixed_permutation_per_block))
 
         if organize_as_blocks:
             block = torch.nn.Sequential(*current_layers)
@@ -1460,16 +1468,27 @@ class ShuffleTensor(nn.Module):
         self.spatial_only = spatial_only
 
         permutation_size = self.spatial_size ** 2
-        if not self.spatial_only:
+        if (not self.spatial_only) or (self.spatial_size == 1):
+            # The 1st term in the `if` means we are shuffling a convolutional layer including the channels dimension,
+            # and the 2nd term in the `if` means we are shuffling a fully-connected layer.
+            # Anyway, we need to include the channels dimension in the permutation.
             permutation_size *= self.channels
         self.permutation = torch.randperm(permutation_size) if fixed_permutation else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # The number of dimensions can be 4 (batched tensors) or 3 (a single tensor, e.g. when used as data
-        # preprocessing function a.k.a. `transform`). Anyway, last three dimensions are C x H x W.
-        assert x.shape[-1] == x.shape[-2] == self.spatial_size, f'{x.shape=} ; {self.spatial_size=}'
-        assert x.shape[-3] == self.channels, f'{x.shape=} ; {self.channels=}'
-        start_dim = -2 if self.spatial_only else -3
+        if x.ndim >= 3:
+            # The number of dimensions can be 4 (batched tensors) or 3 (a single tensor, e.g. when used as data
+            # preprocessing function a.k.a. `transform`). Anyway, last three dimensions are C x H x W.
+            assert x.shape[-1] == x.shape[-2] == self.spatial_size, f'{x.shape=} ; {self.spatial_size=}'
+            assert x.shape[-3] == self.channels, f'{x.shape=} ; {self.channels=}'
+            start_dim = -2 if self.spatial_only else -3
+        elif x.ndim == 2:
+            assert self.spatial_size == 1
+            assert x.shape[-1] == self.channels, f'{x.shape=} ; {self.channels=}'
+            start_dim = -1  # Will cause flatten() later to have not effect, since the data is already flattened.
+        else:
+            assert False, f'x should not be 1-dimensional - {x.shape=}'
+
         x_flat = torch.flatten(x, start_dim=start_dim)
         permutation = torch.randperm(x_flat.shape[-1]) if (self.permutation is None) else self.permutation
         permuted_x_flat = x_flat[..., permutation]

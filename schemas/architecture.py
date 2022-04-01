@@ -26,7 +26,7 @@ class ArchitectureArgs(ImmutableArgs):
     #: If it's true, shuffle the spatial locations only and the channels dimension will stay intact.
     spatial_shuffle_only: bool = True
 
-    #: If it's true - shuffle the output of each block in the network.
+    #: If it's true - use a fixed permutation per block in the network and not sample a new one each time.
     fixed_permutation_per_block: bool = True
 
     #: Use pretrained model, or train from scratch.
