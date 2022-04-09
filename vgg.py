@@ -144,9 +144,9 @@ def get_vgg_blocks(config: List[Union[int, str]],
                    use_batch_norm: Union[bool, List[bool]] = False,
                    bottleneck_dim: Union[int, List[int]] = 0,
                    pool_as_separate_blocks: bool = True,
-                   shuffle_each_block_output: bool = False,
-                   spatial_shuffle_only: bool = False,
-                   fixed_permutation_per_block: bool = False) -> Tuple[List[nn.Module], int]:
+                   shuffle_blocks_output: Union[bool, List[bool]] = False,
+                   spatial_shuffle_only: Union[bool, List[bool]] = False,
+                   fixed_permutation_per_block: Union[bool, List[bool]] = False) -> Tuple[List[nn.Module], int]:
     """Gets a list containing the blocks of the given VGG model config.
 
     Args:
@@ -160,7 +160,7 @@ def get_vgg_blocks(config: List[Union[int, str]],
             (0 means no bottleneck is added). If it's a single variable, the same one is used.
         pool_as_separate_blocks: Whether to put the (avg/max) pool layers as separate blocks,
             or in the end of the previous conv block.
-        shuffle_each_block_output: If it's true - shuffle the input for each block in the network.
+        shuffle_blocks_output: If it's true - shuffle the input for each block in the network.
             The input will be shuffled spatially only, meaning that the channels dimension will stay intact.
             For example, if the input is of shape 28x28x64 a random permutation from all (28*28)! possibilities
             is sampled and applied to the input tensor.
@@ -177,6 +177,9 @@ def get_vgg_blocks(config: List[Union[int, str]],
     padding = get_list_of_arguments_for_config(config, padding)
     use_batch_norm = get_list_of_arguments_for_config(config, use_batch_norm)
     bottleneck_dim = get_list_of_arguments_for_config(config, bottleneck_dim)
+    shuffle_blocks_output = get_list_of_arguments_for_config(config, shuffle_blocks_output)
+    spatial_shuffle_only = get_list_of_arguments_for_config(config, spatial_shuffle_only)
+    fixed_permutation_per_block = get_list_of_arguments_for_config(config, fixed_permutation_per_block)
 
     for i in range(len(config)):
         if isinstance(config[i], str):
@@ -200,9 +203,9 @@ def get_vgg_blocks(config: List[Union[int, str]],
         if bottleneck_dim[i] > 0:
             block_layers.append(nn.Conv2d(out_channels, bottleneck_dim[i], kernel_size=1))
             out_channels = bottleneck_dim[i]
-        if shuffle_each_block_output:
+        if shuffle_blocks_output[i]:
             block_layers.append(ShuffleTensor(spatial_size, out_channels,
-                                              spatial_shuffle_only, fixed_permutation_per_block))
+                                              spatial_shuffle_only[i], fixed_permutation_per_block[i]))
 
         blocks.append(nn.Sequential(*block_layers))
 
@@ -318,10 +321,8 @@ class VGG(nn.Module):
         super(VGG, self).__init__()
         layers, _, _, features_output_dimension = get_blocks(configs[vgg_name], dropout_prob, padding_mode)
         self.features = nn.Sequential(*layers)
-        self.mlp = get_mlp(input_dim=features_output_dimension,
-                           output_dim=len(CLASSES),
-                           n_hidden_layers=final_mlp_n_hidden_layers,
-                           hidden_dim=final_mlp_hidden_dim)
+        self.mlp = get_mlp(input_dim=features_output_dimension, output_dim=len(CLASSES),
+                           n_hidden_layers=final_mlp_n_hidden_layers, hidden_dim=final_mlp_hidden_dim)
 
     def forward(self, x: torch.Tensor):
         features = self.features(x)

@@ -21,13 +21,13 @@ class ArchitectureArgs(ImmutableArgs):
     #: The output will be shuffled spatially only, meaning that the channels dimension will stay intact.
     #: For example, if the output is of shape 64x28x28 a random permutation from all (28*28)! possibilities
     #: is sampled and applied to the input tensor.
-    shuffle_each_block_output: bool = False
+    shuffle_blocks_output: Union[bool, List[bool]] = False
 
     #: If it's true, shuffle the spatial locations only and the channels dimension will stay intact.
-    spatial_shuffle_only: bool = True
+    spatial_shuffle_only: Union[bool, List[bool]] = True
 
     #: If it's true - use a fixed permutation per block in the network and not sample a new one each time.
-    fixed_permutation_per_block: bool = True
+    fixed_permutation_per_block: Union[bool, List[bool]] = True
 
     #: Use pretrained model, or train from scratch.
     use_pretrained: bool = False

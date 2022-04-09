@@ -409,24 +409,16 @@ class LitVGG(pl.LightningModule):
             data_args: The arguments for the input data.
         """
         super(LitVGG, self).__init__()
-        blocks, n_features = get_vgg_blocks(configs[arch_args.model_name],
-                                            data_args.n_channels,
-                                            data_args.spatial_size,
-                                            arch_args.kernel_size,
-                                            arch_args.padding,
-                                            arch_args.use_batch_norm,
-                                            arch_args.bottle_neck_dimension,
-                                            arch_args.pool_as_separate_blocks,
-                                            arch_args.shuffle_each_block_output,
-                                            arch_args.spatial_shuffle_only,
+        blocks, n_features = get_vgg_blocks(configs[arch_args.model_name], data_args.n_channels, data_args.spatial_size,
+                                            arch_args.kernel_size, arch_args.padding, arch_args.use_batch_norm,
+                                            arch_args.bottle_neck_dimension, arch_args.pool_as_separate_blocks,
+                                            arch_args.shuffle_blocks_output, arch_args.spatial_shuffle_only,
                                             arch_args.fixed_permutation_per_block)
         self.features = nn.Sequential(*blocks)
-        self.mlp = get_mlp(input_dim=n_features,
-                           output_dim=N_CLASSES,
+        self.mlp = get_mlp(input_dim=n_features, output_dim=N_CLASSES,
                            n_hidden_layers=arch_args.final_mlp_n_hidden_layers,
-                           hidden_dim=arch_args.final_mlp_hidden_dim,
-                           use_batch_norm=arch_args.use_batch_norm,
-                           shuffle_each_block_output=arch_args.shuffle_each_block_output,
+                           hidden_dim=arch_args.final_mlp_hidden_dim, use_batch_norm=arch_args.use_batch_norm,
+                           shuffle_blocks_output=arch_args.shuffle_blocks_output,
                            fixed_permutation_per_block=arch_args.fixed_permutation_per_block)
         self.loss = torch.nn.CrossEntropyLoss()
 
@@ -587,12 +579,9 @@ class LitMLP(pl.LightningModule):
         self.output_dim = N_CLASSES
         self.n_hidden_layers = arch_args.final_mlp_n_hidden_layers
         self.hidden_dim = arch_args.final_mlp_hidden_dim
-        self.mlp = get_mlp(self.input_dim,
-                           self.output_dim,
-                           self.n_hidden_layers,
-                           self.hidden_dim,
+        self.mlp = get_mlp(self.input_dim, self.output_dim, self.n_hidden_layers, self.hidden_dim,
                            use_batch_norm=arch_args.use_batch_norm,
-                           shuffle_each_block_output=arch_args.shuffle_each_block_output,
+                           shuffle_blocks_output=arch_args.shuffle_blocks_output,
                            fixed_permutation_per_block=arch_args.fixed_permutation_per_block)
         self.loss = torch.nn.CrossEntropyLoss()
 

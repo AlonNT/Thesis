@@ -19,7 +19,7 @@ from functools import partial
 from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
 from tqdm import tqdm
-from typing import List, Optional, Dict, Callable, Tuple
+from typing import List, Optional, Dict, Callable, Tuple, Union
 from loguru import logger
 from datetime import timedelta
 from torch.utils.data import DataLoader
@@ -87,7 +87,8 @@ def get_args(args_class):
 
 def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_dim: int = 0,
             use_batch_norm: bool = False, organize_as_blocks: bool = True,
-            shuffle_each_block_output: bool = False, fixed_permutation_per_block: bool = False) -> torch.nn.Sequential:
+            shuffle_blocks_output: Union[bool, List[bool]] = False,
+            fixed_permutation_per_block: bool = False) -> torch.nn.Sequential:
     """Create an MLP (i.e. Multi-Layer-Perceptron) and return it as a PyTorch's sequential model.
 
     Args:
@@ -97,7 +98,8 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_di
         hidden_dim: The dimension of each hidden layer.
         use_batch_norm: Whether to use BatchNormalization after each layer or not.
         organize_as_blocks: Whether to organize the model as blocks of Linear->(BatchNorm)->ReLU.
-        shuffle_each_block_output: If it's true - shuffle the output of each block in the network.
+        shuffle_blocks_output: If it's true - shuffle the output of each block in the network.
+            If it's a list of values, define as single value which will be True if any one of the values is True.
         fixed_permutation_per_block: If it's true - use a fixed permutation per block in the network
             and not sample a new one each time.
 
@@ -105,6 +107,8 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_di
         A sequential model which is the constructed MLP.
     """
     layers: List[torch.nn.Module] = list()
+    if isinstance(shuffle_blocks_output, list):
+        shuffle_blocks_output = any(shuffle_blocks_output)
 
     for i in range(n_hidden_layers):
         current_layers: List[torch.nn.Module] = list()
@@ -121,7 +125,7 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_di
             current_layers.append(torch.nn.BatchNorm1d(hidden_dim))
         current_layers.append(torch.nn.ReLU())
 
-        if shuffle_each_block_output:
+        if shuffle_blocks_output:
             current_layers.append(ShuffleTensor(spatial_size=1, channels=out_features,
                                                 fixed_permutation=fixed_permutation_per_block))
 
