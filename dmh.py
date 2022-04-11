@@ -1,4 +1,5 @@
 import copy
+import itertools
 import math
 import sys
 import wandb
@@ -447,6 +448,48 @@ class LitVGG(pl.LightningModule):
         logits = self.mlp(features.flatten(start_dim=1))
         return logits
 
+    def should_regularize(self):
+        """
+        Returns:
+            True if we should regularize, False if not (depends on the argument `lasso_regularizer_coefficient`).
+        """
+        return (
+            isinstance(self.arch_args.lasso_regularizer_coefficient, list)
+            or
+            (self.arch_args.lasso_regularizer_coefficient > 0)
+        )
+
+    def get_regularization_loss(self):
+        """
+        Returns:
+            The regularization loss, which is the sum of the l1 norm of the weights of linear/conv layers
+            in the model, each multiplied by the corresponding regularization factor.
+        """
+        blocks = list(self.features) + list(self.mlp)
+        num_blocks_with_weights = len([block for block in blocks if len(list(block.parameters())) > 0])
+        regularization_coefficients = copy.deepcopy(self.arch_args.lasso_regularizer_coefficient)
+        if not isinstance(regularization_coefficients, list):
+            regularization_coefficients = [regularization_coefficients] * num_blocks_with_weights
+        assert len(regularization_coefficients) == num_blocks_with_weights
+
+        regularization_losses = list()
+        for block in blocks:
+            # Take the parameters of any conv/linear layer in the block,
+            # which essentially excludes the parameters of the batch-norm layer that shouldn't be regularized.
+            parameters = [layer.parameters() for layer in block
+                          if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear)]
+            parameters = list(itertools.chain.from_iterable(parameters))
+            if len(parameters) == 0:
+                continue
+
+            # flattened_parameters = [parameter.view(-1) for parameter in parameters]
+            weights_l1_norm = sum(w.abs().sum() for w in parameters)
+            regularization_losses.append(regularization_coefficients.pop(0) * weights_l1_norm)
+
+        assert len(regularization_coefficients) == 0
+
+        return sum(regularization_losses)
+
     def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], stage: RunningStage):
         """Performs train/validation step, depending on the given `stage`.
 
@@ -465,6 +508,11 @@ class LitVGG(pl.LightningModule):
 
         self.log(f'{stage.value}_loss', loss)
         self.log(f'{stage.value}_accuracy', accuracy, on_epoch=True, on_step=False)
+
+        if self.should_regularize():
+            regularization_loss = self.get_regularization_loss()
+            loss += regularization_loss
+            self.log(f'{stage.value}_reg_loss', regularization_loss)
 
         return loss
 
@@ -596,7 +644,57 @@ class LitMLP(pl.LightningModule):
     def forward(self, x: torch.Tensor):
         return self.mlp(x)
 
-    def shared_step(self, batch, stage: RunningStage):
+    def should_regularize(self):
+        """
+        Returns:
+            True if we should regularize, False if not (depends on the argument `lasso_regularizer_coefficient`).
+        """
+        return (
+            isinstance(self.arch_args.lasso_regularizer_coefficient, list)
+            or
+            (self.arch_args.lasso_regularizer_coefficient > 0)
+        )
+
+    def get_regularization_loss(self):
+        """
+        Returns:
+            The regularization loss, which is the sum of the l1 norm of the weights of linear/conv layers
+            in the model, each multiplied by the corresponding regularization factor.
+        """
+        blocks = list(self.mlp)
+        num_blocks_with_weights = len([block for block in blocks if len(list(block.parameters())) > 0])
+        regularization_coefficients = copy.deepcopy(self.arch_args.lasso_regularizer_coefficient)
+        if not isinstance(regularization_coefficients, list):
+            regularization_coefficients = [regularization_coefficients] * num_blocks_with_weights
+        assert len(regularization_coefficients) == num_blocks_with_weights
+
+        regularization_losses = list()
+        for block in blocks:
+            # Take the parameters of any conv/linear layer in the block,
+            # which essentially excludes the parameters of the batch-norm layer that shouldn't be regularized.
+            parameters = [layer.parameters() for layer in block if isinstance(layer, nn.Linear)]
+            parameters = list(itertools.chain.from_iterable(parameters))
+            if len(parameters) == 0:
+                continue
+
+            # flattened_parameters = [parameter.view(-1) for parameter in parameters]
+            weights_l1_norm = sum(w.abs().sum() for w in parameters)
+            regularization_losses.append(regularization_coefficients.pop(0) * weights_l1_norm)
+
+        assert len(regularization_coefficients) == 0
+
+        return sum(regularization_losses)
+
+    def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], stage: RunningStage):
+        """Performs train/validation step, depending on the given `stage`.
+
+        Args:
+            batch: The batch to process (containing a tuple of tensors - inputs and labels).
+            stage: Indicating if this is a training-step or a validation-step.
+
+        Returns:
+            The loss.
+        """
         inputs, labels = batch
         logits = self(inputs)
         loss = self.loss(logits, labels)
@@ -605,6 +703,11 @@ class LitMLP(pl.LightningModule):
 
         self.log(f'{stage.value}_loss', loss)
         self.log(f'{stage.value}_accuracy', accuracy, on_epoch=True, on_step=False)
+
+        if self.should_regularize():
+            regularization_loss = self.get_regularization_loss()
+            loss += regularization_loss
+            self.log(f'{stage.value}_reg_loss', regularization_loss)
 
         return loss
 

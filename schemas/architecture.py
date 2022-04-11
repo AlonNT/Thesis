@@ -2,7 +2,7 @@ from typing import Literal, Optional, List, Union
 from pydantic import validator
 from pydantic.types import PositiveInt
 
-from schemas.utils import ImmutableArgs, NonNegativeInt, NonOneFraction
+from schemas.utils import ImmutableArgs, NonNegativeInt, NonOneFraction, NonNegativeFloat
 from vgg import configs
 
 
@@ -71,6 +71,10 @@ class ArchitectureArgs(ImmutableArgs):
 
     #: Padding mode for the convolution layers.
     padding_mode: Literal['zeros', 'circular'] = 'zeros'
+
+    #: Coefficients for lasso regularizers in different steps of the training process.
+    #: Zero means no regularization is applied.
+    lasso_regularizer_coefficient: Union[NonNegativeFloat, List[NonNegativeFloat]] = 0
 
     @validator('model_name', always=True)
     def validate_model_name(cls, v):
