@@ -111,8 +111,8 @@ class CNNwDNI(torch.nn.Module):
         down_sample_factor = 2 ** len(self.blocks)             # How many down-samples were done in the blocks.
         spatial_size = image_size // down_sample_factor        # The spatial size of the tensor -  its height/width.
         input_dim = self.conv3_channels * (spatial_size ** 2)  # The total dimension which is the input for the mlp.
-        self.mlp = get_mlp(input_dim=input_dim, output_dim=len(CLASSES),
-                           n_hidden_layers=self.mlp_n_hidden_layers, hidden_dim=self.mlp_hidden_dim)
+        self.mlp = get_mlp(input_dim=input_dim, output_dim=len(CLASSES), n_hidden_layers=self.mlp_n_hidden_layers,
+                           hidden_dimensions=self.mlp_hidden_dim)
 
         # The backward interfaces decouple each block from its downstream blocks.
         self.backward_interfaces = torch.nn.ModuleList([

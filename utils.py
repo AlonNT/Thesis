@@ -85,7 +85,8 @@ def get_args(args_class):
     return args
 
 
-def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_dim: int = 0,
+def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0,
+            hidden_dimensions: Union[int, List[int]] = 0,
             use_batch_norm: bool = False, organize_as_blocks: bool = True,
             shuffle_blocks_output: Union[bool, List[bool]] = False,
             fixed_permutation_per_block: bool = False) -> torch.nn.Sequential:
@@ -95,7 +96,7 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_di
         input_dim: The dimension of the input tensor.
         output_dim: The dimension of the output tensor.
         n_hidden_layers: Number of hidden layers.
-        hidden_dim: The dimension of each hidden layer.
+        hidden_dimensions: The dimension of each hidden layer.
         use_batch_norm: Whether to use BatchNormalization after each layer or not.
         organize_as_blocks: Whether to organize the model as blocks of Linear->(BatchNorm)->ReLU.
         shuffle_blocks_output: If it's true - shuffle the output of each block in the network.
@@ -109,83 +110,106 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0, hidden_di
     layers: List[torch.nn.Module] = list()
     if isinstance(shuffle_blocks_output, list):
         shuffle_blocks_output = any(shuffle_blocks_output)
+    if not isinstance(hidden_dimensions, list):
+        hidden_dimensions = [hidden_dimensions] * n_hidden_layers
+    assert len(hidden_dimensions) == n_hidden_layers
 
-    for i in range(n_hidden_layers):
-        current_layers: List[torch.nn.Module] = list()
-
-        in_features = input_dim if i == 0 else hidden_dim
+    in_features = input_dim
+    for i, hidden_dim in enumerate(hidden_dimensions):
+        block_layers: List[nn.Module] = list()
         out_features = hidden_dim
 
-        # Begins with a flatten layer. It's useful when the input is 4D from a conv layer, and harmless otherwise.
+        # Begins with a Flatten layer. It's useful when the input is 4D from a conv layer, and harmless otherwise.
         if i == 0:
-            current_layers.append(nn.Flatten())
+            block_layers.append(nn.Flatten())
 
-        current_layers.append(torch.nn.Linear(in_features, out_features))
+        block_layers.append(torch.nn.Linear(in_features, out_features))
         if use_batch_norm:
-            current_layers.append(torch.nn.BatchNorm1d(hidden_dim))
-        current_layers.append(torch.nn.ReLU())
+            block_layers.append(torch.nn.BatchNorm1d(hidden_dim))
+        block_layers.append(torch.nn.ReLU())
 
         if shuffle_blocks_output:
-            current_layers.append(ShuffleTensor(spatial_size=1, channels=out_features,
-                                                fixed_permutation=fixed_permutation_per_block))
+            block_layers.append(ShuffleTensor(spatial_size=1, channels=out_features,
+                                              fixed_permutation=fixed_permutation_per_block))
 
         if organize_as_blocks:
-            block = torch.nn.Sequential(*current_layers)
-            layers.append(block)
+            layers.append(nn.Sequential(*block_layers))
         else:
-            layers.extend(current_layers)
+            layers.extend(block_layers)
 
-    final_layer = torch.nn.Linear(in_features=input_dim if n_hidden_layers == 0 else hidden_dim,
-                                  out_features=output_dim)
+        in_features = out_features
+
+    final_layer = nn.Linear(in_features, output_dim)
     if organize_as_blocks:
-        final_layer = torch.nn.Sequential(final_layer)
+        final_layer = nn.Sequential(final_layer)
 
     layers.append(final_layer)
 
-    return torch.nn.Sequential(*layers)
+    return nn.Sequential(*layers)
 
 
-def get_cnn(conv_layers_channels: List[int], affine_hidden_layers_channels: List[int],
-            image_size: int = 32, in_channels: int = 3) -> torch.nn.Sequential:
+def get_cnn(conv_channels: List[int],
+            linear_channels: List[int],
+            kernel_sizes: Optional[List[int]] = None,
+            strides: Optional[List[int]] = None,
+            paddings: Optional[List[int]] = None,
+            use_max_pool: Optional[List[bool]] = None,
+            spatial_size: int = 32,
+            in_channels: int = 3) -> torch.nn.Sequential:
     """
     This function builds a CNN and return it as a PyTorch's sequential model.
 
-    :param conv_layers_channels: A list of integers containing the channels of each convolution block.
+    :param conv_channels: A list of integers containing the channels of each convolution block.
                                  Each block will contain Conv - BatchNorm - MaxPool - ReLU.
-    :param affine_hidden_layers_channels: A list of integers containing the channels of each linear hidden layer.
-    :param image_size: Will be used to infer input dimension for the first affine layer.
+    :param linear_channels: A list of integers containing the channels of each linear hidden layer.
+    :param kernel_sizes: The kernel size to use in each conv layer.
+    :param strides: The stride to use in each conv layer.
+    :param paddings: The amount of padding to use in each conv layer.
+    :param use_max_pool: Whether to use max-pooling in each layer of the network or not.
+    :param spatial_size: Will be used to infer input dimension for the first affine layer.
     :param in_channels: Number of channels in the input tensor.
     :return: A sequential model which is the constructed CNN.
     """
-    layers: List[torch.nn.Module] = list()
+    blocks: List[nn.Sequential] = list()
 
-    for n_channels in conv_layers_channels:
+    if use_max_pool is None:
+        use_max_pool = [False] * len(conv_channels)
+    if strides is None:
+        strides = [1] * len(conv_channels)
+    if kernel_sizes is None:
+        kernel_sizes = [3] * len(conv_channels)
+    if paddings is None:
+        paddings = [kernel_size // 2 for kernel_size in kernel_sizes]
+
+    assert len(use_max_pool) == len(strides) == len(kernel_sizes) == len(paddings) == len(conv_channels)
+
+    for i, n_channels in enumerate(conv_channels):
         out_channels = n_channels
+        padding = paddings[i]
+        stride = strides[i]
+        kernel_size = kernel_sizes[i]
+        spatial_size = int(math.floor((spatial_size + 2 * padding - kernel_size) / stride + 1))
 
-        layers.append(torch.nn.Conv2d(in_channels=in_channels,
-                                      out_channels=out_channels,
-                                      kernel_size=3,
-                                      padding=1))
-        layers.append(torch.nn.BatchNorm2d(out_channels))
-        layers.append(torch.nn.ReLU())
-        layers.append(torch.nn.MaxPool2d(kernel_size=2, stride=2))
+        block_layers: List[nn.Module] = list()
+        block_layers.append(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding))
+        block_layers.append(nn.BatchNorm2d(out_channels))
+        block_layers.append(nn.ReLU())
+        if use_max_pool[i]:
+            block_layers.append(torch.nn.MaxPool2d(kernel_size=2, stride=2))
+            spatial_size = int(math.floor(spatial_size / 2))
 
+        blocks.append(nn.Sequential(*block_layers))
         in_channels = out_channels
 
-    layers.append(nn.Flatten())
+    mlp = get_mlp(input_dim=in_channels * (spatial_size ** 2),
+                  output_dim=len(CLASSES),
+                  n_hidden_layers=len(linear_channels),
+                  hidden_dimensions=linear_channels,
+                  use_batch_norm=True,
+                  organize_as_blocks=True)
+    blocks.extend(list(mlp))
 
-    down_sample_factor = 2 ** len(conv_layers_channels)
-    spatial_size = image_size // down_sample_factor
-    in_features = conv_layers_channels[-1] * (spatial_size ** 2)
-    for i, n_channels in enumerate(affine_hidden_layers_channels):
-        out_features = n_channels
-        layers.append(torch.nn.Linear(in_features, out_features))
-        layers.append(torch.nn.ReLU())
-        in_features = out_features
-
-    layers.append(torch.nn.Linear(in_features, len(CLASSES)))
-
-    return torch.nn.Sequential(*layers)
+    return torch.nn.Sequential(*blocks)
 
 
 @torch.no_grad()
@@ -1441,7 +1465,7 @@ def log_epoch_end(epoch, epoch_time_elapsed, total_epochs, total_time,
     avg_epoch_time = total_time / (epoch + 1)
     time_left = avg_epoch_time * epochs_left
     total_epochs_n_digits = len(str(total_epochs))
-    logger.info(f'Epoch {epoch+1:0>{total_epochs_n_digits}d}/{total_epochs:0>{total_epochs_n_digits}d} '
+    logger.info(f'Epoch {epoch + 1:0>{total_epochs_n_digits}d}/{total_epochs:0>{total_epochs_n_digits}d} '
                 f'({str(timedelta(seconds=epoch_time_elapsed)).split(".")[0]}) | '
                 f'ETA {str(timedelta(seconds=time_left)).split(".")[0]} | '
                 f'Train '

@@ -10,8 +10,8 @@ from utils import get_dataloaders, train_local_model, configure_logger, create_o
 
 def get_model(args):
     kwargs = dict(vgg_name=args.model,
-                  final_mlp_n_hidden_layers=args.final_mlp_n_hidden_layers,
-                  final_mlp_hidden_dim=args.final_mlp_hidden_dim,
+                  final_mlp_n_hidden_layers=args.mlp_n_hidden_layers,
+                  final_mlp_hidden_dim=args.mlp_hidden_dim,
                   dropout_prob=args.dropout_prob,
                   padding_mode=args.padding_mode)
     if args.dgl:
@@ -125,9 +125,9 @@ def parse_args():
     # Arguments defining the model.
     parser.add_argument('--model', type=str, default='VGG11c', choices=list(configs.keys()),
                         help=f'The model name for the network architecture')
-    parser.add_argument('--final_mlp_n_hidden_layers', type=int, default=1,
+    parser.add_argument('--mlp_n_hidden_layers', type=int, default=1,
                         help=f'How many hidden layers the final MLP at the end of the convolution blocks')
-    parser.add_argument('--final_mlp_hidden_dim', type=int, default=1024,
+    parser.add_argument('--mlp_hidden_dim', type=int, default=1024,
                         help=f'Dimension of each hidden layer the final MLP at the end of the convolution blocks')
     parser.add_argument('--dropout_prob', type=float, default=0,
                         help=f'Dropout probability (will be added after each non linearity)')

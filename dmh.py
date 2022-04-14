@@ -33,7 +33,7 @@ from schemas.data import DataArgs
 from schemas.dmh import Args, DMHArgs
 from schemas.optimization import OptimizationArgs
 from utils import (configure_logger, get_args, get_model_device, power_minus_1, get_mlp, get_dataloaders,
-                   whiten_data, normalize_data, calc_whitening_from_dataloader, ShuffleTensor)
+                   whiten_data, normalize_data, calc_whitening_from_dataloader, ShuffleTensor, get_cnn)
 from vgg import get_vgg_model_kernel_size, get_vgg_blocks, configs
 
 
@@ -416,9 +416,8 @@ class LitVGG(pl.LightningModule):
                                             arch_args.shuffle_blocks_output, arch_args.spatial_shuffle_only,
                                             arch_args.fixed_permutation_per_block)
         self.features = nn.Sequential(*blocks)
-        self.mlp = get_mlp(input_dim=n_features, output_dim=N_CLASSES,
-                           n_hidden_layers=arch_args.final_mlp_n_hidden_layers,
-                           hidden_dim=arch_args.final_mlp_hidden_dim, use_batch_norm=arch_args.use_batch_norm,
+        self.mlp = get_mlp(input_dim=n_features, output_dim=N_CLASSES, n_hidden_layers=arch_args.mlp_n_hidden_layers,
+                           hidden_dimensions=arch_args.mlp_hidden_dim, use_batch_norm=arch_args.use_batch_norm,
                            shuffle_blocks_output=arch_args.shuffle_blocks_output,
                            fixed_permutation_per_block=arch_args.fixed_permutation_per_block)
         self.loss = torch.nn.CrossEntropyLoss()
@@ -613,6 +612,213 @@ class LitVGG(pl.LightningModule):
         return shapes
 
 
+class LitCNN(pl.LightningModule):
+
+    def get_model_config(self, model_name: str, alpha: int, spatial_size: int):
+        """Gets the model configuration, determining the architecture.
+
+        This is taken from the paper
+        "Towards Learning Convolutions from Scratch", Behnam Neyshabur, Google.
+        and the exact architectures are define in Appendix A.1
+        https://proceedings.neurips.cc/paper/2020/file/5c528e25e1fdeaf9d8160dc24dbf4d60-Supplemental.pdf
+
+        Args:
+            model_name: The model name, should be {D,S}-{CONV,FC}.
+                D stands for "deep", S for "shallow", CONV stands for
+                convolutional-network and FC for fully-connected.
+            alpha: Denotes the number of base channels which also determines
+                the total number of parameters of the architecture.
+            spatial_size: The spatial size of the input images (e.g. 32 for CIFAR-10/100).
+
+        Returns: A 4-tuple containing
+            conv_channels: A list containing the number of channels for each convolution layer.
+                Empty list means that there are no convolution layers at all (i.e. model is fully-connected).
+            kernel_sizes: A single integer determining the kernel-size of each convolution-layer.
+                 Also here an empty list is returned for fully-connected architecture.
+            strides: A list of integers of the same length as `conv_channels`
+                determining the stride in each convolutional layer.
+                Also here an empty list is returned for fully-connected architecture.
+            linear_channels: A list of integers determining the number of channels in each linear layer in the MLP.
+        """
+        a = alpha
+        s = spatial_size
+
+        if model_name == 'D-CONV':
+            conv_channels = [a,
+                             2*a,
+                             2*a,
+                             4*a,
+                             4*a,
+                             8*a,
+                             8*a,
+                             16*a]
+            kernel_sizes = [3] * 8
+            strides = [1, 2] * 4
+            linear_channels = [64*a]
+        elif model_name == 'S-CONV':
+            conv_channels = [a]
+            kernel_sizes = [9]
+            strides = [2]
+            linear_channels = [24*a]
+        elif model_name == 'D-FC':
+            conv_channels, kernel_sizes, strides = [], [], []
+            linear_channels = [s**2 * a,
+                               int(s**2 * a / 2),
+                               int(s**2 * a / 2),
+                               int(s**2 * a / 4),
+                               int(s**2 * a / 4),
+                               int(s**2 * a / 8),
+                               int(s**2 * a / 8),
+                               int(s**2 * a / 16),
+                               64 * a]
+        elif model_name == 'S-FC':
+            conv_channels, kernel_sizes, strides = [], [], []
+            linear_channels = [int(s**2 * a / 4),
+                               24 * a]
+        else:
+            raise NotImplementedError(f'Model {model_name} is not recognized.')
+
+        return conv_channels, linear_channels, kernel_sizes, strides
+
+    def __init__(self, arch_args: ArchitectureArgs, opt_args: OptimizationArgs, data_args: DataArgs):
+        """A basic CNN, containing only convolutional / linear layers (+ BatchNorm and ReLU).
+
+        The idea is taken from "Towards Learning Convolutions from Scratch", Behnam Neyshabur, Google.
+
+        > One challenge in studying the inductive bias of convolutions is that the existence of other components
+        > such as pooling and residual connections makes it difficult to isolate the effect of convolutions
+        > in modern architectures.
+        > ...
+        > To this end, below we propose two all-convolutional networks to overcome the discussed issues.
+
+        Args:
+            arch_args: The arguments for the architecture.
+            opt_args: The arguments for the optimization process.
+            data_args: The arguments for the input data.
+        """
+        super(LitCNN, self).__init__()
+        self.blocks = get_cnn(*self.get_model_config(arch_args.model_name, arch_args.alpha, data_args.spatial_size))
+        self.loss = torch.nn.CrossEntropyLoss()
+
+        self.arch_args = arch_args
+        self.opt_args = opt_args
+        self.save_hyperparameters(arch_args.dict())
+        self.save_hyperparameters(opt_args.dict())
+        self.save_hyperparameters(data_args.dict())
+
+    def forward(self, x: torch.Tensor):
+        """Performs a forward pass.
+
+        Args:
+            x: The input tensor.
+
+        Returns:
+            The output of the model, which is logits for the different classes.
+        """
+        return self.blocks(x)
+
+    def should_regularize(self):
+        """
+        Returns:
+            True if we should regularize, False if not (depends on the argument `lasso_regularizer_coefficient`).
+        """
+        return (
+            isinstance(self.arch_args.lasso_regularizer_coefficient, list)
+            or
+            (self.arch_args.lasso_regularizer_coefficient > 0)
+        )
+
+    def get_regularization_loss(self):
+        """
+        Returns:
+            The regularization loss, which is the sum of the l1 norm of the weights of linear/conv layers
+            in the model, each multiplied by the corresponding regularization factor.
+        """
+        regularization_coefficients = copy.deepcopy(self.arch_args.lasso_regularizer_coefficient)
+        if not isinstance(regularization_coefficients, list):
+            regularization_coefficients = [regularization_coefficients] * len(self.blocks)
+        assert len(regularization_coefficients) == len(self.blocks)
+
+        regularization_losses = list()
+        for i, block in enumerate(self.blocks):
+            # Take the parameters of any conv/linear layer in the block,
+            # which essentially excludes the parameters of the batch-norm layer that shouldn't be regularized.
+            parameters_generators = [layer.parameters() for layer in block
+                                     if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear)]
+            parameters = list(itertools.chain.from_iterable(parameters_generators))
+            assert len(parameters) > 0, 'Every block should contain a convolutional / linear layer.'
+
+            # flattened_parameters = [parameter.view(-1) for parameter in parameters]
+            weights_l1_norm = sum(w.abs().sum() for w in parameters)
+            regularization_losses.append(regularization_coefficients[i] * weights_l1_norm)
+
+        assert len(regularization_coefficients) == 0
+
+        return sum(regularization_losses)
+
+    def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], stage: RunningStage):
+        """Performs train/validation step, depending on the given `stage`.
+
+        Args:
+            batch: The batch to process (containing a tuple of tensors - inputs and labels).
+            stage: Indicating if this is a training-step or a validation-step.
+
+        Returns:
+            The loss.
+        """
+        inputs, labels = batch
+        logits = self(inputs)
+        loss = self.loss(logits, labels)
+        predictions = torch.argmax(logits, dim=1)
+        accuracy = torch.sum(labels == predictions).item() / len(labels)
+
+        self.log(f'{stage.value}_loss', loss)
+        self.log(f'{stage.value}_accuracy', accuracy, on_epoch=True, on_step=False)
+
+        if self.should_regularize():
+            regularization_loss = self.get_regularization_loss()
+            loss += regularization_loss
+            self.log(f'{stage.value}_reg_loss', regularization_loss)
+
+        return loss
+
+    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
+        """Performs a training step.
+
+        Args:
+            batch: The batch to process (containing a tuple of tensors - inputs and labels).
+            batch_idx: The index of the batch in the dataset.
+
+        Returns:
+            The loss.
+        """
+        return self.shared_step(batch, RunningStage.TRAINING)
+
+    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
+        """Performs a validation step.
+
+        Args:
+            batch: The batch to process (containing a tuple of tensors - inputs and labels).
+            batch_idx: The index of the batch in the dataset.
+        """
+        self.shared_step(batch, RunningStage.VALIDATING)
+
+    def configure_optimizers(self):
+        """Configure the optimizer and the learning-rate scheduler for the training process.
+
+        Returns:
+            A dictionary containing the optimizer and learning-rate scheduler.
+        """
+        optimizer = torch.optim.SGD(self.parameters(),
+                                    self.opt_args.learning_rate,
+                                    self.opt_args.momentum,
+                                    weight_decay=self.opt_args.weight_decay)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
+                                                         milestones=self.opt_args.learning_rate_decay_steps,
+                                                         gamma=self.opt_args.learning_rate_decay_gamma)
+        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
+
+
 class LitMLP(pl.LightningModule):
     def __init__(self, arch_args: ArchitectureArgs, opt_args: OptimizationArgs, data_args: DataArgs):
         """A basic MLP, which consists of multiple linear layers with ReLU in-between.
@@ -625,8 +831,8 @@ class LitMLP(pl.LightningModule):
         super(LitMLP, self).__init__()
         self.input_dim = data_args.n_channels * data_args.spatial_size ** 2
         self.output_dim = N_CLASSES
-        self.n_hidden_layers = arch_args.final_mlp_n_hidden_layers
-        self.hidden_dim = arch_args.final_mlp_hidden_dim
+        self.n_hidden_layers = arch_args.mlp_n_hidden_layers
+        self.hidden_dim = arch_args.mlp_hidden_dim
         self.mlp = get_mlp(self.input_dim, self.output_dim, self.n_hidden_layers, self.hidden_dim,
                            use_batch_norm=arch_args.use_batch_norm,
                            shuffle_blocks_output=arch_args.shuffle_blocks_output,
@@ -1209,6 +1415,8 @@ class LinearRegionsCalculator(Callback):
 def initialize_model(args: Args, wandb_logger: WandbLogger):
     if args.arch.model_name.startswith('VGG'):
         model_class = LitVGG
+    elif any(args.arch.model_name.startswith(s) for s in ['D-', 'S-']):
+        model_class = LitCNN
     else:
         model_class = LitMLP
 
@@ -1229,9 +1437,9 @@ def initialize_wandb_logger(args: Args, name_suffix: str = ''):
 
 
 def initialize_trainer(args: Args, wandb_logger: WandbLogger):
-    checkpoint_callback = ModelCheckpoint(monitor='validate_accuracy', mode='max')
-    model_summary_callback = ModelSummary(max_depth=3)
-    callbacks = [checkpoint_callback, model_summary_callback]
+    callbacks = [ModelSummary(max_depth=3)]
+    if args.env.save_checkpoint:
+        callbacks.append(ModelCheckpoint(monitor='validate_accuracy', mode='max'))
     if isinstance(args.env.multi_gpu, list) or (args.env.multi_gpu != 0):
         trainer_kwargs = dict(gpus=args.env.multi_gpu, strategy="dp")
     else:

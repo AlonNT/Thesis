@@ -18,8 +18,8 @@ from vgg import VGG, get_vgg_model_kernel_size
 
 def initialize(args: Args):
     model = VGG(vgg_name=args.arch.model_name,
-                final_mlp_n_hidden_layers=args.arch.final_mlp_n_hidden_layers,
-                final_mlp_hidden_dim=args.arch.final_mlp_hidden_dim,
+                final_mlp_n_hidden_layers=args.arch.mlp_n_hidden_layers,
+                final_mlp_hidden_dim=args.arch.mlp_hidden_dim,
                 dropout_prob=args.arch.dropout_prob,
                 padding_mode=args.arch.padding_mode)
     model.to(args.env.device)

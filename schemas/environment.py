@@ -27,6 +27,10 @@ class EnvironmentArgs(ImmutableArgs):
     #: Debug mode means limiting the number of batches during training, etc.
     multi_gpu: Union[NonNegativeInt, List[NonNegativeInt]] = 0
 
+    #: Change to False to disable saving checkpoints
+    #: (for example if the model is extremely large and we ran out of storage in our W&B account).
+    save_checkpoint: bool = False
+
     @validator('path', pre=True)
     def create_parent_out_dir_if_not_exists(cls, v: str):
         if not Path(v).exists():

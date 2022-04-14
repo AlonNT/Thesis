@@ -36,10 +36,10 @@ class ArchitectureArgs(ImmutableArgs):
     pretrained_path: Optional[str] = None
 
     #: How many hidden layers the final MLP at the end of the convolution blocks.
-    final_mlp_n_hidden_layers: NonNegativeInt = 1
+    mlp_n_hidden_layers: NonNegativeInt = 1
 
     #: Dimension of each hidden layer the final MLP at the end of the convolution blocks.
-    final_mlp_hidden_dim: PositiveInt = 128
+    mlp_hidden_dim: Union[PositiveInt, List[PositiveInt]] = 128
 
     #: Dropout probability (will be added after each non-linearity).
     dropout_prob: NonOneFraction = 0
@@ -76,14 +76,19 @@ class ArchitectureArgs(ImmutableArgs):
     #: Zero means no regularization is applied.
     lasso_regularizer_coefficient: Union[NonNegativeFloat, List[NonNegativeFloat]] = 0
 
+    #: The scaling factor for the basic CNN (following $alpha$ in "Towards Learning Convolutions from Scratch").
+    alpha: PositiveInt = 32
+
     @validator('model_name', always=True)
     def validate_model_name(cls, v):
-        assert v == 'mlp' or v in configs.keys(), f"model_name {v} is not supported, " \
-                                                  f"should be 'mlp' or one of {list(configs.keys())}"
+        allowed_values = list(configs.keys()) + ['mlp'] + [f'{a}-{b}' for a in ['S', 'D'] for b in ['CONV', 'FC']]
+        assert v in allowed_values, f"model_name {v} is not supported, should be one of {allowed_values}"
         return v
 
-    @validator('pretrained_path', always=True)
-    def set_pretrained_path(cls, v, values):
-        if v is None:
-            v = DEFAULT_PRETRAINED_PATHS.get(values['model_name'])
-        return v
+    # TODO Commented-out, because for some reason `model_name` is not in `values` (e.g. KeyError: 'model_name').
+    #      Handle this when we'll want to use pretrained models.
+    # @validator('pretrained_path', always=True)
+    # def set_pretrained_path(cls, v, values):
+    #     if v is None:
+    #         v = DEFAULT_PRETRAINED_PATHS.get(values['model_name'])
+    #     return v
