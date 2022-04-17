@@ -752,8 +752,6 @@ class LitCNN(pl.LightningModule):
             weights_l1_norm = sum(w.abs().sum() for w in parameters)
             regularization_losses.append(regularization_coefficients[i] * weights_l1_norm)
 
-        assert len(regularization_coefficients) == 0
-
         return sum(regularization_losses)
 
     def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], stage: RunningStage):
