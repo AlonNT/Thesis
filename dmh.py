@@ -717,16 +717,41 @@ class LitCNN(pl.LightningModule):
         """
         return self.blocks(x)
 
-    def should_regularize(self):
+    @staticmethod
+    def is_list_or_positive_number(arg: Union[list, float]):
+        return isinstance(arg, list) or (arg > 0)
+
+    def should_regularize_lasso(self):
         """
         Returns:
             True if we should regularize, False if not (depends on the argument `lasso_regularizer_coefficient`).
         """
-        return (
-            isinstance(self.arch_args.lasso_regularizer_coefficient, list)
-            or
-            (self.arch_args.lasso_regularizer_coefficient > 0)
-        )
+        return LitCNN.is_list_or_positive_number(self.arch_args.lasso_regularizer_coefficient)
+
+    def should_zero_out_low_weights(self):
+        """
+        Returns:
+            True iff we should zero-out low weights, like done in the "beta-lasso" algorithm in
+            "Towards Learning Convolutions from Scratch" (depends on the argument `beta_lasso_coefficient`).
+        """
+        return LitCNN.is_list_or_positive_number(self.arch_args.beta_lasso_coefficient)
+
+    def get_list_of_arguments(self, arg: Union[float, List[float]]):
+        arg = copy.deepcopy(arg)
+        if not isinstance(arg, list):
+            arg = [arg] * len(self.blocks)
+        assert len(arg) == len(self.blocks)
+        return arg
+
+    @staticmethod
+    def get_parameters_of_conv_or_linear_layer_in_block(block):
+        # Take the parameters of any conv/linear layer in the block,
+        # which essentially excludes the parameters of the batch-norm layer that shouldn't be regularized.
+        parameters_generators = [layer.parameters() for layer in block
+                                 if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear)]
+        parameters = list(itertools.chain.from_iterable(parameters_generators))
+        assert len(parameters) > 0, 'Every block should contain a convolutional / linear layer.'
+        return parameters
 
     def get_regularization_loss(self):
         """
@@ -734,21 +759,11 @@ class LitCNN(pl.LightningModule):
             The regularization loss, which is the sum of the l1 norm of the weights of linear/conv layers
             in the model, each multiplied by the corresponding regularization factor.
         """
-        regularization_coefficients = copy.deepcopy(self.arch_args.lasso_regularizer_coefficient)
-        if not isinstance(regularization_coefficients, list):
-            regularization_coefficients = [regularization_coefficients] * len(self.blocks)
-        assert len(regularization_coefficients) == len(self.blocks)
+        regularization_coefficients = self.get_list_of_arguments(self.arch_args.lasso_regularizer_coefficient)
 
         regularization_losses = list()
         for i, block in enumerate(self.blocks):
-            # Take the parameters of any conv/linear layer in the block,
-            # which essentially excludes the parameters of the batch-norm layer that shouldn't be regularized.
-            parameters_generators = [layer.parameters() for layer in block
-                                     if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear)]
-            parameters = list(itertools.chain.from_iterable(parameters_generators))
-            assert len(parameters) > 0, 'Every block should contain a convolutional / linear layer.'
-
-            # flattened_parameters = [parameter.view(-1) for parameter in parameters]
+            parameters = LitCNN.get_parameters_of_conv_or_linear_layer_in_block(block)
             weights_l1_norm = sum(w.abs().sum() for w in parameters)
             regularization_losses.append(regularization_coefficients[i] * weights_l1_norm)
 
@@ -773,7 +788,7 @@ class LitCNN(pl.LightningModule):
         self.log(f'{stage.value}_loss', loss)
         self.log(f'{stage.value}_accuracy', accuracy, on_epoch=True, on_step=False)
 
-        if self.should_regularize():
+        if self.should_regularize_lasso():
             regularization_loss = self.get_regularization_loss()
             loss += regularization_loss
             self.log(f'{stage.value}_reg_loss', regularization_loss)
@@ -791,6 +806,32 @@ class LitCNN(pl.LightningModule):
             The loss.
         """
         return self.shared_step(batch, RunningStage.TRAINING)
+
+    def on_train_batch_end(self, outputs, batch, batch_idx: int, unused: Optional[int] = 0) -> None:
+        if self.should_zero_out_low_weights():
+            self.zero_out_low_weights()
+        self.log_nonzero_parameters_count()
+
+    def zero_out_low_weights(self):
+        # The notations "beta" and "lambda" are taken from "Towards Learning Convolutions from Scratch".
+        betas = self.get_list_of_arguments(self.arch_args.beta_lasso_coefficient)
+        lambdas = self.get_list_of_arguments(self.arch_args.lasso_regularizer_coefficient)
+
+        for block, beta, lmbda in zip(self.blocks, betas, lambdas):
+            threshold = beta * lmbda  # lambda written with typo in purpose (since it's python's reserved word)
+            if threshold == 0:  # In other words - if beta or lambda is zero, move on.
+                continue
+            for parameter in LitCNN.get_parameters_of_conv_or_linear_layer_in_block(block):
+                with torch.no_grad():
+                    # To understand why this is done in the context-manager `no_grad` see here:
+                    # https://medium.com/@mrityu.jha/understanding-the-grad-of-autograd-fc8d266fd6cf
+                    parameter[parameter.abs() < threshold] = 0
+
+    def log_nonzero_parameters_count(self):
+        for i, block in enumerate(self.blocks):
+            for j, parameter in enumerate(LitCNN.get_parameters_of_conv_or_linear_layer_in_block(block)):
+                nonzero_fraction = torch.count_nonzero(parameter).item() / parameter.numel()
+                self.log(f'block-{i}-param-{j}-nonzero-fraction', nonzero_fraction, on_epoch=True, on_step=False)
 
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
         """Performs a validation step.
@@ -1435,23 +1476,27 @@ def initialize_wandb_logger(args: Args, name_suffix: str = ''):
 
 
 def initialize_trainer(args: Args, wandb_logger: WandbLogger):
+    trainer_kwargs = dict(logger=wandb_logger, max_epochs=args.opt.epochs,
+                          enable_checkpointing=args.env.enable_checkpointing)
     callbacks = [ModelSummary(max_depth=3)]
-    if args.env.save_checkpoint:
-        callbacks.append(ModelCheckpoint(monitor='validate_accuracy', mode='max'))
+
     if isinstance(args.env.multi_gpu, list) or (args.env.multi_gpu != 0):
-        trainer_kwargs = dict(gpus=args.env.multi_gpu, strategy="dp")
+        trainer_kwargs.update(dict(gpus=args.env.multi_gpu, strategy="dp"))
     else:
-        trainer_kwargs = dict(gpus=[args.env.device_num]) if args.env.is_cuda else dict()
+        trainer_kwargs.update(dict(gpus=[args.env.device_num]) if args.env.is_cuda else dict())
+
     if args.env.debug:
-        trainer_kwargs.update({f'limit_{t}_batches': 3 for t in ['train', 'val']})
         trainer_kwargs.update({'log_every_n_steps': 1})
+        trainer_kwargs.update({f'limit_{t}_batches': 3 for t in ['train', 'val']})
+
+    if args.env.enable_checkpointing:
+        callbacks.append(ModelCheckpoint(monitor='validate_accuracy', mode='max'))
     if args.dmh.estimate_intrinsic_dimension:
         callbacks.append(IntrinsicDimensionCalculator(args.dmh))
     if args.dmh.linear_regions_calculator:
         callbacks.append(LinearRegionsCalculator(args.dmh))
-    trainer = pl.Trainer(logger=wandb_logger, callbacks=callbacks, max_epochs=args.opt.epochs,
-                         **trainer_kwargs)
-    return trainer
+
+    return pl.Trainer(callbacks=callbacks, **trainer_kwargs)
 
 
 class ImitatorKNN(pl.LightningModule):

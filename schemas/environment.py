@@ -29,7 +29,7 @@ class EnvironmentArgs(ImmutableArgs):
 
     #: Change to False to disable saving checkpoints
     #: (for example if the model is extremely large and we ran out of storage in our W&B account).
-    save_checkpoint: bool = False
+    enable_checkpointing: bool = False
 
     @validator('path', pre=True)
     def create_parent_out_dir_if_not_exists(cls, v: str):

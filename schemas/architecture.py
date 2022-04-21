@@ -72,11 +72,15 @@ class ArchitectureArgs(ImmutableArgs):
     #: Padding mode for the convolution layers.
     padding_mode: Literal['zeros', 'circular'] = 'zeros'
 
-    #: Coefficients for lasso regularizers in different steps of the training process.
-    #: Zero means no regularization is applied.
+    #: Coefficients for lasso regularizers (where zero means no regularization is applied).
+    #: There could be potentially different values for different layers in the model.
     lasso_regularizer_coefficient: Union[NonNegativeFloat, List[NonNegativeFloat]] = 0
 
-    #: The scaling factor for the basic CNN (following $alpha$ in "Towards Learning Convolutions from Scratch").
+    #: The argument $\beta$ in "beta-lasso" algorithm from "Towards Learning Convolutions from Scratch".
+    #: There could be potentially different values for different layers in the model.
+    beta_lasso_coefficient: Union[NonNegativeFloat, List[NonNegativeFloat]] = 0
+
+    #: The scaling factor for the basic CNN (following $\alpha$ in "Towards Learning Convolutions from Scratch").
     alpha: PositiveInt = 32
 
     @validator('model_name', always=True)
