@@ -33,7 +33,8 @@ from schemas.data import DataArgs
 from schemas.dmh import Args, DMHArgs
 from schemas.optimization import OptimizationArgs
 from utils import (configure_logger, get_args, get_model_device, power_minus_1, get_mlp, get_dataloaders,
-                   whiten_data, normalize_data, calc_whitening_from_dataloader, ShuffleTensor, get_cnn)
+                   whiten_data, normalize_data, calc_whitening_from_dataloader, ShuffleTensor, get_cnn,
+                   get_list_of_arguments)
 from vgg import get_vgg_model_kernel_size, get_vgg_blocks, configs
 
 
@@ -697,7 +698,13 @@ class LitCNN(pl.LightningModule):
             data_args: The arguments for the input data.
         """
         super(LitCNN, self).__init__()
-        self.blocks = get_cnn(*self.get_model_config(arch_args.model_name, arch_args.alpha, data_args.spatial_size))
+        self.blocks = get_cnn(*self.get_model_config(arch_args.model_name, arch_args.alpha, data_args.spatial_size),
+                              paddings=arch_args.padding,
+                              shuffle_outputs=arch_args.shuffle_blocks_output,
+                              spatial_only=arch_args.spatial_shuffle_only,
+                              fixed_permutation=arch_args.fixed_permutation_per_block,
+                              spatial_size=data_args.spatial_size,
+                              in_channels=data_args.n_channels)
         self.loss = torch.nn.CrossEntropyLoss()
 
         self.arch_args = arch_args
@@ -736,13 +743,6 @@ class LitCNN(pl.LightningModule):
         """
         return LitCNN.is_list_or_positive_number(self.arch_args.beta_lasso_coefficient)
 
-    def get_list_of_arguments(self, arg: Union[float, List[float]]):
-        arg = copy.deepcopy(arg)
-        if not isinstance(arg, list):
-            arg = [arg] * len(self.blocks)
-        assert len(arg) == len(self.blocks)
-        return arg
-
     @staticmethod
     def get_parameters_of_conv_or_linear_layer_in_block(block):
         # Take the parameters of any conv/linear layer in the block,
@@ -759,7 +759,8 @@ class LitCNN(pl.LightningModule):
             The regularization loss, which is the sum of the l1 norm of the weights of linear/conv layers
             in the model, each multiplied by the corresponding regularization factor.
         """
-        regularization_coefficients = self.get_list_of_arguments(self.arch_args.lasso_regularizer_coefficient)
+        regularization_coefficients = get_list_of_arguments(self.arch_args.lasso_regularizer_coefficient,
+                                                            len(self.blocks))
 
         regularization_losses = list()
         for i, block in enumerate(self.blocks):
@@ -814,8 +815,8 @@ class LitCNN(pl.LightningModule):
 
     def zero_out_low_weights(self):
         # The notations "beta" and "lambda" are taken from "Towards Learning Convolutions from Scratch".
-        betas = self.get_list_of_arguments(self.arch_args.beta_lasso_coefficient)
-        lambdas = self.get_list_of_arguments(self.arch_args.lasso_regularizer_coefficient)
+        betas = get_list_of_arguments(self.arch_args.beta_lasso_coefficient, len(self.blocks))
+        lambdas = get_list_of_arguments(self.arch_args.lasso_regularizer_coefficient, len(self.blocks))
 
         for block, beta, lmbda in zip(self.blocks, betas, lambdas):
             threshold = beta * lmbda  # lambda written with typo in purpose (since it's python's reserved word)

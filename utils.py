@@ -148,12 +148,27 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0,
     return nn.Sequential(*layers)
 
 
+def get_list_of_arguments(arg, length, default=None):
+    if isinstance(arg, list):
+        assert len(arg) == length
+        return copy.deepcopy(arg)
+    else:
+        if (default is not None) and (arg is None):
+            if isinstance(default, list):
+                return copy.deepcopy(default)
+            arg = default
+        return [arg] * length
+
+
 def get_cnn(conv_channels: List[int],
             linear_channels: List[int],
             kernel_sizes: Optional[List[int]] = None,
             strides: Optional[List[int]] = None,
             paddings: Optional[List[int]] = None,
             use_max_pool: Optional[List[bool]] = None,
+            shuffle_outputs: Optional[List[bool]] = None,
+            spatial_only: Optional[List[bool]] = None,
+            fixed_permutation: Optional[List[bool]] = None,
             spatial_size: int = 32,
             in_channels: int = 3) -> torch.nn.Sequential:
     """
@@ -166,37 +181,38 @@ def get_cnn(conv_channels: List[int],
     :param strides: The stride to use in each conv layer.
     :param paddings: The amount of padding to use in each conv layer.
     :param use_max_pool: Whether to use max-pooling in each layer of the network or not.
+    :param shuffle_outputs: Whether to shuffle the output of each layer or not.
+    :param spatial_only: The argument to pass to `ShuffleTensor` (see doc there).
+    :param fixed_permutation: The argument to pass to `ShuffleTensor` (see doc there).
     :param spatial_size: Will be used to infer input dimension for the first affine layer.
     :param in_channels: Number of channels in the input tensor.
     :return: A sequential model which is the constructed CNN.
     """
     blocks: List[nn.Sequential] = list()
 
-    if use_max_pool is None:
-        use_max_pool = [False] * len(conv_channels)
-    if strides is None:
-        strides = [1] * len(conv_channels)
-    if kernel_sizes is None:
-        kernel_sizes = [3] * len(conv_channels)
-    if paddings is None:
-        paddings = [kernel_size // 2 for kernel_size in kernel_sizes]
+    use_max_pool = get_list_of_arguments(use_max_pool, len(conv_channels), default=False)
+    shuffle_outputs = get_list_of_arguments(shuffle_outputs, len(conv_channels), default=False)
+    strides = get_list_of_arguments(strides, len(conv_channels), default=1)
+    kernel_sizes = get_list_of_arguments(kernel_sizes, len(conv_channels), default=3)
+    paddings = get_list_of_arguments(paddings, len(conv_channels),
+                                     default=[kernel_size // 2 for kernel_size in kernel_sizes])
+    spatial_only_list = get_list_of_arguments(spatial_only, len(conv_channels), default=True)
+    fixed_permutation_list = get_list_of_arguments(fixed_permutation, len(conv_channels), default=True)
 
-    assert len(use_max_pool) == len(strides) == len(kernel_sizes) == len(paddings) == len(conv_channels)
-
-    for i, n_channels in enumerate(conv_channels):
-        out_channels = n_channels
-        padding = paddings[i]
-        stride = strides[i]
-        kernel_size = kernel_sizes[i]
-        spatial_size = int(math.floor((spatial_size + 2 * padding - kernel_size) / stride + 1))
-
+    zipped_args = zip(conv_channels, paddings, strides, kernel_sizes, use_max_pool,
+                      shuffle_outputs, spatial_only_list, fixed_permutation_list)
+    for out_channels, padding, stride, kernel_size, pool, shuffle, spatial, fixed in zipped_args:
         block_layers: List[nn.Module] = list()
         block_layers.append(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding))
         block_layers.append(nn.BatchNorm2d(out_channels))
         block_layers.append(nn.ReLU())
-        if use_max_pool[i]:
+
+        spatial_size = int(math.floor((spatial_size + 2 * padding - kernel_size) / stride + 1))
+        if pool:
             block_layers.append(torch.nn.MaxPool2d(kernel_size=2, stride=2))
             spatial_size = int(math.floor(spatial_size / 2))
+        if shuffle:
+            block_layers.append(ShuffleTensor(spatial_size, out_channels, spatial, fixed))
 
         blocks.append(nn.Sequential(*block_layers))
         in_channels = out_channels
