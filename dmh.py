@@ -703,7 +703,8 @@ class LitCNN(pl.LightningModule):
                               shuffle_outputs=arch_args.shuffle_blocks_output,
                               spatial_only=arch_args.spatial_shuffle_only,
                               fixed_permutation=arch_args.fixed_permutation_per_block,
-                              spatial_size=data_args.spatial_size,
+                              replace_with_linear=arch_args.replace_with_linear,
+                              in_spatial_size=data_args.spatial_size,
                               in_channels=data_args.n_channels)
         self.loss = torch.nn.CrossEntropyLoss()
 

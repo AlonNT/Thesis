@@ -160,6 +160,18 @@ def get_list_of_arguments(arg, length, default=None):
         return [arg] * length
 
 
+class View(nn.Module):
+    def __init__(self, shape: tuple):
+        super().__init__()
+        self.shape = shape
+
+    def forward(self, x: torch.Tensor):
+        return x.view(x.shape[0], *self.shape)
+
+    def extra_repr(self) -> str:
+        return f'shape={self.shape}'
+
+
 def get_cnn(conv_channels: List[int],
             linear_channels: List[int],
             kernel_sizes: Optional[List[int]] = None,
@@ -169,7 +181,8 @@ def get_cnn(conv_channels: List[int],
             shuffle_outputs: Optional[List[bool]] = None,
             spatial_only: Optional[List[bool]] = None,
             fixed_permutation: Optional[List[bool]] = None,
-            spatial_size: int = 32,
+            replace_with_linear: Optional[List[bool]] = None,
+            in_spatial_size: int = 32,
             in_channels: int = 3) -> torch.nn.Sequential:
     """
     This function builds a CNN and return it as a PyTorch's sequential model.
@@ -184,7 +197,8 @@ def get_cnn(conv_channels: List[int],
     :param shuffle_outputs: Whether to shuffle the output of each layer or not.
     :param spatial_only: The argument to pass to `ShuffleTensor` (see doc there).
     :param fixed_permutation: The argument to pass to `ShuffleTensor` (see doc there).
-    :param spatial_size: Will be used to infer input dimension for the first affine layer.
+    :param replace_with_linear: Whether to replace each conv layer with a linear layer of the same expressivity.
+    :param in_spatial_size: Will be used to infer input dimension for the first affine layer.
     :param in_channels: Number of channels in the input tensor.
     :return: A sequential model which is the constructed CNN.
     """
@@ -198,26 +212,38 @@ def get_cnn(conv_channels: List[int],
                                      default=[kernel_size // 2 for kernel_size in kernel_sizes])
     spatial_only_list = get_list_of_arguments(spatial_only, len(conv_channels), default=True)
     fixed_permutation_list = get_list_of_arguments(fixed_permutation, len(conv_channels), default=True)
+    replace_with_linear = get_list_of_arguments(replace_with_linear, len(conv_channels), default=False)
 
     zipped_args = zip(conv_channels, paddings, strides, kernel_sizes, use_max_pool,
-                      shuffle_outputs, spatial_only_list, fixed_permutation_list)
-    for out_channels, padding, stride, kernel_size, pool, shuffle, spatial, fixed in zipped_args:
+                      shuffle_outputs, spatial_only_list, fixed_permutation_list, replace_with_linear)
+    for out_channels, padding, stride, kernel_size, pool, shuffle, spatial, fixed, linear in zipped_args:
         block_layers: List[nn.Module] = list()
-        block_layers.append(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding))
+
+        out_spatial_size = int(math.floor((in_spatial_size + 2 * padding - kernel_size) / stride + 1))
+        if pool:
+            out_spatial_size = int(math.floor(out_spatial_size / 2))
+
+        if linear:
+            block_layers.append(nn.Flatten())
+            block_layers.append(nn.Linear(in_features=in_channels * in_spatial_size ** 2,
+                                          out_features=out_channels * out_spatial_size**2))
+            block_layers.append(View(shape=(out_channels, out_spatial_size, out_spatial_size)))
+        else:
+            block_layers.append(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding))
+
         block_layers.append(nn.BatchNorm2d(out_channels))
         block_layers.append(nn.ReLU())
 
-        spatial_size = int(math.floor((spatial_size + 2 * padding - kernel_size) / stride + 1))
         if pool:
-            block_layers.append(torch.nn.MaxPool2d(kernel_size=2, stride=2))
-            spatial_size = int(math.floor(spatial_size / 2))
+            block_layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
         if shuffle:
-            block_layers.append(ShuffleTensor(spatial_size, out_channels, spatial, fixed))
+            block_layers.append(ShuffleTensor(out_spatial_size, out_channels, spatial, fixed))
 
         blocks.append(nn.Sequential(*block_layers))
         in_channels = out_channels
+        in_spatial_size = out_spatial_size
 
-    mlp = get_mlp(input_dim=in_channels * (spatial_size ** 2),
+    mlp = get_mlp(input_dim=in_channels * (in_spatial_size ** 2),
                   output_dim=len(CLASSES),
                   n_hidden_layers=len(linear_channels),
                   hidden_dimensions=linear_channels,
@@ -1541,3 +1567,9 @@ class ShuffleTensor(nn.Module):
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward(x)  # When used as a data transform it's required to be "callable".
+
+    def extra_repr(self) -> str:
+        return f'spatial_size={self.spatial_size}; ' \
+               f'channels={self.channels}; ' \
+               f'spatial_only={self.spatial_only}; ' \
+               f'fixed_permutation={self.permutation is None}'

@@ -29,6 +29,9 @@ class ArchitectureArgs(ImmutableArgs):
     #: If it's true - use a fixed permutation per block in the network and not sample a new one each time.
     fixed_permutation_per_block: Union[bool, List[bool]] = True
 
+    #: If it's true - use a fixed permutation per block in the network and not sample a new one each time.
+    replace_with_linear: Union[bool, List[bool]] = False
+
     #: Use pretrained model, or train from scratch.
     use_pretrained: bool = False
 

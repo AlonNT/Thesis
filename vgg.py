@@ -291,7 +291,7 @@ def get_blocks(config: List[Union[int, str]],
             else:  # pred_aux_type == 'cnn'
                 pred_aux_net = get_cnn(conv_channels=[out_channels],
                                        linear_channels=[aux_mlp_hidden_dim] * aux_mlp_n_hidden_layers,
-                                       spatial_size=image_size, in_channels=out_channels)
+                                       in_spatial_size=image_size, in_channels=out_channels)
             pred_auxiliary_nets.append(pred_aux_net)
 
             upsampling_kwargs = dict(image_size=ssl_input_image_size, target_image_size=32) if upsample else dict()
