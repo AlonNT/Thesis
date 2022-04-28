@@ -29,8 +29,13 @@ class ArchitectureArgs(ImmutableArgs):
     #: If it's true - use a fixed permutation per block in the network and not sample a new one each time.
     fixed_permutation_per_block: Union[bool, List[bool]] = True
 
-    #: If it's true - use a fixed permutation per block in the network and not sample a new one each time.
+    #: If it's true - replace the corresponding conv layer with a linear layer of the same expressivity.
     replace_with_linear: Union[bool, List[bool]] = False
+
+    #: If the fraction is strictly positive, replace the corresponding conv layer with a sparsely connected
+    #: linear layer such that each output neuron is connected to a random subset of size
+    #: which is a fraction of the whole number of input neurons.
+    randomly_sparse_connected_fractions: Union[NonNegativeFloat, List[NonNegativeFloat]] = 0
 
     #: Use pretrained model, or train from scratch.
     use_pretrained: bool = False
@@ -57,7 +62,7 @@ class ArchitectureArgs(ImmutableArgs):
     stride: Union[PositiveInt, List[PositiveInt]] = 1
 
     #: The padding amount to use in each convolution-layer.
-    padding: Union[NonNegativeInt, List[NonNegativeInt]] = 1
+    padding: Union[None, NonNegativeInt, List[NonNegativeInt]] = None
 
     #: The pooling size and stride to use in the AvgPool / MaxPool layers.
     pool_size: Union[PositiveInt, List[PositiveInt]] = 4
@@ -75,8 +80,9 @@ class ArchitectureArgs(ImmutableArgs):
     #: Padding mode for the convolution layers.
     padding_mode: Literal['zeros', 'circular'] = 'zeros'
 
-    #: Coefficients for lasso regularizers (where zero means no regularization is applied).
+    #: Coefficients for l2/lasso regularizers (where zero means no regularization is applied).
     #: There could be potentially different values for different layers in the model.
+    l2_regularizer_coefficient: Union[NonNegativeFloat, List[NonNegativeFloat]] = 0
     lasso_regularizer_coefficient: Union[NonNegativeFloat, List[NonNegativeFloat]] = 0
 
     #: The argument $\beta$ in "beta-lasso" algorithm from "Towards Learning Convolutions from Scratch".

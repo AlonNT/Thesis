@@ -172,6 +172,56 @@ class View(nn.Module):
         return f'shape={self.shape}'
 
 
+class RandomlySparseConnected(nn.Module):
+    def __init__(self, in_features: int, out_features: int, fraction: float, 
+                 bias: bool = True, device=None, dtype=None):
+        super().__init__()
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        self.in_features = in_features
+        self.out_features = out_features
+        self.fraction = fraction
+        self.num_nonzero_weights_per_output_neuron = int(round(fraction * in_features))
+        self.mask = self.get_random_mask()
+
+        self.weight = nn.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
+        else:
+            self.register_parameter('bias', None)
+        
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        # In order to define each linear layer with proper weights initialization (correct fan-in and fan-out)
+        # it's being done in a for-loop using PyTorch default linear-layer initialization.
+        import ipdb; ipdb.set_trace()
+        tmp_linear = torch.nn.Linear(in_features=self.num_nonzero_weights_per_output_neuron,
+                                     out_features=self.out_features,
+                                     device=self.weight.device)
+        bool_mask = self.mask.bool()
+        for out_feature in range(self.out_features):
+            self.weight[out_feature, bool_mask[out_feature]] = tmp_linear.weight.data[out_feature]
+        self.bias = tmp_linear.bias
+
+    def get_random_mask(self):
+        import ipdb; ipdb.set_trace()
+        indices = np.random.default_rng().choice(
+            self.in_features, 
+            size=(self.out_features, self.num_nonzero_weights_per_output_neuron),
+            replace=False
+        )
+        mask = np.zeros(shape=(self.out_features, self.in_features), dtype=np.float32)
+        for out_feature in range(self.out_features):
+            mask[out_feature, indices[out_feature]] = 1
+        return torch.Tensor(mask, device=self.weight.device)
+
+    def forward(self, x: torch.Tensor):
+        return F.linear(x, self.weight * self.mask, self.bias)
+
+    def extra_repr(self) -> str:
+        return f'in_features={self.linear.in_features};out_features={self.linear.out_features};fraction={self.fraction}'
+
+
 def get_cnn(conv_channels: List[int],
             linear_channels: List[int],
             kernel_sizes: Optional[List[int]] = None,
@@ -182,6 +232,7 @@ def get_cnn(conv_channels: List[int],
             spatial_only: Optional[List[bool]] = None,
             fixed_permutation: Optional[List[bool]] = None,
             replace_with_linear: Optional[List[bool]] = None,
+            randomly_sparse_connected_fractions: Optional[List[float]] = None,
             in_spatial_size: int = 32,
             in_channels: int = 3) -> torch.nn.Sequential:
     """
@@ -204,29 +255,45 @@ def get_cnn(conv_channels: List[int],
     """
     blocks: List[nn.Sequential] = list()
 
-    use_max_pool = get_list_of_arguments(use_max_pool, len(conv_channels), default=False)
-    shuffle_outputs = get_list_of_arguments(shuffle_outputs, len(conv_channels), default=False)
-    strides = get_list_of_arguments(strides, len(conv_channels), default=1)
-    kernel_sizes = get_list_of_arguments(kernel_sizes, len(conv_channels), default=3)
-    paddings = get_list_of_arguments(paddings, len(conv_channels),
-                                     default=[kernel_size // 2 for kernel_size in kernel_sizes])
-    spatial_only_list = get_list_of_arguments(spatial_only, len(conv_channels), default=True)
-    fixed_permutation_list = get_list_of_arguments(fixed_permutation, len(conv_channels), default=True)
-    replace_with_linear = get_list_of_arguments(replace_with_linear, len(conv_channels), default=False)
+    use_max_pool = get_list_of_arguments(
+        use_max_pool, len(conv_channels), default=False)
+    shuffle_outputs = get_list_of_arguments(
+        shuffle_outputs, len(conv_channels), default=False)
+    strides = get_list_of_arguments(
+        strides, len(conv_channels), default=1)
+    kernel_sizes = get_list_of_arguments(
+        kernel_sizes, len(conv_channels), default=3)
+    paddings = get_list_of_arguments(
+        paddings, len(conv_channels), default=[kernel_size // 2 for kernel_size in kernel_sizes])
+    spatial_only_list = get_list_of_arguments(
+        spatial_only, len(conv_channels), default=True)
+    fixed_permutation_list = get_list_of_arguments(
+        fixed_permutation, len(conv_channels), default=True)
+    replace_with_linear = get_list_of_arguments(
+        replace_with_linear, len(conv_channels), default=False)
+    randomly_sparse_connected_fractions = get_list_of_arguments(
+        randomly_sparse_connected_fractions, len(conv_channels), default=0)
 
     zipped_args = zip(conv_channels, paddings, strides, kernel_sizes, use_max_pool,
-                      shuffle_outputs, spatial_only_list, fixed_permutation_list, replace_with_linear)
-    for out_channels, padding, stride, kernel_size, pool, shuffle, spatial, fixed, linear in zipped_args:
+                      shuffle_outputs, spatial_only_list, fixed_permutation_list, 
+                      replace_with_linear, randomly_sparse_connected_fractions)
+    for out_channels, padding, stride, kernel_size, pool, shuf, spatial, fixed, linear, fraction in zipped_args:
         block_layers: List[nn.Module] = list()
 
         out_spatial_size = int(math.floor((in_spatial_size + 2 * padding - kernel_size) / stride + 1))
         if pool:
             out_spatial_size = int(math.floor(out_spatial_size / 2))
 
-        if linear:
+        if linear or (fraction > 0):
+            assert not (linear and (fraction > 0)), 'select one of linear/sparse-linear, not both'
+            in_features = in_channels * (in_spatial_size ** 2)
+            out_features = out_channels * (out_spatial_size ** 2)
+            if linear:
+                layer = nn.Linear(in_features, out_features) 
+            else: 
+                layer = RandomlySparseConnected(in_features, out_features, fraction)
             block_layers.append(nn.Flatten())
-            block_layers.append(nn.Linear(in_features=in_channels * in_spatial_size ** 2,
-                                          out_features=out_channels * out_spatial_size**2))
+            block_layers.append(layer)
             block_layers.append(View(shape=(out_channels, out_spatial_size, out_spatial_size)))
         else:
             block_layers.append(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding))
@@ -236,7 +303,7 @@ def get_cnn(conv_channels: List[int],
 
         if pool:
             block_layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
-        if shuffle:
+        if shuf:
             block_layers.append(ShuffleTensor(out_spatial_size, out_channels, spatial, fixed))
 
         blocks.append(nn.Sequential(*block_layers))

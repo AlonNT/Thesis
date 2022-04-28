@@ -675,7 +675,7 @@ class LitCNN(pl.LightningModule):
         elif model_name == 'S-FC':
             conv_channels, kernel_sizes, strides = [], [], []
             linear_channels = [int(s**2 * a / 4),
-                               24 * a]
+                               24*a]
         else:
             raise NotImplementedError(f'Model {model_name} is not recognized.')
 
@@ -704,6 +704,7 @@ class LitCNN(pl.LightningModule):
                               spatial_only=arch_args.spatial_shuffle_only,
                               fixed_permutation=arch_args.fixed_permutation_per_block,
                               replace_with_linear=arch_args.replace_with_linear,
+                              randomly_sparse_connected_fractions=arch_args.randomly_sparse_connected_fractions,
                               in_spatial_size=data_args.spatial_size,
                               in_channels=data_args.n_channels)
         self.loss = torch.nn.CrossEntropyLoss()
@@ -729,10 +730,18 @@ class LitCNN(pl.LightningModule):
     def is_list_or_positive_number(arg: Union[list, float]):
         return isinstance(arg, list) or (arg > 0)
 
-    def should_regularize_lasso(self):
+    def should_regularize_l2(self):
         """
         Returns:
             True if we should regularize, False if not (depends on the argument `lasso_regularizer_coefficient`).
+        """
+        return LitCNN.is_list_or_positive_number(self.arch_args.l2_regularizer_coefficient)
+
+    def should_regularize_lasso(self):
+        """
+        Returns:
+            True if we should lasso regularize,
+            False if not (depends on the argument `lasso_regularizer_coefficient`).
         """
         return LitCNN.is_list_or_positive_number(self.arch_args.lasso_regularizer_coefficient)
 
@@ -760,14 +769,20 @@ class LitCNN(pl.LightningModule):
             The regularization loss, which is the sum of the l1 norm of the weights of linear/conv layers
             in the model, each multiplied by the corresponding regularization factor.
         """
-        regularization_coefficients = get_list_of_arguments(self.arch_args.lasso_regularizer_coefficient,
-                                                            len(self.blocks))
+        lasso_regularization_coefficients = get_list_of_arguments(self.arch_args.lasso_regularizer_coefficient,
+                                                                  len(self.blocks))
+        l2_regularization_coefficients = get_list_of_arguments(self.arch_args.l2_regularizer_coefficient,
+                                                               len(self.blocks))
 
         regularization_losses = list()
-        for i, block in enumerate(self.blocks):
-            parameters = LitCNN.get_parameters_of_conv_or_linear_layer_in_block(block)
-            weights_l1_norm = sum(w.abs().sum() for w in parameters)
-            regularization_losses.append(regularization_coefficients[i] * weights_l1_norm)
+        for block, lasso, l2 in zip(self.blocks, lasso_regularization_coefficients, l2_regularization_coefficients):
+            parameters = LitCNN.get_parameters_of_conv_or_linear_layer_in_block(block)  # TODO consider excluding bias
+            if lasso > 0:
+                weights_l1_norm = sum(w.abs().sum() for w in parameters)
+                regularization_losses.append(lasso * weights_l1_norm)
+            if l2 > 0:
+                weights_l2_norm = sum(torch.square(w).sum() for w in parameters)
+                regularization_losses.append(l2 * weights_l2_norm)
 
         return sum(regularization_losses)
 
@@ -790,7 +805,7 @@ class LitCNN(pl.LightningModule):
         self.log(f'{stage.value}_loss', loss)
         self.log(f'{stage.value}_accuracy', accuracy, on_epoch=True, on_step=False)
 
-        if self.should_regularize_lasso():
+        if self.should_regularize_lasso() or self.should_regularize_l2():
             regularization_loss = self.get_regularization_loss()
             loss += regularization_loss
             self.log(f'{stage.value}_reg_loss', regularization_loss)
