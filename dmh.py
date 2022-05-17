@@ -32,7 +32,7 @@ from schemas.architecture import ArchitectureArgs
 from schemas.data import DataArgs
 from schemas.dmh import Args, DMHArgs
 from schemas.optimization import OptimizationArgs
-from utils import (configure_logger, get_args, get_model_device, power_minus_1, get_mlp, get_dataloaders,
+from utils import (RandomlySparseConnected, configure_logger, get_args, get_model_device, power_minus_1, get_mlp, get_dataloaders,
                    whiten_data, normalize_data, calc_whitening_from_dataloader, ShuffleTensor, get_cnn,
                    get_list_of_arguments)
 from vgg import get_vgg_model_kernel_size, get_vgg_blocks, configs
@@ -758,7 +758,9 @@ class LitCNN(pl.LightningModule):
         # Take the parameters of any conv/linear layer in the block,
         # which essentially excludes the parameters of the batch-norm layer that shouldn't be regularized.
         parameters_generators = [layer.parameters() for layer in block
-                                 if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear)]
+                                 if isinstance(layer, nn.Conv2d) or 
+                                    isinstance(layer, nn.Linear) or 
+                                    isinstance(layer, RandomlySparseConnected)]
         parameters = list(itertools.chain.from_iterable(parameters_generators))
         assert len(parameters) > 0, 'Every block should contain a convolutional / linear layer.'
         return parameters

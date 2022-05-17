@@ -85,11 +85,19 @@ def get_args(args_class):
     return args
 
 
+def get_possibly_sparse_linear_layer(in_features: int, out_features: int, sparse_fraction: float):
+    if sparse_fraction > 0:
+        return RandomlySparseConnected(in_features, out_features, sparse_fraction)
+    else: 
+        return nn.Linear(in_features, out_features)
+
+
 def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0,
             hidden_dimensions: Union[int, List[int]] = 0,
             use_batch_norm: bool = False, organize_as_blocks: bool = True,
             shuffle_blocks_output: Union[bool, List[bool]] = False,
-            fixed_permutation_per_block: bool = False) -> torch.nn.Sequential:
+            fixed_permutation_per_block: bool = False,
+            sparse_fractions: Optional[List[float]] = None) -> torch.nn.Sequential:
     """Create an MLP (i.e. Multi-Layer-Perceptron) and return it as a PyTorch's sequential model.
 
     Args:
@@ -103,11 +111,15 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0,
             If it's a list of values, define as single value which will be True if any one of the values is True.
         fixed_permutation_per_block: If it's true - use a fixed permutation per block in the network
             and not sample a new one each time.
-
+        sparse_fractions: I given (i.e. it's not None) should be a list of floats, 
+            indicating the sparsity of each layer. A number 0 < q < 1 indicates that
+            only a q fraction of the neurons will be connected. 
+            Zero means that a fully-connected will be used.
     Returns:
         A sequential model which is the constructed MLP.
     """
     layers: List[torch.nn.Module] = list()
+    sparse_fractions = get_list_of_arguments(sparse_fractions, len(hidden_dimensions) + 1, default=0)
     if isinstance(shuffle_blocks_output, list):
         shuffle_blocks_output = any(shuffle_blocks_output)
     if not isinstance(hidden_dimensions, list):
@@ -123,7 +135,7 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0,
         if i == 0:
             block_layers.append(nn.Flatten())
 
-        block_layers.append(torch.nn.Linear(in_features, out_features))
+        block_layers.append(get_possibly_sparse_linear_layer(in_features, out_features, sparse_fractions[i]))
         if use_batch_norm:
             block_layers.append(torch.nn.BatchNorm1d(hidden_dim))
         block_layers.append(torch.nn.ReLU())
@@ -139,7 +151,7 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0,
 
         in_features = out_features
 
-    final_layer = nn.Linear(in_features, output_dim)
+    final_layer = get_possibly_sparse_linear_layer(in_features, output_dim, sparse_fractions[-1])
     if organize_as_blocks:
         final_layer = nn.Sequential(final_layer)
 
@@ -172,6 +184,14 @@ class View(nn.Module):
         return f'shape={self.shape}'
 
 
+# # For debugging purposes, e.g. to verify the gradients of the weights 
+# # in the locations where mask is 0 remain unchanged.
+# def verify_grad_is_zero_where_mask_is_0(grad: torch.Tensor, mask: torch.Tensor):
+#     # For debugging purposes, e.g. to verify the gradients of the weights 
+#     # in the locations where mask is 0 remain unchanged.
+#     assert torch.all((grad == 0) | (mask == 1)).item()
+
+
 class RandomlySparseConnected(nn.Module):
     def __init__(self, in_features: int, out_features: int, fraction: float, 
                  bias: bool = True, device=None, dtype=None):
@@ -181,9 +201,9 @@ class RandomlySparseConnected(nn.Module):
         self.out_features = out_features
         self.fraction = fraction
         self.num_nonzero_weights_per_output_neuron = int(round(fraction * in_features))
-        self.mask = self.get_random_mask()
-
-        self.weight = nn.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
+        
+        self.mask = nn.Parameter(torch.zeros((out_features, in_features), **factory_kwargs), requires_grad=False)
+        self.weight = nn.Parameter(torch.zeros((out_features, in_features), **factory_kwargs))
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
         else:
@@ -191,35 +211,61 @@ class RandomlySparseConnected(nn.Module):
         
         self.reset_parameters()
 
+        # # For debugging purposes, e.g. to verify the gradients of the weights 
+        # # in the locations where mask is 0 remain unchanged.
+        # self.weight.register_hook(functools.partial(verify_grad_is_zero_where_mask_is_0,  mask=self.mask))
+
     def reset_parameters(self) -> None:
-        # In order to define each linear layer with proper weights initialization (correct fan-in and fan-out)
-        # it's being done in a for-loop using PyTorch default linear-layer initialization.
-        import ipdb; ipdb.set_trace()
-        tmp_linear = torch.nn.Linear(in_features=self.num_nonzero_weights_per_output_neuron,
-                                     out_features=self.out_features,
-                                     device=self.weight.device)
+        """Initializes the parameters if the module, which are
+        the random mask, and the weight and bias of the linear layer.
+        """
+        self.init_random_mask()
+        self.init_weight_and_bias()
+
+    def init_random_mask(self):
+        """Initializes the boolean mask indicating the (sparse) connections between the input and output neurons.
+
+        The mask is a tensor of shape (self.out_features, self.in_features) and dtype np.float32,
+        where a value of 1 in the coordinate ij means that the i-th output neuron 
+        is connected to the j-th input neuron.
+        """
+        ordered_indices_vector = np.tile(np.arange(self.in_features), self.out_features)
+        ordered_indices_matrix = ordered_indices_vector.reshape(self.out_features, self.in_features)
+        shuffled_indices_matrix = np.random.default_rng().permuted(ordered_indices_matrix, axis=1)
+        indices = shuffled_indices_matrix[:, :self.num_nonzero_weights_per_output_neuron]
+        for i in range(self.out_features):
+            self.mask[i, indices[i]] = 1
+
+    @torch.no_grad()
+    def init_weight_and_bias(self):
+        """Initializes the weight matrix and bias vector of the linear layer.
+        
+        The weight matrix and bias vector of the linear layer are initialized as if they were
+        a linear layer from `self.num_nonzero_weights_per_output_neuron` input neurons to 
+        `self.out_features` output neurons (since de facto this is what's going to happen).
+
+        To understand why this is done in the context-manager `no_grad` see here:
+        https://medium.com/@mrityu.jha/understanding-the-grad-of-autograd-fc8d266fd6cf
+        Prevents the RuntimeError:
+            "RuntimeError: a view of a leaf Variable that requires grad is being used in an in-place operation."
+        """
+        tmp_linear = nn.Linear(in_features=self.num_nonzero_weights_per_output_neuron,
+                               out_features=self.out_features,
+                               bias=(self.bias is not None),
+                               device=self.weight.device)
         bool_mask = self.mask.bool()
-        for out_feature in range(self.out_features):
-            self.weight[out_feature, bool_mask[out_feature]] = tmp_linear.weight.data[out_feature]
+        for i in range(self.out_features):
+            self.weight[i, bool_mask[i]] = tmp_linear.weight.data[i]
         self.bias = tmp_linear.bias
 
-    def get_random_mask(self):
-        import ipdb; ipdb.set_trace()
-        indices = np.random.default_rng().choice(
-            self.in_features, 
-            size=(self.out_features, self.num_nonzero_weights_per_output_neuron),
-            replace=False
-        )
-        mask = np.zeros(shape=(self.out_features, self.in_features), dtype=np.float32)
-        for out_feature in range(self.out_features):
-            mask[out_feature, indices[out_feature]] = 1
-        return torch.Tensor(mask, device=self.weight.device)
-
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self.weight * self.mask, self.bias)
 
     def extra_repr(self) -> str:
-        return f'in_features={self.linear.in_features};out_features={self.linear.out_features};fraction={self.fraction}'
+        return f'in_feature={self.in_features}, ' + \
+               f'out_features={self.out_features}, ' + \
+               f'bias={self.bias is not None}, ' + \
+               f'fraction={self.fraction:.3f}'
 
 
 def get_cnn(conv_channels: List[int],
@@ -272,28 +318,24 @@ def get_cnn(conv_channels: List[int],
     replace_with_linear = get_list_of_arguments(
         replace_with_linear, len(conv_channels), default=False)
     randomly_sparse_connected_fractions = get_list_of_arguments(
-        randomly_sparse_connected_fractions, len(conv_channels), default=0)
+        randomly_sparse_connected_fractions, len(conv_channels) + len(linear_channels) + 1, default=0)
 
     zipped_args = zip(conv_channels, paddings, strides, kernel_sizes, use_max_pool,
                       shuffle_outputs, spatial_only_list, fixed_permutation_list, 
-                      replace_with_linear, randomly_sparse_connected_fractions)
-    for out_channels, padding, stride, kernel_size, pool, shuf, spatial, fixed, linear, fraction in zipped_args:
+                      replace_with_linear, randomly_sparse_connected_fractions[:len(conv_channels)])
+    for out_channels, padding, stride, kernel_size, pool, shuf, spatial, fixed, linear, sparse_fraction in zipped_args:
         block_layers: List[nn.Module] = list()
 
         out_spatial_size = int(math.floor((in_spatial_size + 2 * padding - kernel_size) / stride + 1))
         if pool:
             out_spatial_size = int(math.floor(out_spatial_size / 2))
 
-        if linear or (fraction > 0):
-            assert not (linear and (fraction > 0)), 'select one of linear/sparse-linear, not both'
-            in_features = in_channels * (in_spatial_size ** 2)
-            out_features = out_channels * (out_spatial_size ** 2)
-            if linear:
-                layer = nn.Linear(in_features, out_features) 
-            else: 
-                layer = RandomlySparseConnected(in_features, out_features, fraction)
+        if linear or (sparse_fraction > 0):
+            assert not (linear and (sparse_fraction > 0)), 'Select one of linear/sparse-linear, not both.'
             block_layers.append(nn.Flatten())
-            block_layers.append(layer)
+            block_layers.append(get_possibly_sparse_linear_layer(in_features=in_channels * (in_spatial_size ** 2), 
+                                                                 out_features=out_channels * (out_spatial_size ** 2),
+                                                                 sparse_fraction=sparse_fraction))
             block_layers.append(View(shape=(out_channels, out_spatial_size, out_spatial_size)))
         else:
             block_layers.append(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding))
@@ -315,7 +357,8 @@ def get_cnn(conv_channels: List[int],
                   n_hidden_layers=len(linear_channels),
                   hidden_dimensions=linear_channels,
                   use_batch_norm=True,
-                  organize_as_blocks=True)
+                  organize_as_blocks=True,
+                  sparse_fractions=randomly_sparse_connected_fractions[len(conv_channels):])
     blocks.extend(list(mlp))
 
     return torch.nn.Sequential(*blocks)
