@@ -23,7 +23,6 @@ from loguru import logger
 from typing import Callable, Optional, Tuple, Union
 from datetime import timedelta
 
-from consts import N_CLASSES
 from schemas.patches import Args, ArchitectureArgs
 from utils import (configure_logger,
                    get_dataloaders,

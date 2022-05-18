@@ -19,13 +19,14 @@ from functools import partial
 from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
 from tqdm import tqdm
-from typing import List, Optional, Dict, Callable, Tuple, Union
+from typing import Any, List, Literal, Optional, Dict, Callable, Tuple, Union
 from loguru import logger
 from datetime import timedelta
 from torch.utils.data import DataLoader
 from torchvision.transforms.functional import resize
+from torchvision.datasets import ImageFolder
 
-from consts import CLASSES, LOGGER_FORMAT, DATETIME_STRING_FORMAT
+from consts import LOGGER_FORMAT, DATETIME_STRING_FORMAT
 
 
 def log_args(args):
@@ -280,7 +281,8 @@ def get_cnn(conv_channels: List[int],
             replace_with_linear: Optional[List[bool]] = None,
             randomly_sparse_connected_fractions: Optional[List[float]] = None,
             in_spatial_size: int = 32,
-            in_channels: int = 3) -> torch.nn.Sequential:
+            in_channels: int = 3,
+            n_classes: int = 10) -> torch.nn.Sequential:
     """
     This function builds a CNN and return it as a PyTorch's sequential model.
 
@@ -297,6 +299,8 @@ def get_cnn(conv_channels: List[int],
     :param replace_with_linear: Whether to replace each conv layer with a linear layer of the same expressivity.
     :param in_spatial_size: Will be used to infer input dimension for the first affine layer.
     :param in_channels: Number of channels in the input tensor.
+    :param n_classes: Number of classes (i.e. determines the size of the prediction vector 
+        containing the classes' scores).
     :return: A sequential model which is the constructed CNN.
     """
     blocks: List[nn.Sequential] = list()
@@ -353,7 +357,7 @@ def get_cnn(conv_channels: List[int],
         in_spatial_size = out_spatial_size
 
     mlp = get_mlp(input_dim=in_channels * (in_spatial_size ** 2),
-                  output_dim=len(CLASSES),
+                  output_dim=n_classes,
                   n_hidden_layers=len(linear_channels),
                   hidden_dimensions=linear_channels,
                   use_batch_norm=True,
@@ -1683,3 +1687,52 @@ class ShuffleTensor(nn.Module):
                f'channels={self.channels}; ' \
                f'spatial_only={self.spatial_only}; ' \
                f'fixed_permutation={self.permutation is None}'
+
+
+class ImageNet(ImageFolder):
+    """`ImageNet <http://image-net.org/>`_ 2012 Classification Dataset.
+
+    Args:
+        root (string): Root directory of the ImageNet Dataset.
+        split (string, optional): The dataset split, supports ``train``, or ``val``.
+        transform (callable, optional): A function/transform that  takes in an PIL image
+            and returns a transformed version. E.g, ``transforms.RandomCrop``
+        target_transform (callable, optional): A function/transform that takes in the
+            target and transforms it.
+        loader (callable, optional): A function to load an image given its path.
+
+     Attributes:
+        classes (list): List of the class name tuples.
+        class_to_idx (dict): Dict with items (class_name, class_index).
+        wnids (list): List of the WordNet IDs.
+        wnid_to_idx (dict): Dict with items (wordnet_id, class_index).
+        imgs (list): List of (image path, class_index) tuples
+        targets (list): The class_index value for each image in the dataset
+    """
+
+    def __init__(self, root: str, split: Literal['train', 'val'] = 'train', **kwargs: Any) -> None:
+        self.root = root
+        self.split = split
+
+        wnid_to_classes = load_meta_file(self.root)[0]
+
+        super(ImageNet, self).__init__(self.split_folder, **kwargs)
+        self.root = root
+
+        self.wnids = self.classes
+        self.wnid_to_idx = self.class_to_idx
+        self.classes = [wnid_to_classes[wnid] for wnid in self.wnids]
+        self.class_to_idx = {cls: idx
+                             for idx, clss in enumerate(self.classes)
+                             for cls in clss}
+
+    @property
+    def split_folder(self) -> str:
+        return os.path.join(self.root, self.split)
+
+    def extra_repr(self) -> str:
+        return "Split: {split}".format(**self.__dict__)
+
+
+def load_meta_file(root: str, file: Optional[str] = 'meta.bin') -> Tuple[Dict[str, str], List[str]]:
+    return torch.load(os.path.join(root, file))

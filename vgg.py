@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from typing import List, Union, Tuple, Optional
 
-from consts import CLASSES
 from utils import get_mlp, get_cnn, ShuffleTensor
 
 # Configurations for the VGG models family.
@@ -253,10 +252,10 @@ def get_blocks(config: List[Union[int, str]],
     image_size = 32
     block_output_dimension = 0
 
-    aux_mlp_kwargs = dict(output_dim=len(CLASSES),
+    aux_mlp_kwargs = dict(output_dim=10,
                           n_hidden_layers=aux_mlp_n_hidden_layers,
                           hidden_dim=aux_mlp_hidden_dim)
-    final_mlp_kwargs = dict(output_dim=len(CLASSES),
+    final_mlp_kwargs = dict(output_dim=10,
                             n_hidden_layers=final_mlp_n_hidden_layers,
                             hidden_dim=final_mlp_hidden_dim)
     for i in range(len(config)):
@@ -320,7 +319,7 @@ class VGG(nn.Module):
         super(VGG, self).__init__()
         layers, _, _, features_output_dimension = get_blocks(configs[vgg_name], dropout_prob, padding_mode)
         self.features = nn.Sequential(*layers)
-        self.mlp = get_mlp(input_dim=features_output_dimension, output_dim=len(CLASSES),
+        self.mlp = get_mlp(input_dim=features_output_dimension, output_dim=10,
                            n_hidden_layers=final_mlp_n_hidden_layers, hidden_dimensions=final_mlp_hidden_dim)
 
     def forward(self, x: torch.Tensor):

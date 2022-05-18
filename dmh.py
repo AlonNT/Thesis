@@ -19,14 +19,13 @@ from pathlib import Path
 from tqdm import tqdm
 
 from torch.utils.data import DataLoader
-from torchvision.datasets import CIFAR10, MNIST, FashionMNIST
-from torchvision.transforms import ToTensor, RandomCrop, RandomHorizontalFlip, Normalize, Compose
+from torchvision.datasets import CIFAR10, CIFAR100, MNIST, FashionMNIST, VisionDataset
+from torchvision.transforms import ToTensor, RandomCrop, RandomResizedCrop, RandomHorizontalFlip, Normalize, Compose, Resize
 from pytorch_lightning import LightningDataModule, Callback
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer.states import RunningStage
 from pytorch_lightning.callbacks import ModelCheckpoint, ModelSummary
 
-from consts import N_CLASSES
 from patches import sample_random_patches
 from schemas.architecture import ArchitectureArgs
 from schemas.data import DataArgs
@@ -34,7 +33,7 @@ from schemas.dmh import Args, DMHArgs
 from schemas.optimization import OptimizationArgs
 from utils import (RandomlySparseConnected, configure_logger, get_args, get_model_device, power_minus_1, get_mlp, get_dataloaders,
                    whiten_data, normalize_data, calc_whitening_from_dataloader, ShuffleTensor, get_cnn,
-                   get_list_of_arguments)
+                   get_list_of_arguments, ImageNet)
 from vgg import get_vgg_model_kernel_size, get_vgg_blocks, configs
 
 
@@ -234,7 +233,7 @@ class NeighborsValuesAssigner(nn.Module):
 
 
 class DataModule(LightningDataModule):
-    def __init__(self, args: DataArgs, batch_size: int, data_dir: str = "./data"):
+    def __init__(self, args: DataArgs, batch_size: int):
         """A datamodule to be used with PyTorch Lightning modules.
 
         Args:
@@ -247,37 +246,43 @@ class DataModule(LightningDataModule):
         self.dataset_class = self.get_dataset_class(args.dataset_name)
         self.n_channels = args.n_channels
         self.spatial_size = args.spatial_size
-        self.data_dir = data_dir
+        self.data_dir = args.data_dir
         self.batch_size = batch_size
 
-        transforms_list_no_aug, transforms_list_with_aug = DataModule.get_transforms_lists(args)
+        transforms_list_no_aug, transforms_list_with_aug = self.get_transforms_lists(args)
+        transforms_clean = [ToTensor()]
+        if self.dataset_class is ImageNet:  # Since ImageNet images are of sifferent sizes, we must resize
+            transforms_clean = [Resize((args.spatial_size, args.spatial_size))] + transforms_clean
         self.transforms = {'aug': Compose(transforms_list_with_aug),
                            'no_aug': Compose(transforms_list_no_aug),
-                           'clean': ToTensor()}
+                           'clean': Compose(transforms_clean)}
         self.datasets = {f'{stage}_{aug}': None
                          for stage in ('fit', 'validate')
                          for aug in ('aug', 'no_aug', 'clean')}
 
-    def get_dataset_class(self, dataset_name: str) -> Union[Type[CIFAR10], Type[MNIST], Type[FashionMNIST]]:
+    def get_dataset_class(self, dataset_name: str) -> VisionDataset:
         """Gets the class of the dataset, according to the given dataset name.
 
         Args:
-            dataset_name: name of the dataset (CIFAR10, MNIST or FashionMNIST).
+            dataset_name: name of the dataset (CIFAR10, CIFAR100, MNIST, FashionMNIST or ImageNet).
 
         Returns:
             The dataset class.
         """
         if dataset_name == 'CIFAR10':
             return CIFAR10
+        elif dataset_name == 'CIFAR100':
+            return CIFAR100
         elif dataset_name == 'MNIST':
             return MNIST
         elif dataset_name == 'FashionMNIST':
             return FashionMNIST
+        elif dataset_name == 'ImageNet':
+            return ImageNet
         else:
             raise NotImplementedError(f'Dataset {dataset_name} is not implemented.')
 
-    @staticmethod
-    def get_transforms_lists(args: DataArgs) -> Tuple[list, list]:
+    def get_transforms_lists(self, args: DataArgs) -> Tuple[list, list]:
         """Gets the transformations list to be used in the dataloader.
 
         Args:
@@ -287,47 +292,51 @@ class DataModule(LightningDataModule):
             One list is the transformations without augmentation,
             and the other is the transformations with augmentations.
         """
-        augmentations = DataModule.get_augmentations_transforms(args.random_horizontal_flip,
-                                                                args.random_crop,
-                                                                args.spatial_size)
-        normalization = DataModule.get_normalization_transform(args.normalization_to_plus_minus_one,
-                                                               args.normalization_to_unit_gaussian,
-                                                               args.n_channels)
+        augmentations = self.get_augmentations_transforms(args.random_horizontal_flip, args.random_crop)
+        normalization = self.get_normalization_transform(args.normalization_to_plus_minus_one,
+                                                         args.normalization_to_unit_gaussian)
         normalizations_list = list() if (normalization is None) else [normalization]
-        crucial_transforms = [ToTensor()]
-        if args.shuffle_images:
-            post_transforms = [ShuffleTensor(args.spatial_size,  args.n_channels,
-                                             args.keep_rgb_triplets_intact, args.fixed_permutation)]
-        else:
-            post_transforms = list()
-        transforms_list_no_aug = crucial_transforms + normalizations_list + post_transforms
-        transforms_list_with_aug = augmentations + transforms_list_no_aug
+        pre_transforms = [ToTensor()]
+        post_transforms = list() if not args.shuffle_images else [
+            ShuffleTensor(args.spatial_size, args.n_channels, args.keep_rgb_triplets_intact, args.fixed_permutation)
+        ]
+        transforms_list_no_aug = pre_transforms + normalizations_list + post_transforms
+        if self.dataset_class is ImageNet:  # Since ImageNet images are of sifferent sizes, we must resize
+            transforms_list_no_aug = [Resize((args.spatial_size, args.spatial_size))] + transforms_list_no_aug
+
+        transforms_list_with_aug = augmentations + pre_transforms + normalizations_list + post_transforms
 
         return transforms_list_no_aug, transforms_list_with_aug
 
-    @staticmethod
-    def get_augmentations_transforms(random_flip: bool, random_crop: bool, spatial_size: int) -> list:
+    def get_augmentations_transforms(self, random_flip: bool, random_crop: bool) -> list:
         """Gets the augmentations transformations list to be used in the dataloader.
 
         Args:
             random_flip: Whether to use random-flip augmentation.
             random_crop: Whether to use random-crop augmentation.
-            spatial_size: The spatial-size of the input images (needed for the target-size of the random-crop).
+                In ImageNet dataset, the layer that is being used is RandomResizedCrop 
+                and not padding followed by RandomCrop.
+            spatial_size: The spatial-size of the input images 
+                (needed for the target-size of the RandomCrop or RandomResizedCrop).
 
         Returns:
             A list containing the augmentations transformations.
         """
         augmentations_transforms = list()
 
+        if self.dataset_class is ImageNet:
+            if random_crop:
+                augmentations_transforms.append(RandomResizedCrop(size=self.spatial_size))
+            else:
+                augmentations_transforms.append(Resize((self.spatial_size, self.spatial_size)))
+        elif random_crop:
+                augmentations_transforms.append(RandomCrop(size=self.spatial_size, padding=4))
         if random_flip:
             augmentations_transforms.append(RandomHorizontalFlip())
-        if random_crop:
-            augmentations_transforms.append(RandomCrop(size=spatial_size, padding=4))
 
         return augmentations_transforms
 
-    @staticmethod
-    def get_normalization_transform(plus_minus_one: bool, unit_gaussian: bool, n_channels: int) -> Optional[Normalize]:
+    def get_normalization_transform(self, plus_minus_one: bool, unit_gaussian: bool) -> Optional[Normalize]:
         """Gets the normalization transformation to be used in the dataloader (or None, if no normalization is needed).
 
         Args:
@@ -341,11 +350,16 @@ class DataModule(LightningDataModule):
         assert not (plus_minus_one and unit_gaussian), 'Only one should be given'
 
         if unit_gaussian:
-            if n_channels != 3:
-                raise NotImplementedError('Normalization for MNIST / FashionMNIST is not supported. ')
-            normalization_values = [(0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)]
+            if self.dataset_class is ImageNet:
+                normalization_values = [(0.485, 0.456, 0.406), (0.229, 0.224, 0.225)]
+            elif self.dataset_class is CIFAR10:
+                normalization_values = [(0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)]
+            elif self.dataset_class is CIFAR100:
+                normalization_values = [(0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)]
+            else:
+                raise NotImplementedError('Normalization using mean and std is supported only for CIFAR10 / CIFAR100 / ImageNet.')
         elif plus_minus_one:
-            normalization_values = [(0.5,) * n_channels] * 2  # times 2 because one is mean and one is std
+            normalization_values = [(0.5,) * self.n_channels] * 2  # times 2 because one is mean and one is std
         else:
             return None
 
@@ -354,8 +368,9 @@ class DataModule(LightningDataModule):
     def prepare_data(self):
         """Download the dataset if it's not already in `self.data_dir`.
         """
-        for train_mode in [True, False]:
-            self.dataset_class(self.data_dir, train=train_mode, download=True)
+        if self.dataset_class is not ImageNet:  # ImageNet should be downloaded manually beforehand
+            for train_mode in [True, False]:
+                self.dataset_class(self.data_dir, train=train_mode, download=True)
 
     def setup(self, stage: Optional[str] = None):
         """Create the different datasets.
@@ -366,17 +381,35 @@ class DataModule(LightningDataModule):
         for s in ('fit', 'validate'):
             for aug in ('aug', 'no_aug', 'clean'):
                 k = f'{s}_{aug}'
+                if self.dataset_class is ImageNet:
+                    kwargs = dict(split='train' if s == 'fit' else 'val')
+                else:
+                    kwargs = dict(train=(s == 'fit'))
                 if self.datasets[k] is None:
                     self.datasets[k] = self.dataset_class(self.data_dir,
-                                                          train=(s == 'fit'),
-                                                          transform=self.transforms[aug])
+                                                          transform=self.transforms[aug],
+                                                          **kwargs)
 
     def train_dataloader(self):
         """
         Returns:
              The train dataloader, which is the train-data with augmentations.
         """
-        return DataLoader(self.datasets['fit_aug'], batch_size=self.batch_size, num_workers=4, shuffle=True)
+        return DataLoader(self.datasets['fit_aug'], batch_size=self.batch_size, num_workers=56, shuffle=True)
+
+    def train_dataloader_no_aug(self):
+        """
+        Returns:
+             The train dataloader without augmentations.
+        """
+        return DataLoader(self.datasets['fit_no_aug'], batch_size=self.batch_size, num_workers=56, shuffle=True)
+
+    def train_dataloader_clean(self):
+        """
+        Returns:
+             The train dataloader without augmentations and normalizations (i.e. the original images in [0,1]).
+        """
+        return DataLoader(self.datasets['fit_clean'], batch_size=self.batch_size, num_workers=56, shuffle=True)
 
     def val_dataloader(self):
         """
@@ -384,22 +417,7 @@ class DataModule(LightningDataModule):
              The validation dataloader, which is the validation-data without augmentations
              (but possibly has normalization, if the training-dataloader has one).
         """
-        return DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=4)
-
-    def train_dataloader_no_aug(self):
-        """
-        Returns:
-             The train dataloader without augmentations.
-        """
-        return DataLoader(self.datasets['fit_no_aug'], batch_size=self.batch_size, num_workers=4, shuffle=True)
-
-    def train_dataloader_clean(self):
-        """
-        Returns:
-             The train dataloader without augmentations and normalizations (i.e. the original images in [0,1]).
-        """
-        return DataLoader(self.datasets['fit_clean'], batch_size=self.batch_size, num_workers=4, shuffle=True)
-
+        return DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=56)
 
 class LitVGG(pl.LightningModule):
     def __init__(self, arch_args: ArchitectureArgs, opt_args: OptimizationArgs, data_args: DataArgs):
@@ -417,7 +435,7 @@ class LitVGG(pl.LightningModule):
                                             arch_args.shuffle_blocks_output, arch_args.spatial_shuffle_only,
                                             arch_args.fixed_permutation_per_block)
         self.features = nn.Sequential(*blocks)
-        self.mlp = get_mlp(input_dim=n_features, output_dim=N_CLASSES, n_hidden_layers=arch_args.mlp_n_hidden_layers,
+        self.mlp = get_mlp(input_dim=n_features, output_dim=data_args.n_classes, n_hidden_layers=arch_args.mlp_n_hidden_layers,
                            hidden_dimensions=arch_args.mlp_hidden_dim, use_batch_norm=arch_args.use_batch_norm,
                            shuffle_blocks_output=arch_args.shuffle_blocks_output,
                            fixed_permutation_per_block=arch_args.fixed_permutation_per_block)
@@ -706,7 +724,8 @@ class LitCNN(pl.LightningModule):
                               replace_with_linear=arch_args.replace_with_linear,
                               randomly_sparse_connected_fractions=arch_args.randomly_sparse_connected_fractions,
                               in_spatial_size=data_args.spatial_size,
-                              in_channels=data_args.n_channels)
+                              in_channels=data_args.n_channels,
+                              n_classes=data_args.n_classes)
         self.loss = torch.nn.CrossEntropyLoss()
 
         self.arch_args = arch_args
@@ -888,7 +907,7 @@ class LitMLP(pl.LightningModule):
         """
         super(LitMLP, self).__init__()
         self.input_dim = data_args.n_channels * data_args.spatial_size ** 2
-        self.output_dim = N_CLASSES
+        self.output_dim = data_args.n_classes
         self.n_hidden_layers = arch_args.mlp_n_hidden_layers
         self.hidden_dim = arch_args.mlp_hidden_dim
         self.mlp = get_mlp(self.input_dim, self.output_dim, self.n_hidden_layers, self.hidden_dim,
