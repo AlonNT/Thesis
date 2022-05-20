@@ -154,9 +154,14 @@ def get_mlp(input_dim: int, output_dim: int, n_hidden_layers: int = 0,
 
     final_layer = get_possibly_sparse_linear_layer(in_features, output_dim, sparse_fractions[-1])
     if organize_as_blocks:
-        final_layer = nn.Sequential(final_layer)
-
-    layers.append(final_layer)
+        block_layers = [final_layer]
+        if len(hidden_dimensions) == 0:
+            block_layers = [nn.Flatten()] + block_layers
+        layers.append(nn.Sequential(*block_layers))
+    else:
+        if len(hidden_dimensions) == 0:
+            layers.append(nn.Flatten())
+        layers.append(final_layer)
 
     return nn.Sequential(*layers)
 
@@ -280,6 +285,7 @@ def get_cnn(conv_channels: List[int],
             fixed_permutation: Optional[List[bool]] = None,
             replace_with_linear: Optional[List[bool]] = None,
             randomly_sparse_connected_fractions: Optional[List[float]] = None,
+            adaptive_avg_pool_before_mlp: bool = False,
             in_spatial_size: int = 32,
             in_channels: int = 3,
             n_classes: int = 10) -> torch.nn.Sequential:
@@ -327,7 +333,7 @@ def get_cnn(conv_channels: List[int],
     zipped_args = zip(conv_channels, paddings, strides, kernel_sizes, use_max_pool,
                       shuffle_outputs, spatial_only_list, fixed_permutation_list, 
                       replace_with_linear, randomly_sparse_connected_fractions[:len(conv_channels)])
-    for out_channels, padding, stride, kernel_size, pool, shuf, spatial, fixed, linear, sparse_fraction in zipped_args:
+    for i, (out_channels, padding, stride, kernel_size, pool, shuf, spatial, fixed, linear, sparse_fraction) in enumerate(zipped_args):
         block_layers: List[nn.Module] = list()
 
         out_spatial_size = int(math.floor((in_spatial_size + 2 * padding - kernel_size) / stride + 1))
@@ -351,6 +357,9 @@ def get_cnn(conv_channels: List[int],
             block_layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
         if shuf:
             block_layers.append(ShuffleTensor(out_spatial_size, out_channels, spatial, fixed))
+        if adaptive_avg_pool_before_mlp and (i == len(conv_channels) - 1):
+            block_layers.append(nn.AdaptiveAvgPool2d((1, 1)))
+            out_spatial_size = 1
 
         blocks.append(nn.Sequential(*block_layers))
         in_channels = out_channels
@@ -1726,12 +1735,37 @@ class ImageNet(ImageFolder):
                              for idx, clss in enumerate(self.classes)
                              for cls in clss}
 
+        # For debugging purposes, read images from RAM instead of the storage
+        # self.images = list()
+        # for img_path, _ in tqdm(self.samples[:100]):
+        #     pil_image = self.loader(img_path)
+        #     self.images.append(pil_image)
+
     @property
     def split_folder(self) -> str:
         return os.path.join(self.root, self.split)
 
     def extra_repr(self) -> str:
         return "Split: {split}".format(**self.__dict__)
+    
+    # For debugging purposes, read images from RAM instead of the storage
+    # def __getitem__(self, index: int) -> Tuple[Any, Any]:
+    #     """
+    #     Args:
+    #         index (int): Index
+
+    #     Returns:
+    #         tuple: (sample, target) where target is class_index of the target class.
+    #     """
+    #     # import ipdb; ipdb.set_trace()
+    #     path, target = self.samples[index]
+    #     sample = self.images[index % 100]
+    #     if self.transform is not None:
+    #         sample = self.transform(sample)
+    #     if self.target_transform is not None:
+    #         target = self.target_transform(target)
+
+    #     return sample, target
 
 
 def load_meta_file(root: str, file: Optional[str] = 'meta.bin') -> Tuple[Dict[str, str], List[str]]:
