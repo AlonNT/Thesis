@@ -1,5 +1,5 @@
 from typing import Literal, Optional
-from pydantic import validator, PositiveInt
+from pydantic import NonNegativeInt, validator, PositiveInt
 from schemas.utils import ImmutableArgs
 
 
@@ -17,10 +17,10 @@ class DataArgs(ImmutableArgs):
     random_horizontal_flip: bool = True
 
     #: Whether to normalize of the values to a unit gaussian.
-    normalization_to_unit_gaussian: bool = False
+    normalization_to_unit_gaussian: bool = True
 
     #: Whether to normalize of the values to the interval [-1,+1].
-    normalization_to_plus_minus_one: bool = True
+    normalization_to_plus_minus_one: bool = False
 
     #: Indicator to shuffle the input images pixels before feeding to the neural-network.
     shuffle_images: bool = False
@@ -35,6 +35,10 @@ class DataArgs(ImmutableArgs):
     #: The firectory containing the data (for small dataset, i.e. not ImageNet, 
     #: the data will be downloaded to this directory if it's not already there).
     data_dir: str = "./data"
+
+    #: Number of CPUs processing the data (reading and transforming before feeding the network),
+    #: will be used when creating the DataLoader instance.
+    num_workers: NonNegativeInt = 12
 
     @validator('n_channels', always=True, pre=True)
     def calculate_n_channels(cls, v, values):

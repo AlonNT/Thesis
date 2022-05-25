@@ -247,6 +247,7 @@ class DataModule(LightningDataModule):
         self.n_channels = args.n_channels
         self.spatial_size = args.spatial_size
         self.data_dir = args.data_dir
+        self.num_workers = args.num_workers
         self.batch_size = batch_size
 
         transforms_list_no_aug, transforms_list_with_aug = self.get_transforms_lists(args)
@@ -395,21 +396,21 @@ class DataModule(LightningDataModule):
         Returns:
              The train dataloader, which is the train-data with augmentations.
         """
-        return DataLoader(self.datasets['fit_aug'], batch_size=self.batch_size, num_workers=8, shuffle=True)
+        return DataLoader(self.datasets['fit_aug'], batch_size=self.batch_size, num_workers=self.num_workers, shuffle=True)
 
     def train_dataloader_no_aug(self):
         """
         Returns:
              The train dataloader without augmentations.
         """
-        return DataLoader(self.datasets['fit_no_aug'], batch_size=self.batch_size, num_workers=8, shuffle=True)
+        return DataLoader(self.datasets['fit_no_aug'], batch_size=self.batch_size, num_workers=self.num_workers, shuffle=True)
 
     def train_dataloader_clean(self):
         """
         Returns:
              The train dataloader without augmentations and normalizations (i.e. the original images in [0,1]).
         """
-        return DataLoader(self.datasets['fit_clean'], batch_size=self.batch_size, num_workers=8, shuffle=True)
+        return DataLoader(self.datasets['fit_clean'], batch_size=self.batch_size, num_workers=self.num_workers, shuffle=True)
 
     def val_dataloader(self):
         """
@@ -417,7 +418,7 @@ class DataModule(LightningDataModule):
              The validation dataloader, which is the validation-data without augmentations
              (but possibly has normalization, if the training-dataloader has one).
         """
-        return DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=8)
+        return DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=self.num_workers)
 
 class LitVGG(pl.LightningModule):
     def __init__(self, arch_args: ArchitectureArgs, opt_args: OptimizationArgs, data_args: DataArgs):
@@ -827,7 +828,7 @@ class LitCNN(pl.LightningModule):
                                     isinstance(layer, nn.Linear) or 
                                     isinstance(layer, RandomlySparseConnected)]
         parameters = list(itertools.chain.from_iterable(parameters_generators))
-        assert len(parameters) > 0, 'Every block should contain a convolutional / linear layer.'
+        assert len(parameters) > 0, f'Every block should contain a convolutional / linear layer.\nblock is\n{block}'
         return parameters
 
     def get_regularization_loss(self):
