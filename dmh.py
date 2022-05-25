@@ -395,21 +395,21 @@ class DataModule(LightningDataModule):
         Returns:
              The train dataloader, which is the train-data with augmentations.
         """
-        return DataLoader(self.datasets['fit_aug'], batch_size=self.batch_size, num_workers=16, shuffle=True)
+        return DataLoader(self.datasets['fit_aug'], batch_size=self.batch_size, num_workers=8, shuffle=True)
 
     def train_dataloader_no_aug(self):
         """
         Returns:
              The train dataloader without augmentations.
         """
-        return DataLoader(self.datasets['fit_no_aug'], batch_size=self.batch_size, num_workers=16, shuffle=True)
+        return DataLoader(self.datasets['fit_no_aug'], batch_size=self.batch_size, num_workers=8, shuffle=True)
 
     def train_dataloader_clean(self):
         """
         Returns:
              The train dataloader without augmentations and normalizations (i.e. the original images in [0,1]).
         """
-        return DataLoader(self.datasets['fit_clean'], batch_size=self.batch_size, num_workers=16, shuffle=True)
+        return DataLoader(self.datasets['fit_clean'], batch_size=self.batch_size, num_workers=8, shuffle=True)
 
     def val_dataloader(self):
         """
@@ -417,7 +417,7 @@ class DataModule(LightningDataModule):
              The validation dataloader, which is the validation-data without augmentations
              (but possibly has normalization, if the training-dataloader has one).
         """
-        return DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=16)
+        return DataLoader(self.datasets['validate_no_aug'], batch_size=self.batch_size, num_workers=8)
 
 class LitVGG(pl.LightningModule):
     def __init__(self, arch_args: ArchitectureArgs, opt_args: OptimizationArgs, data_args: DataArgs):
@@ -694,41 +694,34 @@ class LitCNN(pl.LightningModule):
             strides = [1, 2] * 5
             linear_channels = [64*a]
         elif model_name == 'D-CONV-ResNet18-style':
-            conv_channels = [a,  # a should be 64
-                             a,
-                             a,
-                             a,
-                             a,
-                             2*a,  # 2*a should be 128
-                             2*a,
-                             2*a,
-                             2*a,
-                             4*a,  # 4*a should be 256
-                             4*a,
-                             4*a,
-                             4*a,
-                             8*a,  # 8*a should be 512
-                             8*a,
-                             8*a,
-                             8*a]
+            conv_channels = [a,
+                             a, a, a, a,           # a should be 64
+                             2*a, 2*a, 2*a, 2*a,  # 2*a should be 128
+                             4*a, 4*a, 4*a, 4*a,  # 4*a should be 256
+                             8*a, 8*a, 8*a, 8*a   # 8*a should be 512
+                            ]
             kernel_sizes = [7] + [3] * 16
-            strides = [2,  # output-size 112x112
-                       2,  # output-size 56x56
-                       1,
-                       1,
-                       1,
-                       2,  # output-size 28x28
-                       1,
-                       1,
-                       1,
-                       2,  # output-size 14x14
-                       1,
-                       1,
-                       1,
-                       2,  # output-size 7x7
-                       1,
-                       1,
-                       1]
+            strides = [2,           # output-size 112x112
+                       2, 1, 1, 1,  # output-size 56x56
+                       2, 1, 1, 1,  # output-size 28x28
+                       2, 1, 1, 1,  # output-size 14x14
+                       2, 1, 1, 1   # output-size 7x7
+                       ]
+            linear_channels = []
+        elif model_name == 'D-CONV-ResNet18-style-1st-block-stride-1':
+            conv_channels = [a,
+                             a, a, a, a,           # a should be 64
+                             2*a, 2*a, 2*a, 2*a,  # 2*a should be 128
+                             4*a, 4*a, 4*a, 4*a,  # 4*a should be 256
+                             8*a, 8*a, 8*a, 8*a   # 8*a should be 512
+                            ]
+            kernel_sizes = [7] + [3] * 16
+            strides = [2,           # output-size 112x112
+                       1, 1, 1, 1,  # output-size 56x56, because we use max-pool beforehand
+                       2, 1, 1, 1,  # output-size 28x28
+                       2, 1, 1, 1,  # output-size 14x14
+                       2, 1, 1, 1   # output-size 7x7
+                       ]
             linear_channels = []
         elif model_name == 'D-FC':
             conv_channels, kernel_sizes, strides = [], [], []
@@ -775,6 +768,7 @@ class LitCNN(pl.LightningModule):
                               replace_with_linear=arch_args.replace_with_linear,
                               randomly_sparse_connected_fractions=arch_args.randomly_sparse_connected_fractions,
                               adaptive_avg_pool_before_mlp=arch_args.adaptive_avg_pool_before_mlp,
+                              max_pool_after_first_conv=arch_args.max_pool_after_first_conv,
                               in_spatial_size=data_args.spatial_size,
                               in_channels=data_args.n_channels,
                               n_classes=data_args.n_classes)

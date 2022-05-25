@@ -92,13 +92,15 @@ class ArchitectureArgs(ImmutableArgs):
     #: The scaling factor for the basic CNN (following $\alpha$ in "Towards Learning Convolutions from Scratch").
     alpha: PositiveInt = 32
 
-    #: If it's true, use adaptive-average-pooling to 1x1 before feeding to the final MLP 
-    #: (same spirit as done in ResNets)
+    #: If it's true, use adaptive-average-pooling to 1x1 before feeding to the final MLP (like done in ResNets).
     adaptive_avg_pool_before_mlp: bool = False
+
+    #: If it's true, after first conv->bn->relu use 3x3 max-pool with stride=2 and padding (like done in ResNets).
+    max_pool_after_first_conv: bool = False
 
     @validator('model_name', always=True)
     def validate_model_name(cls, v):
-        allowed_values = list(configs.keys()) + ['mlp'] + [f'{a}-{b}' for a in ['S', 'D'] for b in ['CONV', 'FC']] + ['D-CONV++', 'D-CONV-ResNet18-style']
+        allowed_values = list(configs.keys()) + ['mlp'] + [f'{a}-{b}' for a in ['S', 'D'] for b in ['CONV', 'FC']] + ['D-CONV++', 'D-CONV-ResNet18-style', 'D-CONV-ResNet18-style-1st-block-stride-1']
         assert v in allowed_values, f"model_name {v} is not supported, should be one of {allowed_values}"
         return v
 

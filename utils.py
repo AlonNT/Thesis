@@ -286,6 +286,7 @@ def get_cnn(conv_channels: List[int],
             replace_with_linear: Optional[List[bool]] = None,
             randomly_sparse_connected_fractions: Optional[List[float]] = None,
             adaptive_avg_pool_before_mlp: bool = False,
+            max_pool_after_first_conv: bool = False,
             in_spatial_size: int = 32,
             in_channels: int = 3,
             n_classes: int = 10) -> torch.nn.Sequential:
@@ -352,11 +353,13 @@ def get_cnn(conv_channels: List[int],
 
         block_layers.append(nn.BatchNorm2d(out_channels))
         block_layers.append(nn.ReLU())
-
+        
         if pool:
             block_layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
         if shuf:
             block_layers.append(ShuffleTensor(out_spatial_size, out_channels, spatial, fixed))
+        if max_pool_after_first_conv and (i == 0):
+            block_layers.append(nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
         if adaptive_avg_pool_before_mlp and (i == len(conv_channels) - 1):
             block_layers.append(nn.AdaptiveAvgPool2d((1, 1)))
             out_spatial_size = 1
