@@ -284,6 +284,7 @@ def get_cnn(conv_channels: List[int],
             spatial_only: Optional[List[bool]] = None,
             fixed_permutation: Optional[List[bool]] = None,
             replace_with_linear: Optional[List[bool]] = None,
+            replace_with_bottleneck: Optional[List[int]] = None,
             randomly_sparse_connected_fractions: Optional[List[float]] = None,
             adaptive_avg_pool_before_mlp: bool = False,
             max_pool_after_first_conv: bool = False,
@@ -304,6 +305,9 @@ def get_cnn(conv_channels: List[int],
     :param spatial_only: The argument to pass to `ShuffleTensor` (see doc there).
     :param fixed_permutation: The argument to pass to `ShuffleTensor` (see doc there).
     :param replace_with_linear: Whether to replace each conv layer with a linear layer of the same expressivity.
+    :param replace_with_bottleneck: Whether to replace each conv layer with a "bottleneck" linear layer 
+        of the same expressivity, meaning a linear layer of low rank constraint (e.g. 100,000 -> 1,000 -> 100,000).
+        The number represent the middle linear layer dimensionality.
     :param in_spatial_size: Will be used to infer input dimension for the first affine layer.
     :param in_channels: Number of channels in the input tensor.
     :param n_classes: Number of classes (i.e. determines the size of the prediction vector 
@@ -328,25 +332,39 @@ def get_cnn(conv_channels: List[int],
         fixed_permutation, len(conv_channels), default=True)
     replace_with_linear = get_list_of_arguments(
         replace_with_linear, len(conv_channels), default=False)
+    replace_with_bottleneck = get_list_of_arguments(
+        replace_with_bottleneck, len(conv_channels), default=0)
     randomly_sparse_connected_fractions = get_list_of_arguments(
         randomly_sparse_connected_fractions, len(conv_channels) + len(linear_channels) + 1, default=0)
 
     zipped_args = zip(conv_channels, paddings, strides, kernel_sizes, use_max_pool,
                       shuffle_outputs, spatial_only_list, fixed_permutation_list, 
-                      replace_with_linear, randomly_sparse_connected_fractions[:len(conv_channels)])
-    for i, (out_channels, padding, stride, kernel_size, pool, shuf, spatial, fixed, linear, sparse_fraction) in enumerate(zipped_args):
+                      replace_with_linear, replace_with_bottleneck, 
+                      randomly_sparse_connected_fractions[:len(conv_channels)])
+    for i, (out_channels, padding, stride, kernel_size, pool, 
+            shuf, spatial, fixed, 
+            linear, bottleneck, sparse_fraction) in enumerate(zipped_args):
         block_layers: List[nn.Module] = list()
 
         out_spatial_size = int(math.floor((in_spatial_size + 2 * padding - kernel_size) / stride + 1))
         if pool:
             out_spatial_size = int(math.floor(out_spatial_size / 2))
+        
+        in_features = in_channels * (in_spatial_size ** 2)
+        out_features = out_channels * (out_spatial_size ** 2)
 
-        if linear or (sparse_fraction > 0):
-            assert not (linear and (sparse_fraction > 0)), 'Select one of linear/sparse-linear, not both.'
+        if bottleneck > 0:
+            assert not (linear or (sparse_fraction > 0)), \
+                'When bottleneck is greater than 0, both linear and sparse_fraction should be turned off.'
             block_layers.append(nn.Flatten())
-            block_layers.append(get_possibly_sparse_linear_layer(in_features=in_channels * (in_spatial_size ** 2), 
-                                                                 out_features=out_channels * (out_spatial_size ** 2),
-                                                                 sparse_fraction=sparse_fraction))
+            block_layers.append(nn.Linear(in_features, bottleneck))
+            block_layers.append(nn.Linear(bottleneck, out_features))
+            block_layers.append(View(shape=(out_channels, out_spatial_size, out_spatial_size)))
+        elif linear or (sparse_fraction > 0):
+            assert not (linear and (sparse_fraction > 0)), \
+                'Select one of linear/sparse-linear, not both.'
+            block_layers.append(nn.Flatten())
+            block_layers.append(get_possibly_sparse_linear_layer(in_features, out_features, sparse_fraction))
             block_layers.append(View(shape=(out_channels, out_spatial_size, out_spatial_size)))
         else:
             block_layers.append(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding))

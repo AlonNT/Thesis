@@ -767,6 +767,7 @@ class LitCNN(pl.LightningModule):
                               spatial_only=arch_args.spatial_shuffle_only,
                               fixed_permutation=arch_args.fixed_permutation_per_block,
                               replace_with_linear=arch_args.replace_with_linear,
+                              replace_with_bottleneck=arch_args.replace_with_bottleneck,
                               randomly_sparse_connected_fractions=arch_args.randomly_sparse_connected_fractions,
                               adaptive_avg_pool_before_mlp=arch_args.adaptive_avg_pool_before_mlp,
                               max_pool_after_first_conv=arch_args.max_pool_after_first_conv,

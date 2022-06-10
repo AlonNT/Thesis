@@ -32,6 +32,10 @@ class ArchitectureArgs(ImmutableArgs):
     #: If it's true - replace the corresponding conv layer with a linear layer of the same expressivity.
     replace_with_linear: Union[bool, List[bool]] = False
 
+    #: If it's strictly positive - replace the corresponding conv layer with a "bottleneck" of that dimensionality,
+    #: of the same expressivity as the conv layer.
+    replace_with_bottleneck: Union[NonNegativeInt, List[NonNegativeInt]] = 0
+
     #: If the fraction is strictly positive, replace the corresponding conv layer with a sparsely connected
     #: linear layer such that each output neuron is connected to a random subset of size
     #: which is a fraction of the whole number of input neurons.
