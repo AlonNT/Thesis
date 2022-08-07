@@ -92,9 +92,9 @@ class LayerwiseVGG(LitVGG):
             in_channels, height, width = self.shapes[i + 1]
             assert height == width, "Only square tensors are supported"
             spatial_size = height
-            upsampling_kwargs = dict(out_channels=self.data_args.n_channels,
+            upsampling_kwargs = dict(desired_out_channels=self.data_args.n_channels,
                                      in_spatial_size=spatial_size,
-                                     out_spatial_size=self.data_args.spatial_size            ) if args.upsample else dict()
+                                     out_spatial_size=self.data_args.spatial_size) if args.upsample else dict()
             auxiliary_network = get_auto_decoder(in_channels, **upsampling_kwargs)
             reconstruction_auxiliary_networks.append(auxiliary_network)
 
@@ -185,7 +185,7 @@ class LayerwiseVGG(LitVGG):
 
 
 def get_auto_decoder(in_channels: int,
-                     out_channels: int = 3,
+                     desired_out_channels: int = 3,
                      in_spatial_size: Optional[int] = None,
                      out_spatial_size: Optional[int] = None) -> nn.Sequential:
     """Gets an auxiliary-network predicting the original input image from the given tensor.
@@ -197,7 +197,7 @@ def get_auto_decoder(in_channels: int,
 
     Args:
         in_channels: Number of channels in the input tensor of the returned aux-net.
-        out_channels: Number of channels in the output tensor of the returned aux-net.
+        desired_out_channels: Number of channels in the output tensor of the returned aux-net.
         in_spatial_size: If given, this is the source image size (to be upsampled).
         out_spatial_size: If given, this is the target image size (to be upsampled to).
     Returns:
@@ -221,7 +221,7 @@ def get_auto_decoder(in_channels: int,
             in_channels = out_channels
 
     # Convolution layer with 1x1 kernel to change channels to out_channels.
-    layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=1))
+    layers.append(nn.Conv2d(in_channels, desired_out_channels, kernel_size=1))
 
     return nn.Sequential(*layers)
 
