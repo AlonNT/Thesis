@@ -1,10 +1,12 @@
+import numpy as np
 import torch
 
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import wandb
 from torch import nn
+from torchvision.transforms.functional import resize
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer.states import RunningStage
 
@@ -26,9 +28,13 @@ class LayerwiseVGG(LitVGG):
 
     def __init__(self, args: Args):
         super().__init__(args.arch, args.opt, args.data)
-        self.aux_nets = nn.ModuleList(self.get_auxiliary_networks(args.layerwise))
+        self.layerwise_args: LayerwiseArgs = args.layerwise
+        self.reconstruction_loss = nn.L1Loss() if args.layerwise.ssl else None  # TODO: Consider trying L2Loss
 
-    def get_auxiliary_networks(self, args: LayerwiseArgs) -> List[nn.Module]:
+        self.classification_auxiliary_networks = self.init_classification_auxiliary_networks()
+        self.reconstruction_auxiliary_networks = self.init_reconstruction_auxiliary_networks()
+
+    def init_classification_auxiliary_networks(self) -> nn.ModuleList:
         """Get the auxiliary networks predicting the target classes' scores.
 
         For each intermediate module in the neural-network, create an auxiliary network which gets the output
@@ -38,27 +44,61 @@ class LayerwiseVGG(LitVGG):
         Returns:
             A list of auxiliary networks.
         """
-        aux_nets = list()
+        args = self.layerwise_args
+        classification_auxiliary_networks = list()
+
         for i in range(len(self.features) - 1):
             channels, height, width = self.shapes[i + 1]
             assert height == width, "Only square tensors are supported"
             spatial_size = height
 
             if args.pred_aux_type == 'mlp':
-                aux_net = get_mlp(input_dim=channels * height * width,
-                                  output_dim=self.data_args.n_classes,
-                                  n_hidden_layers=args.aux_mlp_n_hidden_layers,
-                                  hidden_dimensions=args.aux_mlp_hidden_dim)
+                auxiliary_network = get_mlp(input_dim=channels * height * width,
+                                            output_dim=self.data_args.n_classes,
+                                            n_hidden_layers=args.aux_mlp_n_hidden_layers,
+                                            hidden_dimensions=args.aux_mlp_hidden_dim)
             else:  # args.pred_aux_type == 'cnn'
-                aux_net = get_cnn(conv_channels=[channels],
-                                  linear_channels=[args.aux_mlp_hidden_dim] * args.aux_mlp_n_hidden_layers,
-                                  in_spatial_size=spatial_size, in_channels=channels,
-                                  n_classes=self.data_args.n_classes)
-            aux_nets.append(aux_net)
+                auxiliary_network = get_cnn(conv_channels=[channels],
+                                            linear_channels=[args.aux_mlp_hidden_dim] * args.aux_mlp_n_hidden_layers,
+                                            in_spatial_size=spatial_size, in_channels=channels,
+                                            n_classes=self.data_args.n_classes)
 
-        aux_nets.append(self.mlp)  # The "auxiliary network" used to train the last conv block is the network's mlp
+            classification_auxiliary_networks.append(auxiliary_network)
 
-        return aux_nets
+        # The "auxiliary network" used to train the last conv block is the network's mlp
+        classification_auxiliary_networks.append(self.mlp)
+
+        return nn.ModuleList(classification_auxiliary_networks)
+
+    def init_reconstruction_auxiliary_networks(self) -> Optional[nn.ModuleList]:
+        """Initializes the decoders (predicting the original input image) from the different intermediate tensors.
+
+        These decoders essentially make every subnetwork (layers 1->...->i) an auto-encoder.
+        The gradients propagated from these decoders are used to update the intermediate layers,
+        therefore enforcing them to learn "good" features, which hopefully benefit downstream layers.
+
+        Args:
+            args: The arguments defining the layerwise training procedure.
+        Returns:
+            A list of nn.Sequential modules, each is a decoder.
+        """
+        args = self.layerwise_args
+
+        if not args.ssl:
+            return None
+
+        reconstruction_auxiliary_networks = list()
+        for i in range(len(self.features) - 1):
+            in_channels, height, width = self.shapes[i + 1]
+            assert height == width, "Only square tensors are supported"
+            spatial_size = height
+            upsampling_kwargs = dict(out_channels=self.data_args.n_channels,
+                                     in_spatial_size=spatial_size,
+                                     out_spatial_size=self.data_args.spatial_size) if args.upsample else dict()
+            auxiliary_network = get_auto_decoder(in_channels, **upsampling_kwargs)
+            reconstruction_auxiliary_networks.append(auxiliary_network)
+
+        return nn.ModuleList(reconstruction_auxiliary_networks)
 
     def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], stage: RunningStage):
         """Performs train/validation step, depending on the given `stage`.
@@ -77,27 +117,113 @@ class LayerwiseVGG(LitVGG):
             The loss.
         """
         inputs, labels = batch
-        intermediate_losses = list()
+        classification_losses = list()
+        reconstruction_losses = list()
 
         x = inputs.clone()
         for i in range(len(self.features)):
             x = self.features[i](x)
-            logits = self.aux_nets[i](x)
-            loss = self.loss(logits, labels)
-            predictions = torch.argmax(logits, dim=1)
-            accuracy = torch.sum(labels == predictions).item() / len(labels)
 
-            prefix = f'{stage.value}'
-            if i < len(self.features) - 1:
-                prefix += f'_module_{i}'
+            prefix = f'{stage.value}' if (i == len(self.features) - 1) else f'{stage.value}_module_{i}'
+            classification_losses.append(self.get_classification_loss(x, labels, i, prefix))
+            if self.layerwise_args.ssl:
+                reconstruction_losses.append(self.get_reconstruction_loss(inputs, x, i, prefix))
 
-            self.log(f'{prefix}_loss', loss)
-            self.log(f'{prefix}_accuracy', accuracy, on_epoch=True, on_step=False)
-
-            intermediate_losses.append(loss)
             x = x.detach()
 
-        return sum(intermediate_losses)
+        overall_loss = sum(classification_losses)
+        if self.layerwise_args.ssl:
+            overall_loss += sum(reconstruction_losses)
+
+        return overall_loss
+
+    @property
+    def shifts(self) -> Optional[tuple[int]]:
+        return tuple(np.linspace(start=self.kernel_sizes[0],
+                                 stop=self.data_args.spatial_size // 2,
+                                 num=len(self.features),
+                                 dtype=int)) if self.layerwise_args.shift_ssl_labels else None
+
+    def get_classification_loss(self, x: torch.Tensor, labels: torch.Tensor, i: int, prefix: str) -> torch.Tensor:
+        logits = self.aux_nets[i](x)
+        classification_loss = self.loss(logits, labels)
+        predictions = torch.argmax(logits, dim=1)
+        accuracy = torch.sum(labels == predictions).item() / len(labels)
+
+        if i < len(self.features) - 1:
+            prefix += f'_module_{i}'
+
+        self.log(f'{prefix}_loss', classification_loss)
+        self.log(f'{prefix}_accuracy', accuracy, on_epoch=True, on_step=False)
+
+        return classification_loss
+
+    def get_reconstruction_loss(self, inputs: torch.Tensor, x: torch.Tensor, i: int, prefix: str) -> torch.Tensor:
+        reconstructed_inputs = self.auto_decoders[i](x)
+        reconstruction_labels = inputs.detach()
+        reconstructed_input_spatial_size = reconstructed_inputs.shape[-1]
+        if reconstructed_input_spatial_size != self.data_args.spatial_size:
+            assert not self.layerwise_args.upsample, \
+                'If `upsample` was given, the reconstructed inputs should be the same size as the inputs.'
+            assert reconstructed_input_spatial_size < self.data_args.spatial_size, \
+                'The reconstructed inputs should be smaller than the original inputs.'
+            reconstruction_labels = resize(reconstruction_labels, size=[reconstructed_input_spatial_size] * 2)
+
+        if self.layerwise_args.shift_ssl_labels:
+            assert self.layerwise_args.upsample, \
+                'When shifting reconstruction labels, it makes more sense to upsample during reconstruction'
+            reconstruction_labels = torch.roll(reconstruction_labels, shifts=2 * (self.shifts[i],), dims=(2, 3))
+
+        reconstruction_loss = self.reconstruction_loss(reconstructed_inputs, reconstruction_labels)
+
+        if i < len(self.features) - 1:
+            prefix += f'_module_{i}'
+
+        self.log(f'{prefix}_loss', reconstruction_loss)
+
+        return reconstruction_loss
+
+
+def get_auto_decoder(in_channels: int,
+                     out_channels: int = 3,
+                     in_spatial_size: Optional[int] = None,
+                     out_spatial_size: Optional[int] = None) -> nn.Sequential:
+    """Gets an auxiliary-network predicting the original input image from the given tensor.
+
+    This network predicts an image, i.e. a tensor of shape `target_image_size` x `target_image_size` x 3,
+    given an input tensor of size `image_size` x `image_size` x `channels`
+    If `image_size` and `target_image_size` are given, the aux-net first upsample using a stack of ConvTranspose2d.
+    Each up-sampling is done by doubling the spatial size and halving the number of channels.
+
+    Args:
+        in_channels: Number of channels in the input tensor of the returned aux-net.
+        out_channels: Number of channels in the output tensor of the returned aux-net.
+        in_spatial_size: If given, this is the source image size (to be upsampled).
+        out_spatial_size: If given, this is the target image size (to be upsampled to).
+    Returns:
+        The auxiliary network.
+    """
+    layers: List[nn.Module] = list()
+
+    assert (in_spatial_size is None) == (out_spatial_size is None), \
+        "image_size and target_image_size should be both None (in which case no up-sampling is done), " \
+        "or both not None (in which case upsampling is done from image_size to target_image_size)."
+
+    if in_spatial_size is not None:
+        while in_spatial_size != out_spatial_size:
+            out_channels = in_channels // 2
+
+            layers.append(nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2))
+            layers.append(nn.BatchNorm2d(out_channels))
+            layers.append(nn.ReLU())
+
+            in_spatial_size *= 2
+            in_channels = out_channels
+
+    # Convolution layer with 1x1 kernel to change channels to out_channels.
+    layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=1))
+
+    return nn.Sequential(*layers)
 
 
 def initialize_model_trained_layerwise(args: Args, wandb_logger: WandbLogger):

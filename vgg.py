@@ -69,42 +69,6 @@ configs = {
 }
 
 
-def get_ssl_aux_net(channels: int,
-                    image_size: Optional[int] = None,
-                    target_image_size: Optional[int] = None) -> nn.Sequential:
-    """
-    Build an auxiliary network suited for self-supervised learning.
-    This means a network which predicts an image (a tensor of shape H x W x 3).
-    If image_size and target_image_size are given, the aux-net first upsample using a stack of ConvTranspose2d.
-
-    :param channels: Number of channels in the input tensor to the return aux-net.
-    :param image_size: If given, this is the source image size (to be upsampled).
-    :param target_image_size: If given, this is the target image size (to be upsampled to).
-    :return: The auxiliary network.
-    """
-    layers: List[nn.Module] = list()
-
-    assert (image_size is None) == (target_image_size is None), \
-        "image_size and target_image_size should be both None (in which case no up-sampling is done), " \
-        "or both not None (in which case upsampling is done from image_size to target_image_size)."
-
-    in_channels = channels
-    if image_size is not None:
-        while image_size != target_image_size:
-            # Upsample by doubling the spatial size and halving the number of channels.
-            out_channels = in_channels // 2
-            layers.append(nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2))
-            layers.append(nn.BatchNorm2d(out_channels))
-            layers.append(nn.ReLU())
-            image_size *= 2
-            in_channels = out_channels
-
-    # Convolution layer with 1x1 kernel to change channels to 3.
-    layers.append(nn.Conv2d(in_channels, out_channels=3, kernel_size=1))
-
-    return nn.Sequential(*layers)
-
-
 def get_list_of_arguments_for_config(config: List[Union[int, str]], arg) -> list:
     """Given an argument `arg`, returns a list of arguments for a given config of a VGG model,
     where this argument is repeated for conv blocks (and None in the positions of non-conv blocks).
@@ -297,7 +261,7 @@ def get_blocks(config: List[Union[int, str]],
             pred_auxiliary_nets.append(pred_aux_net)
 
             upsampling_kwargs = dict(image_size=ssl_input_image_size, target_image_size=32) if upsample else dict()
-            ssl_auxiliary_nets.append(get_ssl_aux_net(channels=out_channels, **upsampling_kwargs))
+            ssl_auxiliary_nets.append(get_auto_decoder(channels=out_channels, **upsampling_kwargs))
 
     return blocks, pred_auxiliary_nets, ssl_auxiliary_nets, block_output_dimension
 
