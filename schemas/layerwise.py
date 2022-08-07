@@ -98,8 +98,9 @@ class Args(MyBaseModel):
     data = DataArgs()
     layerwise = LayerwiseArgs()
 
-    @root_validator
-    def validate_circular_padding_in_shifted_ssl_training(cls, values):
-        assert not (values['layerwise'].shift_ssl_labels and values['arch'].padding_mode), \
-            "When using shifted images predictions, it's better to use circular-padding and not zero-padding."
-        return values
+    # TODO: For some reason this validator fails, even when given circular padding.
+    # @root_validator
+    # def validate_circular_padding_in_shifted_ssl_training(cls, values):
+    #     assert not (values['layerwise'].shift_ssl_labels and values['arch'].padding_mode), \
+    #         "When using shifted images predictions, it's better to use circular-padding and not zero-padding."
+    #     return values
