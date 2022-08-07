@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from typing import List, Union, Tuple, Optional
 
-from utils import get_mlp, get_cnn, ShuffleTensor
 
 # Configurations for the VGG models family.
 # A number indicates number of channels in a convolution block, and M/A denotes a MaxPool/AvgPool layer.
@@ -169,6 +168,8 @@ def get_vgg_blocks(config: List[Union[int, str]],
         A tuple containing the list of nn.Modules, and an integers which is the number of output features
         (will be useful later when feeding to a linear layer).
     """
+    from utils import ShuffleTensor
+
     blocks: List[nn.Module] = list()
     out_channels = in_channels
     
@@ -244,6 +245,8 @@ def get_blocks(config: List[Union[int, str]],
     :return: The blocks, the prediction auxiliary networks, the prediction auxiliary networks,
              and the dimension of the last layer (will be useful when feeding into a liner layer later).
     """
+    raise DeprecationWarning('get_blocks is deprecated Use get_vgg_blocks instead.')
+
     blocks: List[nn.Module] = list()
     pred_auxiliary_nets: List[Optional[nn.Module]] = list()
     ssl_auxiliary_nets: List[Optional[nn.Module]] = list()
@@ -316,6 +319,8 @@ class VGG(nn.Module):
         :param dropout_prob: When positive, add dropout after each non-linearity.
         :param padding_mode: Should be 'zeros' or 'circular' indicating the padding mode of each Conv layer.
         """
+        raise DeprecationWarning('VGG is deprecated Use LitVGG instead.')
+
         super(VGG, self).__init__()
         layers, _, _, features_output_dimension = get_blocks(configs[vgg_name], dropout_prob, padding_mode)
         self.features = nn.Sequential(*layers)
@@ -371,6 +376,8 @@ class VGGwDGL(nn.Module):
                          Otherwise, the SSL outputs are of the same spatial size
                          as the corresponding block's output tensor.
         """
+        raise DeprecationWarning('VGGwDGL is deprecated. Use LayerwiseVGG instead.')
+
         super(VGGwDGL, self).__init__()
         blocks, auxiliary_networks, ssl_auxiliary_nets, _ = get_blocks(configs[vgg_name],
                                                                        dropout_prob,

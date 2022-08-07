@@ -75,9 +75,11 @@ class DataArgs(ImmutableArgs):
     @validator('n_classes', always=True, pre=True)
     def calculate_n_classes(cls, v, values):
         dataset_name = values['dataset_name']
-        if dataset_name in ['CIFAR10', 'CIFAR100', 'MNIST', 'FashionMNIST']:
+        if dataset_name in ['CIFAR10', 'MNIST', 'FashionMNIST']:
             n_classes = 10
-        elif dataset_name in ['ImageNet']:
+        elif dataset_name == 'CIFAR100':
+            n_classes = 100
+        elif dataset_name == 'ImageNet':
             n_classes = 1000
         else:
             raise ValueError(f'{dataset_name=} is not supported.')

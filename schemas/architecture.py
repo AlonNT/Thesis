@@ -3,10 +3,6 @@ from pydantic import validator
 from pydantic.types import PositiveInt
 
 from schemas.utils import ImmutableArgs, NonNegativeInt, NonOneFraction, NonNegativeFloat
-from vgg import configs
-
-
-DEFAULT_PRETRAINED_PATHS = {model_name: f'alonnt/thesis/{model_name}:best' for model_name in configs.keys()}
 
 
 class ArchitectureArgs(ImmutableArgs):
@@ -15,7 +11,7 @@ class ArchitectureArgs(ImmutableArgs):
     model_name: str = 'VGG11c'
 
     #: Whether to put the (avg/max) pool layers as separate blocks, or in the end of the previous conv block.
-    pool_as_separate_blocks: bool = True
+    pool_as_separate_blocks: bool = True  # TODO: consider changing this to False.
 
     #: If it's true - shuffle the output of each block in the network.
     #: The output will be shuffled spatially only, meaning that the channels dimension will stay intact.
@@ -66,11 +62,12 @@ class ArchitectureArgs(ImmutableArgs):
     stride: Union[PositiveInt, List[PositiveInt]] = 1
 
     #: The padding amount to use in each convolution-layer.
-    padding: Union[None, NonNegativeInt, List[NonNegativeInt]] = None
+    padding: Union[None, NonNegativeInt, List[NonNegativeInt]] = 1
 
-    #: The pooling size and stride to use in the AvgPool / MaxPool layers.
-    pool_size: Union[PositiveInt, List[PositiveInt]] = 4
-    pool_stride: Union[PositiveInt, List[PositiveInt]] = 4
+    # TODO: Consider deleting this, if these are not used.
+    # #: The pooling size and stride to use in the AvgPool / MaxPool layers.
+    # pool_size: Union[PositiveInt, List[PositiveInt]] = 4
+    # pool_stride: Union[PositiveInt, List[PositiveInt]] = 4
 
     #: Whether to use batch-normalization layer after the Conv -> ReLU (and possible pool) part in the block.
     use_batch_norm: Union[bool, List[bool]] = True
@@ -104,14 +101,9 @@ class ArchitectureArgs(ImmutableArgs):
 
     @validator('model_name', always=True)
     def validate_model_name(cls, v):
-        allowed_values = list(configs.keys()) + ['mlp'] + [f'{a}-{b}' for a in ['S', 'D'] for b in ['CONV', 'FC']] + ['D-CONV++', 'D-CONV-ResNet18-style', 'D-CONV-ResNet18-style-1st-block-stride-1']
-        assert v in allowed_values, f"model_name {v} is not supported, should be one of {allowed_values}"
+        allowed_values = (['mlp'] +
+                          [f'{a}-{b}' for a in ['S', 'D'] for b in ['CONV', 'FC']] +
+                          ['D-CONV++', 'D-CONV-ResNet18-style', 'D-CONV-ResNet18-style-1st-block-stride-1'])
+        assert v.startswith('VGG') or (v in allowed_values), \
+            f"model_name {v} is not supported, should start with 'VGG' or be one of {allowed_values}"
         return v
-
-    # TODO Commented-out, because for some reason `model_name` is not in `values` (e.g. KeyError: 'model_name').
-    #      Handle this when we'll want to use pretrained models.
-    # @validator('pretrained_path', always=True)
-    # def set_pretrained_path(cls, v, values):
-    #     if v is None:
-    #         v = DEFAULT_PRETRAINED_PATHS.get(values['model_name'])
-    #     return v

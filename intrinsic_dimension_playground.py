@@ -1,12 +1,11 @@
+import os
 import torch
 import wandb
-import faiss
 import tikzplotlib
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.figure_factory as ff
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
@@ -16,13 +15,11 @@ from scipy.stats import special_ortho_group
 from sklearn.decomposition import PCA
 from pathlib import Path
 
-from patches import sample_random_patches
-from dmh import (DataModule, 
-                 get_estimates_matrix, 
-                 get_patches_not_too_close_to_one_another, 
-                 log_final_estimate,
-                 LocallyLinearNetwork)
-from schemas.intrinsic_dimension_playground import Args
+from utils import sample_random_patches, run_kmeans_clustering
+from int_dim import (DataModule,
+                     get_estimates_matrix,
+                     get_patches_not_too_close_to_one_another)
+from schemas.intrinsic_dimension_playground import Args, IntDimArgs
 from schemas.dmh import Args as ArgsForDMH
 from utils import get_args, configure_logger, log_args, calc_whitening_from_dataloader, get_args_from_flattened_dict
 
@@ -78,7 +75,7 @@ def get_figure_int_dim_different_dataset_sizes(n, m, noise_std, base_n_points, s
     return fig
 
 
-def gaussian_playground_main(args: Args):
+def gaussian_playground_main(args: IntDimArgs):
     figures = dict()
     for m, n in tqdm(list(zip(args.gaussian_dimension, args.extrinsic_dimension))):
         df_mle = pd.DataFrame(0, index=np.arange(start=args.start_k, stop=args.n_points), columns=args.noise_std)
@@ -114,14 +111,12 @@ def gaussian_playground_main(args: Args):
     wandb.log(figures)
 
 
-def create_data_dict(patches: np.ndarray, whitening_matrix: np.ndarray,
-                     normalize_patches_to_unit_vectors: bool = False):
+def create_data_dict(patches: np.ndarray, whitening_matrix: np.ndarray):
     """Creates a dictionary containing the different datasets (original, whitened, whitened_shuffled, shuffled, random).
 
     Args:
         patches: The "data" - a NumPy array of shape (n, d) containing flattened patches.
         whitening_matrix: The whitening matrix defining the whitening operator.
-        normalize_patches_to_unit_vectors: Whether to normalize the data to unit vectors.
 
     Returns:
         The dictionary containing the different datasets.
@@ -142,12 +137,8 @@ def create_data_dict(patches: np.ndarray, whitening_matrix: np.ndarray,
         'random': random_data
     }
 
-    # faiss must receive float32 as input
     data_dict = {data_name: data.astype(np.float32) for data_name, data in data_dict.items()}
 
-    if normalize_patches_to_unit_vectors:
-        return normalize_data(data_dict)
-    
     return data_dict
 
 
@@ -163,16 +154,16 @@ def normalize_data(data_dict):
     Returns:
         A dictionary where each dataset is normalized.
     """
-    norms_dict = {data_name: np.linalg.norm(data, axis=1) 
+    norms_dict = {data_name: np.linalg.norm(data, axis=1)
                   for data_name, data in data_dict.items()}
 
-    low_norms_masks_dict = {data_name: (norms < np.percentile(norms, q=0.1)) 
+    low_norms_masks_dict = {data_name: (norms < np.percentile(norms, q=1))
                             for data_name, norms in norms_dict.items()}
 
-    filtered_data_dict = {data_name: data[np.logical_not(low_norms_masks_dict[data_name])] 
+    filtered_data_dict = {data_name: data[np.logical_not(low_norms_masks_dict[data_name])]
                           for data_name, data in data_dict.items()}
 
-    filtered_norms_dict = {data_name: norms[np.logical_not(low_norms_masks_dict[data_name])] 
+    filtered_norms_dict = {data_name: norms[np.logical_not(low_norms_masks_dict[data_name])]
                            for data_name, norms in norms_dict.items()}
 
     normalized_data_dict = {data_name: (filtered_data_dict[data_name] / filtered_norms_dict[data_name][:, np.newaxis])
@@ -208,7 +199,7 @@ def cifar_mle_main(args: Args):
             if len(patches) < n_points:
                 logger.warning(f'Number of patches {len(patches)} is lower than requested {n_points}')
         
-            data_dict = create_data_dict(patches, whitening_matrix, args.int_dim.normalize_patches_to_unit_vectors)
+            data_dict = create_data_dict(patches, whitening_matrix)
             data_dict = {data_name: torch.from_numpy(data) for data_name, data in data_dict.items()}
             estimates_matrices = {data_name: get_estimates_matrix(data, 8 * args.int_dim.k2) 
                                   for data_name, data in data_dict.items()}
@@ -223,19 +214,19 @@ def cifar_mle_main(args: Args):
             df.columns.name = 'type-of-data'
             figures[f'{prefix}-int_dim_per_k'] = px.line(df)
 
-            # mle_int_dim, ratio = log_final_estimate(figures, estimates, patches.shape[1], prefix, args.int_dim.k1, args.int_dim.k2)
+            # mle_int_dim, ratio = log_final_estimate(figures, estimates, patches.shape[1],
+            #                                         prefix, args.int_dim.k1, args.int_dim.k2)
             # logger.info(f'{prefix}\tmle_int_dim {mle_int_dim:.2f} ({100 * ratio:.2f}% of ext_sim {patches.shape[1]})')
     
     wandb.log(figures, step=0)
 
 
-def cifar_elbow_main(args: Args):
+def create_elbow_graphs(args: Args):
     """The main function, producing the different graphs (logging to wandb and to locally .tex files).
     """
-    datamodule = DataModule(args.data, batch_size=128)
-    datamodule.prepare_data()
-    datamodule.setup(stage='fit')
-    dataloader = datamodule.train_dataloader_clean()
+    raise DeprecationWarning('This function is deprecated. Take function from patch-based-learning GitHub repo.')
+
+    dataloader = get_dataloader(args.data)
 
     figures = dict()
     n_centroids_list = list(range(args.int_dim.min_n_centroids, args.int_dim.max_n_centroids + 1))
@@ -270,11 +261,11 @@ def cifar_elbow_main(args: Args):
     #         {'normalized-data', 'data'}:
     #             {'normalized-distance', 'distance'}:
     #                 {'original', 'shuffled', ...}:
-    #                     [--values--]
+    #                     [---------------- values ----------------]
     dist_to_centroid = dict()
     norm_data_names = ['normalized-data']  # ['normalized-data', 'data']
     norm_dist_names = ['distance']  # ['normalized-distance', 'distance']
-    agg_funcs = {'mean': np.mean, 'max': np.max, 'median': np.median}
+    agg_funcs = {'mean': np.mean}  # {'mean': np.mean, 'max': np.max, 'median': np.median}
     for agg_name in agg_funcs.keys():
         dist_to_centroid[agg_name] = dict()
         for norm_data_name in norm_data_names:
@@ -290,9 +281,7 @@ def cifar_elbow_main(args: Args):
                           desc=f'Running k-means on {data_name} {norm_data_name} for different values of k'):
                 data = normalized_data_dict[data_name] if norm_data_name == 'normalized-data' else data_dict[data_name]
 
-                kmeans = faiss.Kmeans(patch_dim, k)
-                kmeans.train(data)
-                distances, _ = kmeans.assign(data)
+                _, _, distances = run_kmeans_clustering(data, k, args.env.use_faiss)
 
                 for norm_dist_name in norm_dist_names:
                     # If the data is already normalized, no need to divide by the norm.
@@ -311,7 +300,7 @@ def cifar_elbow_main(args: Args):
             for norm_dist_name in norm_dist_names:
                 df = pd.DataFrame(data=dist_to_centroid[agg_name][norm_data_name][norm_dist_name],
                                   index=n_centroids_list)
-                df.name = f'{norm_data_name}-{agg_name}-{norm_dist_name}-distance-to-centroid'
+                df.name = f'{args.data.dataset_name}-{norm_data_name}-{agg_name}-{norm_dist_name}-distance-to-centroid'
                 df.index.name = 'k'
                 df.columns.name = 'type-of-data'
                 figures[f'{prefix}-{df.name}'] = px.line(df)
@@ -324,12 +313,13 @@ def cifar_elbow_main(args: Args):
                 plt.xlabel('k')
                 plt.ylabel('mean-distance')
                 plt.grid(True)
-                tikzplotlib.save(f'{df.name}.tex')
+                tikzplotlib.save(os.path.join('figures', f'{df.name}.tex'))
 
     wandb.log(figures, step=0)
  
 
 def linear_regions_main(args: Args, wandb_run):
+    raise DeprecationWarning('This function is deprecated. Change LocallyLinearNetwork to make it work.')
 
     artifact = wandb_run.use_artifact(args.int_dim.model_path, type='model')
     artifact_dir = artifact.download()
@@ -366,9 +356,6 @@ def linear_regions_main(args: Args, wandb_run):
     centroids = kmeans.centroids.reshape((n_centroids,) + patches.shape[1:])
     _, indices = kmeans.assign(patches_flat)
 
-    patches_activations = None
-    centroids_activations = None
-
     with torch.no_grad():
         patches_activations = conv_block(torch.from_numpy(patches)).detach().cpu().numpy().squeeze()
         centroids_activations = conv_block(torch.from_numpy(centroids)).detach().cpu().numpy().squeeze()
@@ -394,16 +381,16 @@ def main():
 
     configure_logger(args.env.path)
     log_args(args)
-    wandb_run = wandb.init(project='thesis', name=args.env.wandb_run_name, config=args.flattened_dict())
+    wandb_run = wandb.init(project=args.env.wandb_project_name, name=args.env.wandb_run_name, config=args.flattened_dict())
 
     if args.int_dim.gaussian_playground:
-        gaussian_playground_main(args)
+        gaussian_playground_main(args.int_dim)
     if args.int_dim.cifar_mle:
         cifar_mle_main(args)
     if args.int_dim.linear_regions:
         linear_regions_main(args, wandb_run)
     if args.int_dim.cifar_elbow:
-        cifar_elbow_main(args)
+        create_elbow_graphs(args)
     
 
 if __name__ == '__main__':
