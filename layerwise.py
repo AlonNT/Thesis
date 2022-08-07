@@ -126,7 +126,7 @@ class LayerwiseVGG(LitVGG):
 
             prefix = f'{stage.value}' if (i == len(self.features) - 1) else f'{stage.value}_module_{i}'
             classification_losses.append(self.get_classification_loss(x, labels, i, prefix))
-            if self.layerwise_args.ssl:
+            if self.layerwise_args.ssl and (i < len(self.features) - 1):
                 reconstruction_losses.append(self.get_reconstruction_loss(inputs, x, i, prefix))
 
             x = x.detach()
