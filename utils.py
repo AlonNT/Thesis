@@ -1750,7 +1750,7 @@ def initialize_trainer(env_args: EnvironmentArgs, opt_args: OptimizationArgs, wa
                        additional_callbacks: Optional[list] = None):
     trainer_kwargs = dict(logger=wandb_logger, max_epochs=opt_args.epochs,
                           enable_checkpointing=env_args.enable_checkpointing)
-    callbacks = [ModelSummary(max_depth=3)]
+    callbacks = [ModelSummary(max_depth=5)]
 
     if isinstance(env_args.multi_gpu, list) or (env_args.multi_gpu != 0):
         trainer_kwargs.update(dict(gpus=env_args.multi_gpu, strategy="dp"))
