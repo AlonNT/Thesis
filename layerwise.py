@@ -94,7 +94,7 @@ class LayerwiseVGG(LitVGG):
             spatial_size = height
             upsampling_kwargs = dict(out_channels=self.data_args.n_channels,
                                      in_spatial_size=spatial_size,
-                                     out_spatial_size=self.data_args.spatial_size) if args.upsample else dict()
+                                     out_spatial_size=self.data_args.spatial_size            ) if args.upsample else dict()
             auxiliary_network = get_auto_decoder(in_channels, **upsampling_kwargs)
             reconstruction_auxiliary_networks.append(auxiliary_network)
 
@@ -145,7 +145,7 @@ class LayerwiseVGG(LitVGG):
                                  dtype=int)) if self.layerwise_args.shift_ssl_labels else None
 
     def get_classification_loss(self, x: torch.Tensor, labels: torch.Tensor, i: int, prefix: str) -> torch.Tensor:
-        logits = self.aux_nets[i](x)
+        logits = self.classification_auxiliary_networks[i](x)
         classification_loss = self.loss(logits, labels)
         predictions = torch.argmax(logits, dim=1)
         accuracy = torch.sum(labels == predictions).item() / len(labels)
@@ -159,7 +159,7 @@ class LayerwiseVGG(LitVGG):
         return classification_loss
 
     def get_reconstruction_loss(self, inputs: torch.Tensor, x: torch.Tensor, i: int, prefix: str) -> torch.Tensor:
-        reconstructed_inputs = self.auto_decoders[i](x)
+        reconstructed_inputs = self.reconstruction_auxiliary_networks[i](x)
         reconstruction_labels = inputs.detach()
         reconstructed_input_spatial_size = reconstructed_inputs.shape[-1]
         if reconstructed_input_spatial_size != self.data_args.spatial_size:
