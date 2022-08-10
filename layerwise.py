@@ -19,7 +19,8 @@ from utils import (configure_logger,
                    unwatch_model,
                    LitVGG,
                    get_mlp,
-                   get_cnn)
+                   get_cnn,
+                   log_args)
 from utils import initialize_model as initialize_model_trained_end2end
 
 
@@ -150,9 +151,6 @@ class LayerwiseVGG(LitVGG):
         predictions = torch.argmax(logits, dim=1)
         accuracy = torch.sum(labels == predictions).item() / len(labels)
 
-        if i < len(self.features) - 1:
-            prefix += f'_module_{i}'
-
         self.log(f'{prefix}_loss', classification_loss)
         self.log(f'{prefix}_accuracy', accuracy, on_epoch=True, on_step=False)
 
@@ -175,11 +173,7 @@ class LayerwiseVGG(LitVGG):
             reconstruction_labels = torch.roll(reconstruction_labels, shifts=2 * (self.shifts[i],), dims=(2, 3))
 
         reconstruction_loss = self.reconstruction_loss(reconstructed_inputs, reconstruction_labels)
-
-        if i < len(self.features) - 1:
-            prefix += f'_module_{i}'
-
-        self.log(f'{prefix}_loss', reconstruction_loss)
+        self.log(f'{prefix}_reconstruction_loss', reconstruction_loss)
 
         return reconstruction_loss
 
@@ -253,11 +247,12 @@ def initialize_model(args: Args, wandb_logger: WandbLogger):
 
 def main():
     args = get_args(args_class=Args)
+    configure_logger(args.env.path, level='DEBUG')
+    log_args(args)
+
     datamodule = initialize_datamodule(args.data, args.opt.batch_size)
     wandb_logger = initialize_wandb_logger(args)
-    configure_logger(args.env.path, level='DEBUG')
     model = initialize_model(args, wandb_logger)
-
     wandb.watch(model, log='all')
 
     trainer = initialize_trainer(args.env, args.opt, wandb_logger)

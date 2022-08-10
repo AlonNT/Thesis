@@ -307,28 +307,28 @@ def get_cnn(conv_channels: List[int],
             in_spatial_size: int = 32,
             in_channels: int = 3,
             n_classes: int = 10) -> torch.nn.Sequential:
-    """
-    This function builds a CNN and return it as a PyTorch's sequential model.
+    """This function builds a CNN and return it as a PyTorch's sequential model.
 
-    :param conv_channels: A list of integers containing the channels of each convolution block.
-                                 Each block will contain Conv - BatchNorm - MaxPool - ReLU.
-    :param linear_channels: A list of integers containing the channels of each linear hidden layer.
-    :param kernel_sizes: The kernel size to use in each conv layer.
-    :param strides: The stride to use in each conv layer.
-    :param paddings: The amount of padding to use in each conv layer.
-    :param use_max_pool: Whether to use max-pooling in each layer of the network or not.
-    :param shuffle_outputs: Whether to shuffle the output of each layer or not.
-    :param spatial_only: The argument to pass to `ShuffleTensor` (see doc there).
-    :param fixed_permutation: The argument to pass to `ShuffleTensor` (see doc there).
-    :param replace_with_linear: Whether to replace each conv layer with a linear layer of the same expressiveness.
-    :param replace_with_bottleneck: Whether to replace each conv layer with a "bottleneck" linear layer 
-        of the same expressiveness, meaning a linear layer of low rank constraint (e.g. 100,000 -> 1,000 -> 100,000).
-        The number represent the middle linear layer dimensionality.
-    :param in_spatial_size: Will be used to infer input dimension for the first affine layer.
-    :param in_channels: Number of channels in the input tensor.
-    :param n_classes: Number of classes (i.e. determines the size of the prediction vector 
-        containing the classes' scores).
-    :return: A sequential model which is the constructed CNN.
+    Args:
+        conv_channels: A list of integers indicating the number of channels in the convolutional layers.
+        linear_channels: A list of integers indicating the number of channels in the linear layers.
+        kernel_sizes: A list of integers indicating the kernel size of the convolutional layers.
+        strides: A list of integers indicating the stride of the convolutional layers.
+        paddings: A list of integers indicating the padding of the convolutional layers.
+        use_max_pool: A list of booleans indicating whether to use max pooling in the convolutional layers.
+        shuffle_outputs: A list of booleans indicating whether to shuffle the outputs of the convolutional layers.
+        spatial_only: A list of booleans indicating whether to shuffle spatial-only (see doc in `ShuffleTensor`).
+        fixed_permutation: A list of booleans indicating whether to use fixed permutations (see doc in `ShuffleTensor`).
+        replace_with_linear: A list of booleans indicating whether to replace the convolutional layers
+            with linear layers of the same expressiveness.
+        replace_with_bottleneck: Whether to replace each conv layer with a "bottleneck" linear layer
+            of the same expressiveness, meaning a linear layer of low rank constraint
+            (e.g. 100,000 -> 1,000 -> 100,000). The number represent the middle linear layer dimensionality.
+        in_spatial_size: Will be used to infer input dimension for the first affine layer.
+        in_channels: Number of channels in the input tensor.
+        n_classes: Number of classes (i.e. determines the size of the prediction vector containing the classes' scores).
+    Returns:
+        A sequential model which is the constructed CNN.
     """
     blocks: List[nn.Sequential] = list()
 
@@ -972,47 +972,6 @@ def evaluate_local_model(model, criterion, dataloader, device, training_step=Non
 
     final_accumulator = modules_accumulators[-2]  # Last one is None because last block is MaxPool with no aux-net.
     return final_accumulator.get_mean_loss(), final_accumulator.get_accuracy()
-
-
-def evaluate_model(model, criterion, dataloader, device, inputs_preprocessing_function=None):
-    """
-    Evaluate the given model on the test set.
-
-    :param model: The model
-    :param criterion: The criterion.
-    :param dataloader: The test set data-loader.
-    :param device: The device to use.
-    :return: The test set loss and accuracy.
-    """
-    raise DeprecationWarning('This function is deprecated, and will be removed in the future.')
-
-    model.eval()
-
-    loss_sum = 0.0
-    corrects_sum = 0
-
-    for inputs, labels in dataloader:
-        inputs = inputs.to(device)
-        labels = labels.to(device)
-
-        with torch.no_grad():
-            if inputs_preprocessing_function is not None:
-                inputs = inputs_preprocessing_function(inputs)
-            result = model(inputs)
-
-            # In DGL the model forward function also return the inputs representation
-            # (in addition to the classes' scores which are the prediction of the relevant auxiliary network)
-            outputs = result[1] if isinstance(result, tuple) else result
-            _, predictions = torch.max(outputs, 1)
-            loss = criterion(outputs, labels)
-
-        loss_sum += loss.item() * inputs.size(0)
-        corrects_sum += torch.sum(torch.eq(predictions, labels.data)).item()
-
-    loss = loss_sum / len(dataloader.dataset)
-    accuracy = 100 * (corrects_sum / len(dataloader.dataset))
-
-    return loss, accuracy
 
 
 def perform_train_step_dgl(model, inputs, labels, criterion, optimizers, training_step,
