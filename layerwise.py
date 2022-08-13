@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import torchvision
 
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -30,12 +31,12 @@ class LayerwiseVGG(LitVGG):
     def __init__(self, args: Args):
         super().__init__(args.arch, args.opt, args.data)
         self.layerwise_args: LayerwiseArgs = args.layerwise
-        self.reconstruction_loss = nn.L1Loss() if args.layerwise.ssl else None  # TODO: Consider trying L2Loss
+        self.reconstruction_loss = nn.L1Loss() if self.reconstruction_on else None  # TODO: Consider trying L2Loss
 
         self.classification_auxiliary_networks = self.init_classification_auxiliary_networks()
         self.reconstruction_auxiliary_networks = self.init_reconstruction_auxiliary_networks()
 
-    def init_classification_auxiliary_networks(self) -> nn.ModuleList:
+    def init_classification_auxiliary_networks(self) -> Optional[nn.ModuleList]:
         """Get the auxiliary networks predicting the target classes' scores.
 
         For each intermediate module in the neural-network, create an auxiliary network which gets the output
@@ -45,6 +46,9 @@ class LayerwiseVGG(LitVGG):
         Returns:
             A list of auxiliary networks.
         """
+        if not self.classification_on:
+            return None
+
         args = self.layerwise_args
         classification_auxiliary_networks = list()
 
@@ -53,7 +57,7 @@ class LayerwiseVGG(LitVGG):
             assert height == width, "Only square tensors are supported"
             spatial_size = height
 
-            if args.pred_aux_type == 'mlp':
+            if args.classification_aux_type == 'mlp':
                 auxiliary_network = get_mlp(input_dim=channels * height * width,
                                             output_dim=self.data_args.n_classes,
                                             n_hidden_layers=args.aux_mlp_n_hidden_layers,
@@ -78,18 +82,16 @@ class LayerwiseVGG(LitVGG):
         The gradients propagated from these decoders are used to update the intermediate layers,
         therefore enforcing them to learn "good" features, which hopefully benefit downstream layers.
 
-        Args:
-            args: The arguments defining the layerwise training procedure.
         Returns:
             A list of nn.Sequential modules, each is a decoder.
         """
-        args = self.layerwise_args
-
-        if not args.ssl:
+        if not self.reconstruction_on:
             return None
 
+        args = self.layerwise_args
+
         reconstruction_auxiliary_networks = list()
-        for i in range(len(self.features) - 1):
+        for i in range(len(self.features)):
             in_channels, height, width = self.shapes[i + 1]
             assert height == width, "Only square tensors are supported"
             spatial_size = height
@@ -117,6 +119,8 @@ class LayerwiseVGG(LitVGG):
         Returns:
             The loss.
         """
+        args = self.layerwise_args
+
         inputs, labels = batch
         classification_losses = list()
         reconstruction_losses = list()
@@ -126,17 +130,40 @@ class LayerwiseVGG(LitVGG):
             x = self.features[i](x)
 
             prefix = f'{stage.value}' if (i == len(self.features) - 1) else f'{stage.value}_module_{i}'
-            classification_losses.append(self.get_classification_loss(x, labels, i, prefix))
-            if self.layerwise_args.ssl and (i < len(self.features) - 1):
-                reconstruction_losses.append(self.get_reconstruction_loss(inputs, x, i, prefix))
+
+            if self.classification_on:
+                classification_losses.append(self.get_classification_loss(x, labels, i, prefix))
+            if self.reconstruction_on:
+                reconstruction_losses.append(self.get_reconstruction_loss(x, inputs, i, prefix))
 
             x = x.detach()
 
-        overall_loss = sum(classification_losses)
-        if self.layerwise_args.ssl:
-            overall_loss += sum(reconstruction_losses)
+        loss = 0
 
-        return overall_loss
+        if self.classification_on:
+            classification_loss = sum(classification_losses)
+            loss += args.classification_loss_weight * classification_loss
+        else:
+            assert self.reconstruction_on and (args.mlp_loss_weight > 0), \
+                'When training without classification loss, the modules should be trained with reconstruction loss ' \
+                'for the convolution modules, and the MLP should be trained (i.e. its loss weight should be positive).'
+            # When training with reconstruction loss only, the MLP is trained on the features of the last conv block.
+            # Note that this part does not propagate gradients to the network's convolution modules, only to the mlp.
+            mlp_loss = self.get_classification_loss(x, labels, i=len(self.features) - 1, prefix=f'{stage.value}')
+            loss += args.mlp_loss_weight * mlp_loss
+        if self.reconstruction_on:
+            reconstruction_loss = sum(reconstruction_losses)
+            loss += args.reconstruction_loss_weight * reconstruction_loss
+
+        return loss
+
+    @property
+    def reconstruction_on(self) -> bool:
+        return self.layerwise_args.reconstruction_loss_weight > 0
+
+    @property
+    def classification_on(self) -> bool:
+        return self.layerwise_args.classification_loss_weight > 0
 
     @property
     def shifts(self) -> Optional[tuple[int]]:
@@ -156,7 +183,7 @@ class LayerwiseVGG(LitVGG):
 
         return classification_loss
 
-    def get_reconstruction_loss(self, inputs: torch.Tensor, x: torch.Tensor, i: int, prefix: str) -> torch.Tensor:
+    def get_reconstruction_loss(self, x: torch.Tensor, inputs: torch.Tensor, i: int, prefix: str) -> torch.Tensor:
         reconstructed_inputs = self.reconstruction_auxiliary_networks[i](x)
         reconstruction_labels = inputs.detach()
         reconstructed_input_spatial_size = reconstructed_inputs.shape[-1]
@@ -174,6 +201,12 @@ class LayerwiseVGG(LitVGG):
 
         reconstruction_loss = self.reconstruction_loss(reconstructed_inputs, reconstruction_labels)
         self.log(f'{prefix}_reconstruction_loss', reconstruction_loss)
+
+        indices_to_plot = np.random.choice(inputs.size(0), size=4, replace=False)
+        images = torch.cat([reconstruction_labels[indices_to_plot], reconstructed_inputs[indices_to_plot].detach()])
+        grid = torchvision.utils.make_grid(images, nrow=4)
+        wandb_image = wandb.Image(grid.cpu().numpy().transpose((1, 2, 0)))
+        self.logger.experiment.add_image(f'reconstructions-#{i}', wandb_image, 0)
 
         return reconstruction_loss
 

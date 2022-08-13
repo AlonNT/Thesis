@@ -24,7 +24,7 @@ class LayerwiseArgs(ImmutableArgs):
     dgl: bool = False
 
     #: Type of the auxiliary networks predicting the classes scores.
-    pred_aux_type: AUX_NET_TYPE = 'cnn'
+    classification_aux_type: AUX_NET_TYPE = 'cnn'
 
     #: How many hidden layers in each auxiliary network (which is an MLP).
     aux_mlp_n_hidden_layers: NonNegativeInt = 1
@@ -32,7 +32,7 @@ class LayerwiseArgs(ImmutableArgs):
     #: Dimension of each hidden layer in each auxiliary network (which is an MLP).
     aux_mlp_hidden_dim: PositiveInt = 128
 
-    # ################################ Self-Supervised Local Loss ################################
+    # ################################ Reconstruction Loss ################################
 
     #: Use self-supervised local loss (predict the image, or the shifted image).
     ssl: bool = False
@@ -44,10 +44,14 @@ class LayerwiseArgs(ImmutableArgs):
     upsample: bool = False
 
     #: Weight of the prediction loss when using both prediction-loss and SSL-loss.
-    pred_loss_weight: Fraction = 0.9
+    classification_loss_weight: Fraction = 1
 
     #: Weight of the SSL loss when using both prediction-loss and SSL-loss.
-    ssl_loss_weight: Fraction = 0.1
+    reconstruction_loss_weight: Fraction = 0
+
+    #: Weight of the mlp classification loss weight, to be used when training the convolution modules
+    #:  with reconstruction loss only.
+    mlp_loss_weight: Fraction = 0
 
     # ################################ Arguments for optimizing with last gradient ################################
 
@@ -85,9 +89,12 @@ class LayerwiseArgs(ImmutableArgs):
         return values
 
     @root_validator
-    def validate_ssl_loss_weight_and_pred_loss_weight_should_sum_to_one(cls, values):
-        assert values['pred_loss_weight'] + values['ssl_loss_weight'] == 1, \
-            "pred_loss_weight and ssl_loss_weight should sum to 1."
+    def validate_loss_weights(cls, values):
+        assert (values['classification_loss_weight'] +
+                values['reconstruction_loss_weight'] +
+                values['mlp_loss_weight']) == 1, 'Loss weights should sum up to 1.'
+        assert (values['classification_loss_weight'] == 0) != (values['mlp_loss_weight'] == 0), \
+            'Exactly one of `classification_loss_weight` and `mlp_loss_weight` should be 0.'
         return values
 
 
