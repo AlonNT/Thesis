@@ -1819,7 +1819,7 @@ class LitVGG(pl.LightningModule):
 
         return sum(regularization_losses)
 
-    def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], stage: RunningStage):
+    def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int, stage: RunningStage):
         """Performs train/validation step, depending on the given `stage`.
 
         Args:
@@ -1855,7 +1855,7 @@ class LitVGG(pl.LightningModule):
         Returns:
             The loss.
         """
-        return self.shared_step(batch, RunningStage.TRAINING)
+        return self.shared_step(batch, batch_idx, RunningStage.TRAINING)
 
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
         """Performs a validation step.
@@ -1864,7 +1864,7 @@ class LitVGG(pl.LightningModule):
             batch: The batch to process (containing a tuple of tensors - inputs and labels).
             batch_idx: The index of the batch in the dataset.
         """
-        self.shared_step(batch, RunningStage.VALIDATING)
+        self.shared_step(batch, batch_idx, RunningStage.VALIDATING)
 
     def get_sub_model(self, i: int) -> nn.Sequential:
         """Extracts a sub-model up to the given layer index.
@@ -1931,13 +1931,13 @@ class LitVGG(pl.LightningModule):
             shapes.append(tuple(x.shape[1:]))
             x = block(x)
 
+        shapes.append(tuple(x.shape[1:]))
+        
         x = x.flatten(start_dim=1)
 
         for block in self.mlp:
-            shapes.append(tuple(x.shape[1:]))
             x = block(x)
-
-        shapes.append(tuple(x.shape[1:]))  # This is the output shape
+            shapes.append(tuple(x.shape[1:]))
 
         return shapes
 

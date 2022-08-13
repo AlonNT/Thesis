@@ -103,7 +103,7 @@ class LayerwiseVGG(LitVGG):
 
         return nn.ModuleList(reconstruction_auxiliary_networks)
 
-    def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], stage: RunningStage):
+    def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int, stage: RunningStage):
         """Performs train/validation step, depending on the given `stage`.
 
         Each convolution block in the network is trained separately, using the loss of the auxiliary network.
@@ -129,12 +129,13 @@ class LayerwiseVGG(LitVGG):
         for i in range(len(self.features)):
             x = self.features[i](x)
 
-            prefix = f'{stage.value}' if (i == len(self.features) - 1) else f'{stage.value}_module_{i}'
-
             if self.classification_on:
+                prefix = f'{stage.value}' if (i == len(self.features) - 1) else f'{stage.value}_module_{i}'
                 classification_losses.append(self.get_classification_loss(x, labels, i, prefix))
             if self.reconstruction_on:
-                reconstruction_losses.append(self.get_reconstruction_loss(x, inputs, i, prefix))
+                reconstruction_losses.append(self.get_reconstruction_loss(x, inputs, i, 
+                                                                          prefix=f'{stage.value}_module_{i}', 
+                                                                          batch_idx=batch_idx))
 
             x = x.detach()
 
@@ -183,7 +184,7 @@ class LayerwiseVGG(LitVGG):
 
         return classification_loss
 
-    def get_reconstruction_loss(self, x: torch.Tensor, inputs: torch.Tensor, i: int, prefix: str) -> torch.Tensor:
+    def get_reconstruction_loss(self, x: torch.Tensor, inputs: torch.Tensor, i: int, prefix: str, batch_idx: int) -> torch.Tensor:
         reconstructed_inputs = self.reconstruction_auxiliary_networks[i](x)
         reconstruction_labels = inputs.detach()
         reconstructed_input_spatial_size = reconstructed_inputs.shape[-1]
@@ -202,11 +203,12 @@ class LayerwiseVGG(LitVGG):
         reconstruction_loss = self.reconstruction_loss(reconstructed_inputs, reconstruction_labels)
         self.log(f'{prefix}_reconstruction_loss', reconstruction_loss)
 
-        indices_to_plot = np.random.choice(inputs.size(0), size=4, replace=False)
-        images = torch.cat([reconstruction_labels[indices_to_plot], reconstructed_inputs[indices_to_plot].detach()])
-        grid = torchvision.utils.make_grid(images, nrow=4)
-        wandb_image = wandb.Image(grid.cpu().numpy().transpose((1, 2, 0)))
-        self.logger.experiment.add_image(f'reconstructions-#{i}', wandb_image, 0)
+        # Visualize reconstructions on the first batch of each training/validation epoch.
+        if batch_idx == 0:
+            images = torch.cat([reconstruction_labels[:4], reconstructed_inputs[:4].detach()])
+            grid = torchvision.utils.make_grid(images, nrow=4)
+            wandb_image = wandb.Image(grid.cpu().numpy().transpose((1, 2, 0)))
+            wandb.log({f'{prefix}_reconstructions': wandb_image}, step=self.global_step, commit=False)
 
         return reconstruction_loss
 
