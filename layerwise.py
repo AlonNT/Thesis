@@ -131,7 +131,7 @@ class LayerwiseVGG(LitVGG):
 
             if self.classification_on:
                 prefix = f'{stage.value}' if (i == len(self.features) - 1) else f'{stage.value}_module_{i}'
-                classification_losses.append(self.get_classification_loss(x, labels, i, prefix))
+                classification_losses.append(self.get_classification_aux_loss(x, labels, i, prefix))
             if self.reconstruction_on:
                 reconstruction_losses.append(self.get_reconstruction_loss(x, inputs, i, 
                                                                           prefix=f'{stage.value}_module_{i}', 
@@ -150,7 +150,7 @@ class LayerwiseVGG(LitVGG):
                 'for the convolution modules, and the MLP should be trained (i.e. its loss weight should be positive).'
             # When training with reconstruction loss only, the MLP is trained on the features of the last conv block.
             # Note that this part does not propagate gradients to the network's convolution modules, only to the mlp.
-            mlp_loss = self.get_classification_loss(x, labels, i=len(self.features) - 1, prefix=f'{stage.value}')
+            mlp_loss = self.get_mlp_loss(x, labels, prefix=f'{stage.value}')
             loss += args.mlp_loss_weight * mlp_loss
         if self.reconstruction_on:
             reconstruction_loss = sum(reconstruction_losses)
@@ -173,8 +173,12 @@ class LayerwiseVGG(LitVGG):
                                  num=len(self.features),
                                  dtype=int)) if self.layerwise_args.shift_ssl_labels else None
 
-    def get_classification_loss(self, x: torch.Tensor, labels: torch.Tensor, i: int, prefix: str) -> torch.Tensor:
-        logits = self.classification_auxiliary_networks[i](x)
+    def get_classification_loss(self, 
+                                x: torch.Tensor, 
+                                labels: torch.Tensor, 
+                                module: nn.Module, 
+                                prefix: str) -> torch.Tensor:
+        logits = module(x)
         classification_loss = self.loss(logits, labels)
         predictions = torch.argmax(logits, dim=1)
         accuracy = torch.sum(labels == predictions).item() / len(labels)
@@ -183,6 +187,12 @@ class LayerwiseVGG(LitVGG):
         self.log(f'{prefix}_accuracy', accuracy, on_epoch=True, on_step=False)
 
         return classification_loss
+
+    def get_mlp_loss(self, x: torch.Tensor, labels: torch.Tensor, prefix) -> torch.Tensor:
+        return self.get_classification_loss(x, labels, self.mlp, prefix)
+    
+    def get_classification_aux_loss(self, x: torch.Tensor, labels: torch.Tensor, i: int, prefix: str) -> torch.Tensor:
+        return self.get_classification_loss(x, labels, self.classification_auxiliary_networks[i], prefix)
 
     def get_reconstruction_loss(self, x: torch.Tensor, inputs: torch.Tensor, i: int, prefix: str, batch_idx: int) -> torch.Tensor:
         reconstructed_inputs = self.reconstruction_auxiliary_networks[i](x)
