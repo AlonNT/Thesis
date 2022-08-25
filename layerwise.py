@@ -223,6 +223,28 @@ class LayerwiseVGG(LitVGG):
         return reconstruction_loss
 
 
+class RandomFeatures(LitVGG):
+    """
+    A VGG model where the weights of the convolution layers stay fixed with their random initialization,
+    and only the final MLP is training.
+    """
+    def __init__(self, args: Args):
+        super().__init__(args.arch, args.opt, args.data)
+        self.features.requires_grad_(False)
+
+    # def forward(self, x: torch.Tensor):
+    #     """Performs a forward-pass.
+    #
+    #     Since the convolution layers are kept fix during training,
+    #     the forward pass can be done without calculating the gradients at all
+    #     (meaning using the PyTorch decorator `no_grad`).
+    #     """
+    #     with torch.no_grad():
+    #         features = self.forward(x)
+    #     logits = self.mlp(features)
+    #     return logits
+
+
 def get_auto_decoder(in_channels: int,
                      desired_out_channels: int = 3,
                      in_spatial_size: Optional[int] = None,
@@ -266,24 +288,34 @@ def get_auto_decoder(in_channels: int,
 
 
 def initialize_model_trained_layerwise(args: Args, wandb_logger: WandbLogger):
-    if args.arch.model_name.startswith('VGG'):
-        model_class = LayerwiseVGG
-    elif any(args.arch.model_name.startswith(s) for s in ['D-', 'S-']):
-        raise NotImplementedError("Basic CNN-style networks are not implemented layerwise yet.")
-    else:
-        raise NotImplementedError("MLP networks are not implemented layerwise yet.")
+    assert args.arch.model_name.startswith('VGG'), 'Only VGG models are implemented layerwise.'
 
     if args.arch.use_pretrained:
         artifact = wandb_logger.experiment.use_artifact(args.arch.pretrained_path, type='model')
         artifact_dir = artifact.download()
-        model = model_class.load_from_checkpoint(str(Path(artifact_dir) / "model.ckpt"), args=args)
+        model = LayerwiseVGG.load_from_checkpoint(str(Path(artifact_dir) / "model.ckpt"), args=args)
     else:
-        model = model_class(args)
+        model = LayerwiseVGG(args)
+
+    return model
+
+
+def initialize_random_features_model(args: Args, wandb_logger: WandbLogger):
+    assert args.arch.model_name.startswith('VGG'), 'Random Features models are only implemented for VGG.'
+
+    if args.arch.use_pretrained:
+        artifact = wandb_logger.experiment.use_artifact(args.arch.pretrained_path, type='model')
+        artifact_dir = artifact.download()
+        model = RandomFeatures.load_from_checkpoint(str(Path(artifact_dir) / "model.ckpt"), args=args)
+    else:
+        model = RandomFeatures(args)
 
     return model
 
 
 def initialize_model(args: Args, wandb_logger: WandbLogger):
+    if args.layerwise.fix_random_initialized_conv_weights:
+        return initialize_random_features_model(args, wandb_logger)
     if args.layerwise.dgl:
         return initialize_model_trained_layerwise(args, wandb_logger)
     else:

@@ -14,9 +14,8 @@ AUX_NET_TYPE = Literal['cnn', 'mlp']
 
 class LayerwiseArgs(ImmutableArgs):
 
-    # TODO: do we want this functionality?
-    # #: The first trainable block index. Positive values can be used to fix first few blocks in their initial weights.
-    # first_trainable_block: NonNegativeInt = False
+    #: Whether to train the convolution layers or keep their weight fixed with their random initialization.
+    fix_random_initialized_conv_weights: bool = False
 
     # ################################ Decoupled-Greedy-Learning ################################
 
