@@ -46,8 +46,6 @@ configs = {
     'VGGsw': [64, 'M', 128, 'M', 256, 'M'],  # 'w' for wide.
     'VGGsxw': [128, 'M', 256, 'M', 512, 'M'],  # 'x' for extra.
 
-    'VGG8c': [64, 128, 'M', 256, 256, 'M', 512, 512, 'M'],
-
     # Models taken from the paper "Training Neural Networks with Local Error Signals"
     # https://github.com/anokland/local-loss/blob/master/train.py#L1276
     'VGG8b': [128, 256, 'M', 256, 512, 'M', 512, 'M', 512, 'M'],
@@ -56,12 +54,14 @@ configs = {
     # These are versions similar to the original VGG models but with less down-sampling,
     # reaching final spatial size of 4x4 instead of 1x1 in the original VGG architectures.
     # 'c' stands for CIFAR, i.e. models that are suited to CIFAR instead of ImageNet.
+    'VGG8c': [64, 128, 'M', 256, 256, 'M', 512, 512, 'M'], # VGG8 does not exist in the original VGG paper.
     'VGG11c': [64, 128, 'M', 256, 256, 'M', 512, 512, 512, 512, 'M'],
     'VGG13c': [64, 64, 128, 128, 'M', 256, 256, 'M', 512, 512, 512, 512, 'M'],
     'VGG16c': [64, 64, 128, 128, 'M', 256, 256, 256, 'M', 512, 512, 512, 512, 512, 512, 'M'],
     'VGG19c': [64, 64, 128, 128, 'M', 256, 256, 256, 256, 'M', 512, 512, 512, 512, 512, 512, 512, 512, 'M'],
 
     # Original VGG architectures (built for ImageNet images of size 224x224)
+    'VGG8': [64, 'M', 128, 'M', 256, 256, 'M', 512, 'M', 512, 'M'],  # VGG8 does not exist in the original VGG paper.
     'VGG11': [64, 'M', 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
     'VGG13': [64, 64, 'M', 128, 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512, 'M'],
     'VGG16': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'M', 512, 512, 512, 'M', 512, 512, 512, 'M'],
