@@ -98,12 +98,3 @@ class ArchitectureArgs(ImmutableArgs):
 
     #: If it's true, after first conv->bn->relu use 3x3 max-pool with stride=2 and padding (like done in ResNets).
     max_pool_after_first_conv: bool = False
-
-    @validator('model_name', always=True)
-    def validate_model_name(cls, v):
-        allowed_values = (['mlp'] +
-                          [f'{a}-{b}' for a in ['S', 'D'] for b in ['CONV', 'FC']] +
-                          ['D-CONV++', 'D-CONV-ResNet18-style', 'D-CONV-ResNet18-style-1st-block-stride-1'])
-        assert v.startswith('VGG') or (v in allowed_values), \
-            f"model_name {v} is not supported, should start with 'VGG' or be one of {allowed_values}"
-        return v
