@@ -35,7 +35,7 @@ class ArchitectureArgs(ImmutableArgs):
     #: If the fraction is strictly positive, replace the corresponding conv layer with a sparsely connected
     #: linear layer such that each output neuron is connected to a random subset of size
     #: which is a fraction of the whole number of input neurons.
-    randomly_sparse_connected_fractions: Union[NonOneFraction, List[NonOneFraction]] = 0
+    sparse_connected_fractions: Union[NonOneFraction, List[NonOneFraction]] = 0
 
     #: Use pretrained model, or train from scratch.
     use_pretrained: bool = False

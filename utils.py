@@ -38,7 +38,7 @@ from schemas.architecture import ArchitectureArgs
 from schemas.data import DataArgs
 from schemas.environment import EnvironmentArgs
 from schemas.optimization import OptimizationArgs
-from vgg import get_vgg_blocks, configs, get_vgg_model_kernel_size
+from vgg import configs, get_model_kernel_size
 
 
 def log_args(args):
@@ -294,20 +294,20 @@ def get_cnn(conv_channels: List[int],
             linear_channels: List[int],
             kernel_sizes: Optional[List[int]] = None,
             strides: Optional[List[int]] = None,
-            paddings: Optional[List[int]] = None,
             use_max_pool: Optional[List[bool]] = None,
+            paddings: Optional[List[int]] = None,
             shuffle_outputs: Optional[List[bool]] = None,
             spatial_only: Optional[List[bool]] = None,
             fixed_permutation: Optional[List[bool]] = None,
             replace_with_linear: Optional[List[bool]] = None,
             replace_with_bottleneck: Optional[List[int]] = None,
-            randomly_sparse_connected_fractions: Optional[List[float]] = None,
+            sparse_connected_fractions: Optional[List[float]] = None,
             adaptive_avg_pool_before_mlp: bool = False,
             max_pool_after_first_conv: bool = False,
             in_spatial_size: int = 32,
             in_channels: int = 3,
-            n_classes: int = 10) -> torch.nn.Sequential:
-    """This function builds a CNN and return it as a PyTorch's sequential model.
+            n_classes: int = 10) -> tuple[nn.Sequential, nn.Sequential]:
+    """This function builds a CNN and return it as two PyTorch sequential models (convolutions followed by mlp).
 
     Args:
         conv_channels: A list of integers indicating the number of channels in the convolutional layers.
@@ -324,63 +324,58 @@ def get_cnn(conv_channels: List[int],
         replace_with_bottleneck: Whether to replace each conv layer with a "bottleneck" linear layer
             of the same expressiveness, meaning a linear layer of low rank constraint
             (e.g. 100,000 -> 1,000 -> 100,000). The number represent the middle linear layer dimensionality.
+        sparse_connected_fractions: A list of fractions (i.e. floats between 0 and 1),
+            where positive values indicate to replace the corresponding convolution layer
+            with a randomly sparse connected layer with the given fraction of connections.
+        adaptive_avg_pool_before_mlp: Whether to use adaptive average pooling to 1x1 before the final mlp.
+            (This is done in ResNet architectures).
+        max_pool_after_first_conv: Whether to use 3x3 max pool (padding=1, stride=2) after the first convolution layer.
         in_spatial_size: Will be used to infer input dimension for the first affine layer.
         in_channels: Number of channels in the input tensor.
         n_classes: Number of classes (i.e. determines the size of the prediction vector containing the classes' scores).
     Returns:
         A sequential model which is the constructed CNN.
     """
-    blocks: List[nn.Sequential] = list()
+    conv_blocks: List[nn.Sequential] = list()
 
-    use_max_pool = get_list_of_arguments(
-        use_max_pool, len(conv_channels), default=False)
-    shuffle_outputs = get_list_of_arguments(
-        shuffle_outputs, len(conv_channels), default=False)
-    strides = get_list_of_arguments(
-        strides, len(conv_channels), default=1)
-    kernel_sizes = get_list_of_arguments(
-        kernel_sizes, len(conv_channels), default=3)
-    paddings = get_list_of_arguments(
-        paddings, len(conv_channels), default=[kernel_size // 2 for kernel_size in kernel_sizes])
-    spatial_only_list = get_list_of_arguments(
-        spatial_only, len(conv_channels), default=True)
-    fixed_permutation_list = get_list_of_arguments(
-        fixed_permutation, len(conv_channels), default=True)
-    replace_with_linear = get_list_of_arguments(
-        replace_with_linear, len(conv_channels), default=False)
-    replace_with_bottleneck = get_list_of_arguments(
-        replace_with_bottleneck, len(conv_channels), default=0)
-    randomly_sparse_connected_fractions = get_list_of_arguments(
-        randomly_sparse_connected_fractions, len(conv_channels) + len(linear_channels) + 1, default=0)
+    n_convs = len(conv_channels)
+    use_max_pool = get_list_of_arguments(use_max_pool, n_convs, default=False)
+    shuffle_outputs = get_list_of_arguments(shuffle_outputs, n_convs, default=False)
+    strides = get_list_of_arguments(strides, n_convs, default=1)
+    kernel_sizes = get_list_of_arguments(kernel_sizes, n_convs, default=3)
+    paddings = get_list_of_arguments(paddings, n_convs, default=[k // 2 for k in kernel_sizes])
+    spatial_only = get_list_of_arguments(spatial_only, n_convs, default=True)
+    fixed_permutation = get_list_of_arguments(fixed_permutation, n_convs, default=True)
+    replace_with_linear = get_list_of_arguments(replace_with_linear, n_convs, default=False)
+    replace_with_bottleneck = get_list_of_arguments(replace_with_bottleneck, n_convs, default=0)
+    sparse_connected_fractions = get_list_of_arguments(sparse_connected_fractions, n_convs + len(linear_channels) + 1,
+                                                       default=0)
 
     zipped_args = zip(conv_channels, paddings, strides, kernel_sizes, use_max_pool,
-                      shuffle_outputs, spatial_only_list, fixed_permutation_list,
-                      replace_with_linear, replace_with_bottleneck,
-                      randomly_sparse_connected_fractions[:len(conv_channels)])
+                      shuffle_outputs, spatial_only, fixed_permutation,
+                      replace_with_linear, replace_with_bottleneck, sparse_connected_fractions[:n_convs])
     for i, (out_channels, padding, stride, kernel_size, pool,
             shuf, spatial, fixed,
             linear, bottleneck, sparse_fraction) in enumerate(zipped_args):
+
         block_layers: List[nn.Module] = list()
 
         out_spatial_size = int(math.floor((in_spatial_size + 2 * padding - kernel_size) / stride + 1))
         if pool:
             out_spatial_size = int(math.floor(out_spatial_size / 2))
 
-        in_features = in_channels * (in_spatial_size ** 2)
-        out_features = out_channels * (out_spatial_size ** 2)
+        if linear or (sparse_fraction > 0) or (bottleneck > 0):
+            assert int(linear) + int(sparse_fraction > 0) + int(bottleneck > 0) == 1, \
+                'Only one of linear, sparse_fraction, bottleneck can be true'
+            in_features = in_channels * (in_spatial_size ** 2)
+            out_features = out_channels * (out_spatial_size ** 2)
 
-        if bottleneck > 0:
-            assert not (linear or (sparse_fraction > 0)), \
-                'When bottleneck is greater than 0, both linear and sparse_fraction should be turned off.'
             block_layers.append(nn.Flatten())
-            block_layers.append(nn.Linear(in_features, bottleneck))
-            block_layers.append(nn.Linear(bottleneck, out_features))
-            block_layers.append(View(shape=(out_channels, out_spatial_size, out_spatial_size)))
-        elif linear or (sparse_fraction > 0):
-            assert not (linear and (sparse_fraction > 0)), \
-                'Select one of linear/sparse-linear, not both.'
-            block_layers.append(nn.Flatten())
-            block_layers.append(get_possibly_sparse_linear_layer(in_features, out_features, sparse_fraction))
+            if bottleneck > 0:
+                block_layers.append(nn.Linear(in_features, bottleneck))
+                block_layers.append(nn.Linear(bottleneck, out_features))
+            else:
+                block_layers.append(get_possibly_sparse_linear_layer(in_features, out_features, sparse_fraction))
             block_layers.append(View(shape=(out_channels, out_spatial_size, out_spatial_size)))
         else:
             block_layers.append(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding))
@@ -392,26 +387,26 @@ def get_cnn(conv_channels: List[int],
             block_layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
         if shuf:
             block_layers.append(ShuffleTensor(out_spatial_size, out_channels, spatial, fixed))
-        if max_pool_after_first_conv and (i == 0):
+        if (i == 0) and max_pool_after_first_conv:
             block_layers.append(nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
-        if adaptive_avg_pool_before_mlp and (i == len(conv_channels) - 1):
+        if (i == n_convs - 1) and adaptive_avg_pool_before_mlp:
             block_layers.append(nn.AdaptiveAvgPool2d((1, 1)))
             out_spatial_size = 1
 
-        blocks.append(nn.Sequential(*block_layers))
+        conv_blocks.append(nn.Sequential(*block_layers))
         in_channels = out_channels
         in_spatial_size = out_spatial_size
 
+    features = torch.nn.Sequential(*conv_blocks)
     mlp = get_mlp(input_dim=in_channels * (in_spatial_size ** 2),
                   output_dim=n_classes,
                   n_hidden_layers=len(linear_channels),
                   hidden_dimensions=linear_channels,
-                  use_batch_norm=True,
-                  organize_as_blocks=True,
-                  sparse_fractions=randomly_sparse_connected_fractions[len(conv_channels):])
-    blocks.extend(list(mlp))
+                  use_batch_norm=True,  # TODO make this an argument
+                  organize_as_blocks=True,  # TODO make this an argument
+                  sparse_fractions=sparse_connected_fractions[n_convs:])
 
-    return torch.nn.Sequential(*blocks)
+    return features, mlp
 
 
 @torch.no_grad()
@@ -1687,20 +1682,13 @@ def initialize_model(arch_args: ArchitectureArgs,
                      opt_args: OptimizationArgs,
                      data_args: DataArgs,
                      wandb_logger: WandbLogger):
-    if arch_args.model_name.startswith('VGG'):
-        model_class = LitVGG
-    elif any(arch_args.model_name.startswith(s) for s in ['D-', 'S-']):
-        model_class = LitCNN
-    else:
-        model_class = LitMLP
-
     if arch_args.use_pretrained:
         artifact = wandb_logger.experiment.use_artifact(arch_args.pretrained_path, type='model')
         artifact_dir = artifact.download()
-        model = model_class.load_from_checkpoint(str(Path(artifact_dir) / "model.ckpt"),
-                                                 arch_args=arch_args, opt_args=opt_args, data_args=data_args)
+        model = CNN.load_from_checkpoint(str(Path(artifact_dir) / "model.ckpt"),
+                                         arch_args=arch_args, opt_args=opt_args, data_args=data_args)
     else:
-        model = model_class(arch_args, opt_args, data_args)
+        model = CNN(arch_args, opt_args, data_args)
 
     return model
 
@@ -1729,28 +1717,244 @@ def initialize_trainer(env_args: EnvironmentArgs, opt_args: OptimizationArgs, wa
     return pl.Trainer(callbacks=callbacks, **trainer_kwargs)
 
 
-class LitVGG(pl.LightningModule):
+def get_cnn_config_neyshabur(arch_args: ArchitectureArgs, data_args: DataArgs):
+    """Gets configurations from Neyshabur paper.
+
+    The motivation is to have a (CNN, MLP) pair such that the hypothesis class which is defined by the CNN is contained
+    in the hypothesis class defined by the MLP.
+    In other words - every function that can be implemented using the CNN, can also be implemented using the MLP.
+    There are four variants: {Deep, Shallow} x {ConvNet, Fully-Connected}, with acronyms {D, S} x {CONV, FC}.
+
+    Note that in order to keep the CNNs as simple as possible (to have a fully-connected neural-network
+    which can express every function they express) there are not max-pooling operators at all,
+    and the pooling is done convolution layers with stride 2.
+
+    This is taken from the paper
+    "Towards Learning Convolutions from Scratch", Behnam Neyshabur, Google.
+    and the exact architectures are defined in Appendix A.1
+    https://proceedings.neurips.cc/paper/2020/file/5c528e25e1fdeaf9d8160dc24dbf4d60-Supplemental.pdf
+
+    Args:
+        arch_args: The architecture arguments.
+        data_args: The data arguments.
+
+    Returns: A 4-tuple containing
+        conv_channels: A list containing the number of channels for each convolution layer.
+            An empty list means that there are no convolution layers at all (i.e. model is fully-connected).
+        kernel_sizes: A single integer determining the kernel-size of each convolution-layer.
+        strides: A single integer determining the stride of each convolution-layer.
+        linear_channels: A list of integers determining the number of channels in each linear layer in the MLP.
+    """
+    model_name = arch_args.model_name
+    a = arch_args.alpha
+    s = data_args.spatial_size
+
+    if model_name == 'D-CONV':
+        conv_channels = [a,
+                         2 * a,
+                         2 * a,
+                         4 * a,
+                         4 * a,
+                         8 * a,
+                         8 * a,
+                         16 * a]
+        kernel_sizes = [3] * 8
+        strides = [1, 2] * 4
+        linear_channels = [64 * a]
+    elif model_name == 'S-CONV':
+        conv_channels = [a]
+        kernel_sizes = [9]
+        strides = [2]
+        linear_channels = [24 * a]
+    elif model_name == 'D-FC':
+        conv_channels, kernel_sizes, strides = [], [], []
+        linear_channels = [s ** 2 * a,
+                           int(s ** 2 * a / 2),
+                           int(s ** 2 * a / 2),
+                           int(s ** 2 * a / 4),
+                           int(s ** 2 * a / 4),
+                           int(s ** 2 * a / 8),
+                           int(s ** 2 * a / 8),
+                           int(s ** 2 * a / 16),
+                           64 * a]
+    elif model_name == 'S-FC':
+        conv_channels, kernel_sizes, strides = [], [], []
+        linear_channels = [int(s ** 2 * a / 4),
+                           24 * a]
+    elif model_name == 'D-CONV++':  # Like D-CONV but has another 2 layers which fits ImageNet better
+        conv_channels = [a,  # because the final spatial resolution is 7x7 instead of 14x14
+                         2 * a,
+                         2 * a,
+                         4 * a,
+                         4 * a,
+                         8 * a,
+                         8 * a,
+                         16 * a,
+                         16 * a,
+                         32 * a]
+        kernel_sizes = [3] * 10
+        strides = [1, 2] * 5
+        linear_channels = [64 * a]
+    else:
+        raise NotImplementedError(f'Model {model_name} is not recognized.')
+
+    return conv_channels, linear_channels, kernel_sizes, strides
+
+
+def get_cnn_config_resnet(model_name: str):
+    """Gets configurations from ResNet paper.
+
+    Main properties of the models:
+        - Large kernel-size (7) in the first convolution layer, small kernel-size (3) in the rest.
+        - No max-pooling operators, down-sampling is done with stride 2 convolutions.
+        - No hidden fully-connected layers, only a single linear layer predicting the classes scores.
+
+    Args:
+        model_name: The model name.
+
+    Returns: A 4-tuple containing
+        conv_channels: A list containing the number of channels for each convolution layer.
+            An empty list means that there are no convolution layers at all (i.e. model is fully-connected).
+        kernel_sizes: A single integer determining the kernel-size of each convolution-layer.
+        strides: A single integer determining the stride of each convolution-layer.
+        linear_channels: A list of integers determining the number of channels in each linear layer in the MLP.
+    """
+    if model_name == 'ResNet18-style':
+        conv_channels = [64,
+                         64, 64, 64, 64,
+                         128, 128, 128, 128,
+                         256, 256, 256, 256,
+                         512, 512, 512, 512]
+        kernel_sizes = [7] + [3] * 16
+        strides = [2,  # output-size 112x112
+                   2, 1, 1, 1,  # output-size 56x56
+                   2, 1, 1, 1,  # output-size 28x28
+                   2, 1, 1, 1,  # output-size 14x14
+                   2, 1, 1, 1  # output-size 7x7
+                   ]
+        linear_channels = []
+    elif model_name == 'ResNet18-style-1st-block-stride-1':
+        conv_channels = [64,
+                         64, 64, 64, 64,
+                         128, 128, 128, 128,
+                         256, 256, 256, 256,
+                         512, 512, 512, 512
+                         ]
+        kernel_sizes = [7] + [3] * 16
+        strides = [2,  # output-size 112x112
+                   1, 1, 1, 1,  # output-size 56x56, because we use max-pool beforehand
+                   2, 1, 1, 1,  # output-size 28x28
+                   2, 1, 1, 1,  # output-size 14x14
+                   2, 1, 1, 1  # output-size 7x7
+                   ]
+        linear_channels = []
+    else:
+        raise NotImplementedError(f'Model {model_name} is not recognized.')
+
+    return conv_channels, linear_channels, kernel_sizes, strides
+
+
+def get_cnn_config_vgg(arch_args: ArchitectureArgs):
+    """Gets configurations from VGG paper.
+
+    Main properties of the models:
+        - Small kernel-size (3).
+        - Max-pooling operators with 2x2 windows.
+        - The amount of hidden fully-connected layers is taken from the architecture's arguments class.
+          (argument `mlp_hidden_dim` and `mlp_n_hidden_layers`).
+          In the original VGG paper, there are 2 4096-dimensional hidden layers.
+
+    Args:
+        arch_args: The architecture arguments.
+
+    Returns: A 5-tuple containing
+        conv_channels: A list containing the number of channels for each convolution layer.
+            An empty list means that there are no convolution layers at all (i.e. model is fully-connected).
+        kernel_sizes: A single integer determining the kernel-size of each convolution-layer.
+        strides: A single integer determining the stride of each convolution-layer.
+        linear_channels: A list of integers determining the number of channels in each linear layer in the MLP.
+        use_max_pool: A list of booleans indicating whether to have a max-pool operator after each conv block.
+    """
+    vgg_config = configs[arch_args.model_name]
+    conv_channels = list()
+    use_max_pool = list()
+    for v in vgg_config:
+        if isinstance(v, int):
+            conv_channels.append(v)
+            use_max_pool.append(False)
+        elif isinstance(v, str) and v == 'M':
+            assert len(use_max_pool) > 0, 'Max-pooling must be preceded by a convolutional block'
+            assert use_max_pool[-1] is False, 'No two max-pools in a row'
+            use_max_pool[-1] = True
+    kernel_sizes = 3
+    strides = 1
+    linear_channels = [arch_args.mlp_hidden_dim] * arch_args.mlp_n_hidden_layers
+
+    return conv_channels, linear_channels, kernel_sizes, strides, use_max_pool
+
+
+def get_cnn_config(arch_args: ArchitectureArgs, data_args: DataArgs):
+    """Gets the model configuration determining the architecture of the CNN.
+
+    Args:
+        arch_args: The architecture arguments.
+        data_args: The data arguments.
+
+    Returns: A 5-tuple containing
+        conv_channels: A list containing the number of channels for each convolution layer.
+            An empty list means that there are no convolution layers at all (i.e. model is fully-connected).
+        kernel_sizes: A single integer determining the kernel-size of each convolution-layer.
+        strides: A single integer determining the stride of each convolution-layer.
+        linear_channels: A list of integers determining the number of channels in each linear layer in the MLP.
+        use_max_pool: A list of booleans indicating whether to have a max-pool operator after each conv block.
+    """
+    use_max_pool = None
+
+    if any(arch_args.model_name.startswith(f'{d}-{t}') for d in ['D', 'S'] for t in ['CONV', 'FC']):
+        conv_channels, linear_channels, kernel_sizes, strides = get_cnn_config_neyshabur(arch_args, data_args)
+    elif arch_args.model_name.startswith('ResNet'):
+        conv_channels, linear_channels, kernel_sizes, strides = get_cnn_config_resnet(arch_args.model_name)
+    elif arch_args.model_name.startswith('VGG'):
+        conv_channels, linear_channels, kernel_sizes, strides, use_max_pool = get_cnn_config_vgg(arch_args)
+    else:
+        raise NotImplementedError(f'Model {arch_args.model_name} is not recognized.')
+
+    return conv_channels, linear_channels, kernel_sizes, strides, use_max_pool
+
+
+class CNN(pl.LightningModule):
     def __init__(self, arch_args: ArchitectureArgs, opt_args: OptimizationArgs, data_args: DataArgs):
-        """A basic CNN, based on the VGG architecture (and some variants).
+        """A basic CNN, containing only convolutional / linear layers (+ BatchNorm and ReLU).
+
+        The idea is taken from "Towards Learning Convolutions from Scratch", Behnam Neyshabur, Google.
+
+        > One challenge in studying the inductive bias of convolutions is that the existence of other components
+        > such as pooling and residual connections makes it difficult to isolate the effect of convolutions
+        > in modern architectures.
+        > ...
+        > To this end, below we propose two all-convolutional networks to overcome the discussed issues.
 
         Args:
             arch_args: The arguments for the architecture.
             opt_args: The arguments for the optimization process.
             data_args: The arguments for the input data.
         """
-        super(LitVGG, self).__init__()
-        blocks, n_features = get_vgg_blocks(configs[arch_args.model_name], data_args.n_channels, data_args.spatial_size,
-                                            arch_args.kernel_size, arch_args.padding, arch_args.use_batch_norm,
-                                            arch_args.bottle_neck_dimension, arch_args.pool_as_separate_blocks,
-                                            arch_args.shuffle_blocks_output, arch_args.spatial_shuffle_only,
-                                            arch_args.fixed_permutation_per_block)
-        self.features = nn.Sequential(*blocks)
-        self.mlp = get_mlp(input_dim=n_features, output_dim=data_args.n_classes,
-                           n_hidden_layers=arch_args.mlp_n_hidden_layers,
-                           hidden_dimensions=arch_args.mlp_hidden_dim, use_batch_norm=arch_args.use_batch_norm,
-                           shuffle_blocks_output=arch_args.shuffle_blocks_output,
-                           fixed_permutation_per_block=arch_args.fixed_permutation_per_block)
-        self.loss = torch.nn.CrossEntropyLoss()
+        super(CNN, self).__init__()
+
+        self.features, self.mlp = get_cnn(*get_cnn_config(arch_args, data_args),
+                                          paddings=arch_args.padding,
+                                          shuffle_outputs=arch_args.shuffle_blocks_output,
+                                          spatial_only=arch_args.spatial_shuffle_only,
+                                          fixed_permutation=arch_args.fixed_permutation_per_block,
+                                          replace_with_linear=arch_args.replace_with_linear,
+                                          replace_with_bottleneck=arch_args.replace_with_bottleneck,
+                                          sparse_connected_fractions=arch_args.sparse_connected_fractions,
+                                          adaptive_avg_pool_before_mlp=arch_args.adaptive_avg_pool_before_mlp,
+                                          max_pool_after_first_conv=arch_args.max_pool_after_first_conv,
+                                          in_spatial_size=data_args.spatial_size,
+                                          in_channels=data_args.n_channels,
+                                          n_classes=data_args.n_classes)
+        self.loss = nn.CrossEntropyLoss()
 
         self.arch_args: ArchitectureArgs = arch_args
         self.opt_args: OptimizationArgs = opt_args
@@ -1778,73 +1982,6 @@ class LitVGG(pl.LightningModule):
         logits = self.mlp(features)
         return logits
 
-    def should_regularize(self):
-        """
-        Returns:
-            True if we should regularize, False if not (depends on the argument `lasso_regularizer_coefficient`).
-        """
-        return (
-                isinstance(self.arch_args.lasso_regularizer_coefficient, list)
-                or
-                (self.arch_args.lasso_regularizer_coefficient > 0)
-        )
-
-    def get_regularization_loss(self):
-        """
-        Returns:
-            The regularization loss, which is the sum of the l1 norm of the weights of linear/conv layers
-            in the model, each multiplied by the corresponding regularization factor.
-        """
-        blocks = list(self.features) + list(self.mlp)
-        num_blocks_with_weights = len([block for block in blocks if len(list(block.parameters())) > 0])
-        regularization_coefficients = copy.deepcopy(self.arch_args.lasso_regularizer_coefficient)
-        if not isinstance(regularization_coefficients, list):
-            regularization_coefficients = [regularization_coefficients] * num_blocks_with_weights
-        assert len(regularization_coefficients) == num_blocks_with_weights
-
-        regularization_losses = list()
-        for block in blocks:
-            # Take the parameters of any conv/linear layer in the block,
-            # which essentially excludes the parameters of the batch-norm layer that shouldn't be regularized.
-            parameters = [layer.parameters() for layer in block
-                          if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear)]
-            parameters = list(itertools.chain.from_iterable(parameters))
-            if len(parameters) == 0:
-                continue
-
-            weights_l1_norm = sum(w.abs().sum() for w in parameters)
-            regularization_losses.append(regularization_coefficients.pop(0) * weights_l1_norm)
-
-        assert len(regularization_coefficients) == 0
-
-        return sum(regularization_losses)
-
-    def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int, stage: RunningStage):
-        """Performs train/validation step, depending on the given `stage`.
-
-        Args:
-            batch: The batch to process (containing a tuple of tensors - inputs and labels).
-            stage: Indicating if this is a training-step or a validation-step.
-
-        Returns:
-            The loss.
-        """
-        inputs, labels = batch
-        logits = self(inputs)
-        loss = self.loss(logits, labels)
-        predictions = torch.argmax(logits, dim=1)
-        accuracy = torch.sum(labels == predictions).item() / len(labels)
-
-        self.log(f'{stage.value}_loss', loss)
-        self.log(f'{stage.value}_accuracy', accuracy, on_epoch=True, on_step=False)
-
-        if self.should_regularize():
-            regularization_loss = self.get_regularization_loss()
-            loss += regularization_loss
-            self.log(f'{stage.value}_reg_loss', regularization_loss)
-
-        return loss
-
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
         """Performs a training step.
 
@@ -1866,22 +2003,130 @@ class LitVGG(pl.LightningModule):
         """
         self.shared_step(batch, batch_idx, RunningStage.VALIDATING)
 
-    def get_sub_model(self, i: int) -> nn.Sequential:
-        """Extracts a sub-model up to the given layer index.
+    def get_classification_loss(self, logits: torch.Tensor, labels: torch.Tensor, prefix: str):
+        loss = self.loss(logits, labels)
+        predictions = torch.argmax(logits, dim=1)
+        accuracy = torch.sum(labels == predictions).item() / len(labels)
+        # import pdb
+        # pdb.set_trace()
+        # top5_predictions = torch.topk(logits, k=5, dim=1)[1]
+        # top5_accuracy = torch.sum(torch.isin(top5_predictions, labels)).item() / len(labels)
+
+        self.log(f'{prefix}_loss', loss)
+        self.log(f'{prefix}_accuracy', accuracy, on_epoch=True, on_step=False)
+        # self.log(f'{stage.value}_top5', top5_accuracy, on_epoch=True, on_step=False)
+
+        return loss
+
+    def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int, stage: RunningStage):
+        """Performs train/validation step, depending on the given `stage`.
 
         Args:
-            i: The maximal index to take in the sub-model
+            batch: The batch to process (containing a tuple of tensors - inputs and labels).
+            batch_idx: The index of the batch in the dataset.
+            stage: Indicating if this is a training-step or a validation-step.
 
         Returns:
-            The sub-model.
+            The loss.
         """
-        if i < len(self.features):
-            sub_model = self.features[:i]
-        else:
-            j = len(self.features) - i  # This is the index in the mlp
-            sub_model = nn.Sequential(*(list(self.features) + list(self.mlp[:j])))
+        inputs, labels = batch
+        logits = self(inputs)
+        loss = self.get_classification_loss(logits, labels, stage)
 
-        return sub_model
+        if self.should_regularize_lasso() or self.should_regularize_l2():
+            regularization_loss = self.get_regularization_loss()
+            loss += regularization_loss
+            self.log(f'{stage.value}_reg_loss', regularization_loss)
+
+        return loss
+
+    def should_regularize_lasso(self):
+        """
+        Returns:
+            True if we should lasso regularize,
+            False if not (depends on the argument `lasso_regularizer_coefficient`).
+        """
+        return CNN.is_list_or_positive_number(self.arch_args.lasso_regularizer_coefficient)
+
+    def should_regularize_l2(self):
+        """
+        Returns:
+            True if we should regularize, False if not (depends on the argument `lasso_regularizer_coefficient`).
+        """
+        return CNN.is_list_or_positive_number(self.arch_args.l2_regularizer_coefficient)
+
+    @staticmethod
+    def is_list_or_positive_number(arg: Union[list, float]):
+        return isinstance(arg, list) or (arg > 0)
+
+    def get_regularization_loss(self):
+        """
+        Returns:
+            The regularization loss, which is the sum of the l1 norm of the weights of linear/conv layers
+            in the model, each multiplied by the corresponding regularization factor.
+        """
+        lasso_regularization_coefficients = get_list_of_arguments(self.arch_args.lasso_regularizer_coefficient,
+                                                                  len(self.blocks))
+        l2_regularization_coefficients = get_list_of_arguments(self.arch_args.l2_regularizer_coefficient,
+                                                               len(self.blocks))
+
+        regularization_losses = list()
+        for block, lasso, l2 in zip(self.blocks, lasso_regularization_coefficients, l2_regularization_coefficients):
+            parameters = CNN.get_parameters_of_conv_or_linear_layer_in_block(block)  # TODO consider excluding bias
+            if lasso > 0:
+                weights_l1_norm = sum(w.abs().sum() for w in parameters)
+                regularization_losses.append(lasso * weights_l1_norm)
+            if l2 > 0:
+                weights_l2_norm = sum(torch.square(w).sum() for w in parameters)
+                regularization_losses.append(l2 * weights_l2_norm)
+
+        return sum(regularization_losses)
+
+    @staticmethod
+    def get_parameters_of_conv_or_linear_layer_in_block(block):
+        # Take the parameters of any conv/linear layer in the block,
+        # which essentially excludes the parameters of the batch-norm layer that shouldn't be regularized.
+        parameters_generators = [layer.parameters() for layer in block if
+                                 isinstance(layer, nn.Conv2d) or
+                                 isinstance(layer, nn.Linear) or
+                                 isinstance(layer, RandomlySparseConnected)]
+        parameters = list(itertools.chain.from_iterable(parameters_generators))
+        assert len(parameters) > 0, f'Every block should contain a convolutional / linear layer.\nblock is\n{block}'
+        return parameters
+
+    def on_train_batch_end(self, outputs, batch, batch_idx: int, unused: Optional[int] = 0) -> None:
+        if self.should_zero_out_low_weights():
+            self.zero_out_low_weights()
+            self.log_nonzero_parameters_count()
+
+    def should_zero_out_low_weights(self):
+        """
+        Returns:
+            True iff we should zero-out low weights, like done in the "beta-lasso" algorithm in
+            "Towards Learning Convolutions from Scratch" (depends on the argument `beta_lasso_coefficient`).
+        """
+        return CNN.is_list_or_positive_number(self.arch_args.beta_lasso_coefficient)
+
+    def zero_out_low_weights(self):
+        # The notations "beta" and "lambda" are taken from "Towards Learning Convolutions from Scratch".
+        betas = get_list_of_arguments(self.arch_args.beta_lasso_coefficient, len(self.blocks))
+        lambdas = get_list_of_arguments(self.arch_args.lasso_regularizer_coefficient, len(self.blocks))
+
+        for block, beta, lmbda in zip(self.blocks, betas, lambdas):
+            threshold = beta * lmbda  # lambda written with typo in purpose (since it's python's reserved word)
+            if threshold == 0:  # In other words - if beta or lambda is zero, move on.
+                continue
+            for parameter in CNN.get_parameters_of_conv_or_linear_layer_in_block(block):
+                with torch.no_grad():
+                    # To understand why this is done in the context-manager `no_grad` see here:
+                    # https://medium.com/@mrityu.jha/understanding-the-grad-of-autograd-fc8d266fd6cf
+                    parameter[parameter.abs() < threshold] = 0
+
+    def log_nonzero_parameters_count(self):
+        for i, block in enumerate(self.blocks):
+            for j, parameter in enumerate(CNN.get_parameters_of_conv_or_linear_layer_in_block(block)):
+                nonzero_fraction = torch.count_nonzero(parameter).item() / parameter.numel()
+                self.log(f'block-{i}-param-{j}-nonzero-fraction', nonzero_fraction, on_epoch=True, on_step=False)
 
     def configure_optimizers(self):
         """Configure the optimizer and the learning-rate scheduler for the training process.
@@ -1907,7 +2152,7 @@ class LitVGG(pl.LightningModule):
         """
         kernel_sizes = list()
         for i in range(len(self.features)):
-            kernel_size = get_vgg_model_kernel_size(self, i)
+            kernel_size = get_model_kernel_size(self, i)
             if isinstance(kernel_size, tuple):
                 assert kernel_size[0] == kernel_size[1], "Only square patches are supported"
                 kernel_size = kernel_size[0]
@@ -1919,7 +2164,7 @@ class LitVGG(pl.LightningModule):
         """Initialize the input shapes of each block in the model.
 
         Returns:
-            A list of shapes, with the same length as the sum of `self.features` and `self.mlp`.
+            A list of shapes, with the same length as the sum of 1 + `self.features` and `self.mlp`
         """
         shapes = list()
         batch_size = 4  # Need batch_size greater than 1 to propagate through BatchNorm layers
@@ -1932,7 +2177,7 @@ class LitVGG(pl.LightningModule):
             x = block(x)
 
         shapes.append(tuple(x.shape[1:]))
-        
+
         x = x.flatten(start_dim=1)
 
         for block in self.mlp:
@@ -1940,442 +2185,6 @@ class LitVGG(pl.LightningModule):
             shapes.append(tuple(x.shape[1:]))
 
         return shapes
-
-
-class LitCNN(pl.LightningModule):
-
-    def get_model_config(self, model_name: str, alpha: int, spatial_size: int):
-        """Gets the model configuration, determining the architecture.
-
-        This is taken from the paper
-        "Towards Learning Convolutions from Scratch", Behnam Neyshabur, Google.
-        and the exact architectures are defined in Appendix A.1
-        https://proceedings.neurips.cc/paper/2020/file/5c528e25e1fdeaf9d8160dc24dbf4d60-Supplemental.pdf
-
-        Args:
-            model_name: The model name, should be {D,S}-{CONV,FC}.
-                D stands for "deep", S for "shallow", CONV stands for
-                convolutional-network and FC for fully-connected.
-            alpha: Denotes the number of base channels which also determines
-                the total number of parameters of the architecture.
-            spatial_size: The spatial size of the input images (e.g. 32 for CIFAR-10/100).
-
-        Returns: A 4-tuple containing
-            conv_channels: A list containing the number of channels for each convolution layer.
-                Empty list means that there are no convolution layers at all (i.e. model is fully-connected).
-            kernel_sizes: A single integer determining the kernel-size of each convolution-layer.
-                 Also here an empty list is returned for fully-connected architecture.
-            strides: A list of integers of the same length as `conv_channels`
-                determining the stride in each convolutional layer.
-                Also here an empty list is returned for fully-connected architecture.
-            linear_channels: A list of integers determining the number of channels in each linear layer in the MLP.
-        """
-        a = alpha
-        s = spatial_size
-
-        if model_name == 'D-CONV':
-            conv_channels = [a,
-                             2 * a,
-                             2 * a,
-                             4 * a,
-                             4 * a,
-                             8 * a,
-                             8 * a,
-                             16 * a]
-            kernel_sizes = [3] * 8
-            strides = [1, 2] * 4
-            linear_channels = [64 * a]
-        elif model_name == 'S-CONV':
-            conv_channels = [a]
-            kernel_sizes = [9]
-            strides = [2]
-            linear_channels = [24 * a]
-        elif model_name == 'D-CONV++':  # Like D-CONV but has another 2 layers which fits ImageNet better
-            conv_channels = [a,  # because the final spatial resolution is 7x7 instead of 14x14
-                             2 * a,
-                             2 * a,
-                             4 * a,
-                             4 * a,
-                             8 * a,
-                             8 * a,
-                             16 * a,
-                             16 * a,
-                             32 * a]
-            kernel_sizes = [3] * 10
-            strides = [1, 2] * 5
-            linear_channels = [64 * a]
-        elif model_name == 'D-CONV-ResNet18-style':
-            conv_channels = [a,
-                             a, a, a, a,  # a should be 64
-                             2 * a, 2 * a, 2 * a, 2 * a,  # 2*a should be 128
-                             4 * a, 4 * a, 4 * a, 4 * a,  # 4*a should be 256
-                             8 * a, 8 * a, 8 * a, 8 * a  # 8*a should be 512
-                             ]
-            kernel_sizes = [7] + [3] * 16
-            strides = [2,  # output-size 112x112
-                       2, 1, 1, 1,  # output-size 56x56
-                       2, 1, 1, 1,  # output-size 28x28
-                       2, 1, 1, 1,  # output-size 14x14
-                       2, 1, 1, 1  # output-size 7x7
-                       ]
-            linear_channels = []
-        elif model_name == 'D-CONV-ResNet18-style-1st-block-stride-1':
-            conv_channels = [a,
-                             a, a, a, a,  # a should be 64
-                             2 * a, 2 * a, 2 * a, 2 * a,  # 2*a should be 128
-                             4 * a, 4 * a, 4 * a, 4 * a,  # 4*a should be 256
-                             8 * a, 8 * a, 8 * a, 8 * a  # 8*a should be 512
-                             ]
-            kernel_sizes = [7] + [3] * 16
-            strides = [2,  # output-size 112x112
-                       1, 1, 1, 1,  # output-size 56x56, because we use max-pool beforehand
-                       2, 1, 1, 1,  # output-size 28x28
-                       2, 1, 1, 1,  # output-size 14x14
-                       2, 1, 1, 1  # output-size 7x7
-                       ]
-            linear_channels = []
-        elif model_name == 'D-FC':
-            conv_channels, kernel_sizes, strides = [], [], []
-            linear_channels = [s ** 2 * a,
-                               int(s ** 2 * a / 2),
-                               int(s ** 2 * a / 2),
-                               int(s ** 2 * a / 4),
-                               int(s ** 2 * a / 4),
-                               int(s ** 2 * a / 8),
-                               int(s ** 2 * a / 8),
-                               int(s ** 2 * a / 16),
-                               64 * a]
-        elif model_name == 'S-FC':
-            conv_channels, kernel_sizes, strides = [], [], []
-            linear_channels = [int(s ** 2 * a / 4),
-                               24 * a]
-        else:
-            raise NotImplementedError(f'Model {model_name} is not recognized.')
-
-        return conv_channels, linear_channels, kernel_sizes, strides
-
-    def __init__(self, arch_args: ArchitectureArgs, opt_args: OptimizationArgs, data_args: DataArgs):
-        """A basic CNN, containing only convolutional / linear layers (+ BatchNorm and ReLU).
-
-        The idea is taken from "Towards Learning Convolutions from Scratch", Behnam Neyshabur, Google.
-
-        > One challenge in studying the inductive bias of convolutions is that the existence of other components
-        > such as pooling and residual connections makes it difficult to isolate the effect of convolutions
-        > in modern architectures.
-        > ...
-        > To this end, below we propose two all-convolutional networks to overcome the discussed issues.
-
-        Args:
-            arch_args: The arguments for the architecture.
-            opt_args: The arguments for the optimization process.
-            data_args: The arguments for the input data.
-        """
-        super(LitCNN, self).__init__()
-        self.blocks = get_cnn(*self.get_model_config(arch_args.model_name, arch_args.alpha, data_args.spatial_size),
-                              paddings=arch_args.padding,
-                              shuffle_outputs=arch_args.shuffle_blocks_output,
-                              spatial_only=arch_args.spatial_shuffle_only,
-                              fixed_permutation=arch_args.fixed_permutation_per_block,
-                              replace_with_linear=arch_args.replace_with_linear,
-                              replace_with_bottleneck=arch_args.replace_with_bottleneck,
-                              randomly_sparse_connected_fractions=arch_args.randomly_sparse_connected_fractions,
-                              adaptive_avg_pool_before_mlp=arch_args.adaptive_avg_pool_before_mlp,
-                              max_pool_after_first_conv=arch_args.max_pool_after_first_conv,
-                              in_spatial_size=data_args.spatial_size,
-                              in_channels=data_args.n_channels,
-                              n_classes=data_args.n_classes)
-        self.loss = torch.nn.CrossEntropyLoss()
-
-        self.arch_args = arch_args
-        self.opt_args = opt_args
-        self.save_hyperparameters(arch_args.dict())
-        self.save_hyperparameters(opt_args.dict())
-        self.save_hyperparameters(data_args.dict())
-
-    def forward(self, x: torch.Tensor):
-        """Performs a forward pass.
-
-        Args:
-            x: The input tensor.
-
-        Returns:
-            The output of the model, which is logits for the different classes.
-        """
-        return self.blocks(x)
-
-    @staticmethod
-    def is_list_or_positive_number(arg: Union[list, float]):
-        return isinstance(arg, list) or (arg > 0)
-
-    def should_regularize_l2(self):
-        """
-        Returns:
-            True if we should regularize, False if not (depends on the argument `lasso_regularizer_coefficient`).
-        """
-        return LitCNN.is_list_or_positive_number(self.arch_args.l2_regularizer_coefficient)
-
-    def should_regularize_lasso(self):
-        """
-        Returns:
-            True if we should lasso regularize,
-            False if not (depends on the argument `lasso_regularizer_coefficient`).
-        """
-        return LitCNN.is_list_or_positive_number(self.arch_args.lasso_regularizer_coefficient)
-
-    def should_zero_out_low_weights(self):
-        """
-        Returns:
-            True iff we should zero-out low weights, like done in the "beta-lasso" algorithm in
-            "Towards Learning Convolutions from Scratch" (depends on the argument `beta_lasso_coefficient`).
-        """
-        return LitCNN.is_list_or_positive_number(self.arch_args.beta_lasso_coefficient)
-
-    @staticmethod
-    def get_parameters_of_conv_or_linear_layer_in_block(block):
-        # Take the parameters of any conv/linear layer in the block,
-        # which essentially excludes the parameters of the batch-norm layer that shouldn't be regularized.
-        parameters_generators = [layer.parameters() for layer in block if
-                                 isinstance(layer, nn.Conv2d) or
-                                 isinstance(layer, nn.Linear) or
-                                 isinstance(layer, RandomlySparseConnected)]
-        parameters = list(itertools.chain.from_iterable(parameters_generators))
-        assert len(parameters) > 0, f'Every block should contain a convolutional / linear layer.\nblock is\n{block}'
-        return parameters
-
-    def get_regularization_loss(self):
-        """
-        Returns:
-            The regularization loss, which is the sum of the l1 norm of the weights of linear/conv layers
-            in the model, each multiplied by the corresponding regularization factor.
-        """
-        lasso_regularization_coefficients = get_list_of_arguments(self.arch_args.lasso_regularizer_coefficient,
-                                                                  len(self.blocks))
-        l2_regularization_coefficients = get_list_of_arguments(self.arch_args.l2_regularizer_coefficient,
-                                                               len(self.blocks))
-
-        regularization_losses = list()
-        for block, lasso, l2 in zip(self.blocks, lasso_regularization_coefficients, l2_regularization_coefficients):
-            parameters = LitCNN.get_parameters_of_conv_or_linear_layer_in_block(block)  # TODO consider excluding bias
-            if lasso > 0:
-                weights_l1_norm = sum(w.abs().sum() for w in parameters)
-                regularization_losses.append(lasso * weights_l1_norm)
-            if l2 > 0:
-                weights_l2_norm = sum(torch.square(w).sum() for w in parameters)
-                regularization_losses.append(l2 * weights_l2_norm)
-
-        return sum(regularization_losses)
-
-    def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], stage: RunningStage):
-        """Performs train/validation step, depending on the given `stage`.
-
-        Args:
-            batch: The batch to process (containing a tuple of tensors - inputs and labels).
-            stage: Indicating if this is a training-step or a validation-step.
-
-        Returns:
-            The loss.
-        """
-        inputs, labels = batch
-        logits = self(inputs)
-        loss = self.loss(logits, labels)
-        predictions = torch.argmax(logits, dim=1)
-        accuracy = torch.sum(labels == predictions).item() / len(labels)
-
-        self.log(f'{stage.value}_loss', loss)
-        self.log(f'{stage.value}_accuracy', accuracy, on_epoch=True, on_step=False)
-
-        if self.should_regularize_lasso() or self.should_regularize_l2():
-            regularization_loss = self.get_regularization_loss()
-            loss += regularization_loss
-            self.log(f'{stage.value}_reg_loss', regularization_loss)
-
-        return loss
-
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
-        """Performs a training step.
-
-        Args:
-            batch: The batch to process (containing a tuple of tensors - inputs and labels).
-            batch_idx: The index of the batch in the dataset.
-
-        Returns:
-            The loss.
-        """
-        return self.shared_step(batch, RunningStage.TRAINING)
-
-    def on_train_batch_end(self, outputs, batch, batch_idx: int, unused: Optional[int] = 0) -> None:
-        if self.should_zero_out_low_weights():
-            self.zero_out_low_weights()
-        self.log_nonzero_parameters_count()
-
-    def zero_out_low_weights(self):
-        # The notations "beta" and "lambda" are taken from "Towards Learning Convolutions from Scratch".
-        betas = get_list_of_arguments(self.arch_args.beta_lasso_coefficient, len(self.blocks))
-        lambdas = get_list_of_arguments(self.arch_args.lasso_regularizer_coefficient, len(self.blocks))
-
-        for block, beta, lmbda in zip(self.blocks, betas, lambdas):
-            threshold = beta * lmbda  # lambda written with typo in purpose (since it's python's reserved word)
-            if threshold == 0:  # In other words - if beta or lambda is zero, move on.
-                continue
-            for parameter in LitCNN.get_parameters_of_conv_or_linear_layer_in_block(block):
-                with torch.no_grad():
-                    # To understand why this is done in the context-manager `no_grad` see here:
-                    # https://medium.com/@mrityu.jha/understanding-the-grad-of-autograd-fc8d266fd6cf
-                    parameter[parameter.abs() < threshold] = 0
-
-    def log_nonzero_parameters_count(self):
-        for i, block in enumerate(self.blocks):
-            for j, parameter in enumerate(LitCNN.get_parameters_of_conv_or_linear_layer_in_block(block)):
-                nonzero_fraction = torch.count_nonzero(parameter).item() / parameter.numel()
-                self.log(f'block-{i}-param-{j}-nonzero-fraction', nonzero_fraction, on_epoch=True, on_step=False)
-
-    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
-        """Performs a validation step.
-
-        Args:
-            batch: The batch to process (containing a tuple of tensors - inputs and labels).
-            batch_idx: The index of the batch in the dataset.
-        """
-        self.shared_step(batch, RunningStage.VALIDATING)
-
-    def configure_optimizers(self):
-        """Configure the optimizer and the learning-rate scheduler for the training process.
-
-        Returns:
-            A dictionary containing the optimizer and learning-rate scheduler.
-        """
-        optimizer = torch.optim.SGD(self.parameters(),
-                                    self.opt_args.learning_rate,
-                                    self.opt_args.momentum,
-                                    weight_decay=self.opt_args.weight_decay)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                         milestones=self.opt_args.learning_rate_decay_steps,
-                                                         gamma=self.opt_args.learning_rate_decay_gamma)
-        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
-
-
-class LitMLP(pl.LightningModule):
-    def __init__(self, arch_args: ArchitectureArgs, opt_args: OptimizationArgs, data_args: DataArgs):
-        """A basic MLP, which consists of multiple linear layers with ReLU in-between.
-
-        Args:
-            arch_args: The arguments for the architecture.
-            opt_args: The arguments for the optimization process.
-            data_args: The arguments for the input data.
-        """
-        super(LitMLP, self).__init__()
-        self.input_dim = data_args.n_channels * data_args.spatial_size ** 2
-        self.output_dim = data_args.n_classes
-        self.n_hidden_layers = arch_args.mlp_n_hidden_layers
-        self.hidden_dim = arch_args.mlp_hidden_dim
-        self.mlp = get_mlp(self.input_dim, self.output_dim, self.n_hidden_layers, self.hidden_dim,
-                           use_batch_norm=arch_args.use_batch_norm,
-                           shuffle_blocks_output=arch_args.shuffle_blocks_output,
-                           fixed_permutation_per_block=arch_args.fixed_permutation_per_block)
-        self.loss = torch.nn.CrossEntropyLoss()
-
-        self.arch_args = arch_args
-        self.opt_args = opt_args
-        self.save_hyperparameters(arch_args.dict())
-        self.save_hyperparameters(opt_args.dict())
-        self.save_hyperparameters(data_args.dict())
-
-        self.num_blocks = len(self.mlp)
-
-    def forward(self, x: torch.Tensor):
-        return self.mlp(x)
-
-    def should_regularize(self):
-        """
-        Returns:
-            True if we should regularize, False if not (depends on the argument `lasso_regularizer_coefficient`).
-        """
-        return (
-                isinstance(self.arch_args.lasso_regularizer_coefficient, list)
-                or
-                (self.arch_args.lasso_regularizer_coefficient > 0)
-        )
-
-    def get_regularization_loss(self):
-        """
-        Returns:
-            The regularization loss, which is the sum of the l1 norm of the weights of linear/conv layers
-            in the model, each multiplied by the corresponding regularization factor.
-        """
-        blocks = list(self.mlp)
-        num_blocks_with_weights = len([block for block in blocks if len(list(block.parameters())) > 0])
-        regularization_coefficients = copy.deepcopy(self.arch_args.lasso_regularizer_coefficient)
-        if not isinstance(regularization_coefficients, list):
-            regularization_coefficients = [regularization_coefficients] * num_blocks_with_weights
-        assert len(regularization_coefficients) == num_blocks_with_weights
-
-        regularization_losses = list()
-        for block in blocks:
-            # Take the parameters of any conv/linear layer in the block,
-            # which essentially excludes the parameters of the batch-norm layer that shouldn't be regularized.
-            parameters = [layer.parameters() for layer in block if isinstance(layer, nn.Linear)]
-            parameters = list(itertools.chain.from_iterable(parameters))
-            if len(parameters) == 0:
-                continue
-
-            # flattened_parameters = [parameter.view(-1) for parameter in parameters]
-            weights_l1_norm = sum(w.abs().sum() for w in parameters)
-            regularization_losses.append(regularization_coefficients.pop(0) * weights_l1_norm)
-
-        assert len(regularization_coefficients) == 0
-
-        return sum(regularization_losses)
-
-    def shared_step(self, batch: Tuple[torch.Tensor, torch.Tensor], stage: RunningStage):
-        """Performs train/validation step, depending on the given `stage`.
-
-        Args:
-            batch: The batch to process (containing a tuple of tensors - inputs and labels).
-            stage: Indicating if this is a training-step or a validation-step.
-
-        Returns:
-            The loss.
-        """
-        inputs, labels = batch
-        logits = self(inputs)
-        loss = self.loss(logits, labels)
-        predictions = torch.argmax(logits, dim=1)
-        accuracy = torch.sum(labels == predictions).item() / len(labels)
-
-        self.log(f'{stage.value}_loss', loss)
-        self.log(f'{stage.value}_accuracy', accuracy, on_epoch=True, on_step=False)
-
-        if self.should_regularize():
-            regularization_loss = self.get_regularization_loss()
-            loss += regularization_loss
-            self.log(f'{stage.value}_reg_loss', regularization_loss)
-
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        loss = self.shared_step(batch, RunningStage.TRAINING)
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        self.shared_step(batch, RunningStage.VALIDATING)
-
-    def get_sub_model(self, i: int) -> nn.Sequential:
-        return self.mlp[:i]
-
-    def configure_optimizers(self):
-        """Configure the optimizer and the learning-rate scheduler for the training process.
-
-        Returns:
-            A dictionary containing the optimizer and learning-rate scheduler.
-        """
-        optimizer = torch.optim.SGD(self.parameters(),
-                                    self.opt_args.learning_rate,
-                                    self.opt_args.momentum,
-                                    weight_decay=self.opt_args.weight_decay)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                         milestones=self.opt_args.learning_rate_decay_steps,
-                                                         gamma=self.opt_args.learning_rate_decay_gamma)
-        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
 
 
 def unwatch_model(model: nn.Module):

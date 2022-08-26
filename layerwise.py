@@ -18,15 +18,15 @@ from utils import (configure_logger,
                    initialize_wandb_logger,
                    initialize_trainer,
                    unwatch_model,
-                   LitVGG,
+                   CNN,
                    get_mlp,
                    get_cnn,
                    log_args)
 from utils import initialize_model as initialize_model_trained_end2end
 
 
-class LayerwiseVGG(LitVGG):
-    """A variant of the VGG model that uses layerwise optimization."""
+class LayerwiseCNN(CNN):
+    """A variant of a CNN that uses layerwise optimization."""
 
     def __init__(self, args: Args):
         super().__init__(args.arch, args.opt, args.data)
@@ -63,10 +63,11 @@ class LayerwiseVGG(LitVGG):
                                             n_hidden_layers=args.aux_mlp_n_hidden_layers,
                                             hidden_dimensions=args.aux_mlp_hidden_dim)
             else:  # args.pred_aux_type == 'cnn'
-                auxiliary_network = get_cnn(conv_channels=[channels],
-                                            linear_channels=[args.aux_mlp_hidden_dim] * args.aux_mlp_n_hidden_layers,
-                                            in_spatial_size=spatial_size, in_channels=channels,
-                                            n_classes=self.data_args.n_classes)
+                aux_convs, aux_mlp = get_cnn(conv_channels=[channels],
+                                             linear_channels=[args.aux_mlp_hidden_dim] * args.aux_mlp_n_hidden_layers,
+                                             in_spatial_size=spatial_size, in_channels=channels,
+                                             n_classes=self.data_args.n_classes)
+                auxiliary_network = nn.Sequential(aux_convs, aux_mlp)
 
             classification_auxiliary_networks.append(auxiliary_network)
 
@@ -114,6 +115,7 @@ class LayerwiseVGG(LitVGG):
 
         Args:
             batch: The batch to process (containing a tuple of tensors - inputs and labels).
+            batch_idx: The index of the batch in the dataset.
             stage: Indicating if this is a training-step or a validation-step.
 
         Returns:
@@ -130,12 +132,15 @@ class LayerwiseVGG(LitVGG):
             x = self.features[i](x)
 
             if self.classification_on:
-                prefix = f'{stage.value}' if (i == len(self.features) - 1) else f'{stage.value}_module_{i}'
-                classification_losses.append(self.get_classification_aux_loss(x, labels, i, prefix))
+                classification_losses.append(self.get_classification_loss(
+                    logits=self.classification_auxiliary_networks[i](x),
+                    labels=labels,
+                    prefix=f'{stage.value}' if (i == len(self.features) - 1) else f'{stage.value}_module_{i}'
+                ))
             if self.reconstruction_on:
-                reconstruction_losses.append(self.get_reconstruction_loss(x, inputs, i, 
-                                                                          prefix=f'{stage.value}_module_{i}', 
-                                                                          batch_idx=batch_idx))
+                reconstruction_losses.append(self.get_reconstruction_loss(
+                    x, inputs, i, prefix=f'{stage.value}_module_{i}', batch_idx=batch_idx
+                ))
 
             x = x.detach()
 
@@ -150,7 +155,7 @@ class LayerwiseVGG(LitVGG):
                 'for the convolution modules, and the MLP should be trained (i.e. its loss weight should be positive).'
             # When training with reconstruction loss only, the MLP is trained on the features of the last conv block.
             # Note that this part does not propagate gradients to the network's convolution modules, only to the mlp.
-            mlp_loss = self.get_mlp_loss(x, labels, prefix=f'{stage.value}')
+            mlp_loss = self.get_classification_loss(logits=self.mlp(x), labels=labels, prefix=f'{stage.value}')
             loss += args.mlp_loss_weight * mlp_loss
         if self.reconstruction_on:
             reconstruction_loss = sum(reconstruction_losses)
@@ -173,28 +178,8 @@ class LayerwiseVGG(LitVGG):
                                  num=len(self.features),
                                  dtype=int)) if self.layerwise_args.shift_ssl_labels else None
 
-    def get_classification_loss(self, 
-                                x: torch.Tensor, 
-                                labels: torch.Tensor, 
-                                module: nn.Module, 
-                                prefix: str) -> torch.Tensor:
-        logits = module(x)
-        classification_loss = self.loss(logits, labels)
-        predictions = torch.argmax(logits, dim=1)
-        accuracy = torch.sum(labels == predictions).item() / len(labels)
-
-        self.log(f'{prefix}_loss', classification_loss)
-        self.log(f'{prefix}_accuracy', accuracy, on_epoch=True, on_step=False)
-
-        return classification_loss
-
-    def get_mlp_loss(self, x: torch.Tensor, labels: torch.Tensor, prefix) -> torch.Tensor:
-        return self.get_classification_loss(x, labels, self.mlp, prefix)
-    
-    def get_classification_aux_loss(self, x: torch.Tensor, labels: torch.Tensor, i: int, prefix: str) -> torch.Tensor:
-        return self.get_classification_loss(x, labels, self.classification_auxiliary_networks[i], prefix)
-
-    def get_reconstruction_loss(self, x: torch.Tensor, inputs: torch.Tensor, i: int, prefix: str, batch_idx: int) -> torch.Tensor:
+    def get_reconstruction_loss(self, x: torch.Tensor, inputs: torch.Tensor, i: int, prefix: str,
+                                batch_idx: int) -> torch.Tensor:
         reconstructed_inputs = self.reconstruction_auxiliary_networks[i](x)
         reconstruction_labels = inputs.detach()
         reconstructed_input_spatial_size = reconstructed_inputs.shape[-1]
@@ -223,26 +208,15 @@ class LayerwiseVGG(LitVGG):
         return reconstruction_loss
 
 
-class RandomFeatures(LitVGG):
+class RandomConvsFollowedByMLP(CNN):
     """
     A VGG model where the weights of the convolution layers stay fixed with their random initialization,
     and only the final MLP is training.
     """
+
     def __init__(self, args: Args):
         super().__init__(args.arch, args.opt, args.data)
         self.features.requires_grad_(False)
-
-    # def forward(self, x: torch.Tensor):
-    #     """Performs a forward-pass.
-    #
-    #     Since the convolution layers are kept fix during training,
-    #     the forward pass can be done without calculating the gradients at all
-    #     (meaning using the PyTorch decorator `no_grad`).
-    #     """
-    #     with torch.no_grad():
-    #         features = self.forward(x)
-    #     logits = self.mlp(features)
-    #     return logits
 
 
 def get_auto_decoder(in_channels: int,
@@ -293,9 +267,9 @@ def initialize_model_trained_layerwise(args: Args, wandb_logger: WandbLogger):
     if args.arch.use_pretrained:
         artifact = wandb_logger.experiment.use_artifact(args.arch.pretrained_path, type='model')
         artifact_dir = artifact.download()
-        model = LayerwiseVGG.load_from_checkpoint(str(Path(artifact_dir) / "model.ckpt"), args=args)
+        model = LayerwiseCNN.load_from_checkpoint(str(Path(artifact_dir) / "model.ckpt"), args=args)
     else:
-        model = LayerwiseVGG(args)
+        model = LayerwiseCNN(args)
 
     return model
 
@@ -306,9 +280,9 @@ def initialize_random_features_model(args: Args, wandb_logger: WandbLogger):
     if args.arch.use_pretrained:
         artifact = wandb_logger.experiment.use_artifact(args.arch.pretrained_path, type='model')
         artifact_dir = artifact.download()
-        model = RandomFeatures.load_from_checkpoint(str(Path(artifact_dir) / "model.ckpt"), args=args)
+        model = RandomConvsFollowedByMLP.load_from_checkpoint(str(Path(artifact_dir) / "model.ckpt"), args=args)
     else:
-        model = RandomFeatures(args)
+        model = RandomConvsFollowedByMLP(args)
 
     return model
 
