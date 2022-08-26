@@ -275,8 +275,6 @@ def initialize_model_trained_layerwise(args: Args, wandb_logger: WandbLogger):
 
 
 def initialize_random_features_model(args: Args, wandb_logger: WandbLogger):
-    assert args.arch.model_name.startswith('VGG'), 'Random Features models are only implemented for VGG.'
-
     if args.arch.use_pretrained:
         artifact = wandb_logger.experiment.use_artifact(args.arch.pretrained_path, type='model')
         artifact_dir = artifact.download()
