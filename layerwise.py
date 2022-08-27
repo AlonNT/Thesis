@@ -29,7 +29,7 @@ class LayerwiseCNN(CNN):
     """A variant of a CNN that uses layerwise optimization."""
 
     def __init__(self, args: Args):
-        super().__init__(args.arch, args.opt, args.data)
+        super().__init__(args)
         self.layerwise_args: LayerwiseArgs = args.layerwise
         self.reconstruction_loss = nn.L1Loss() if self.reconstruction_on else None  # TODO: Consider trying L2Loss
 
@@ -57,6 +57,11 @@ class LayerwiseCNN(CNN):
             assert height == width, "Only square tensors are supported"
             spatial_size = height
 
+            if args.adaptive_avg_pool_size_in_classification_aux_net > 0:
+                spatial_size = args.adaptive_avg_pool_size_in_classification_aux_net
+                height = spatial_size
+                width = spatial_size
+
             if args.classification_aux_type == 'mlp':
                 auxiliary_network = get_mlp(input_dim=channels * height * width,
                                             output_dim=self.data_args.n_classes,
@@ -68,6 +73,9 @@ class LayerwiseCNN(CNN):
                                              in_spatial_size=spatial_size, in_channels=channels,
                                              n_classes=self.data_args.n_classes)
                 auxiliary_network = nn.Sequential(aux_convs, aux_mlp)
+
+            if args.adaptive_avg_pool_size_in_classification_aux_net > 0:
+                auxiliary_network = nn.Sequential(nn.AdaptiveAvgPool2d(spatial_size), *list(auxiliary_network))
 
             classification_auxiliary_networks.append(auxiliary_network)
 

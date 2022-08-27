@@ -25,6 +25,9 @@ class LayerwiseArgs(ImmutableArgs):
     #: Type of the auxiliary networks predicting the classes scores.
     classification_aux_type: AUX_NET_TYPE = 'cnn'
 
+    #: Type of the auxiliary networks predicting the classes scores.
+    adaptive_avg_pool_size_in_classification_aux_net: NonNegativeInt = 0
+
     #: How many hidden layers in each auxiliary network (which is an MLP).
     aux_mlp_n_hidden_layers: NonNegativeInt = 1
 

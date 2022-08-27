@@ -52,9 +52,6 @@ class ArchitectureArgs(ImmutableArgs):
     #: Dropout probability (will be added after each non-linearity).
     dropout_prob: NonOneFraction = 0
 
-    input_channels: PositiveInt = 3
-    input_spatial_size: PositiveInt = 32
-
     #: The kernel-size to use in each convolution-layer.
     kernel_size: Union[PositiveInt, List[PositiveInt]] = 3
 
