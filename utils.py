@@ -380,7 +380,7 @@ def get_cnn(conv_channels: List[int],
         else:
             block_layers.append(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding))
 
-        block_layers.append(nn.BatchNorm2d(out_channels))
+        block_layers.append(nn.BatchNorm2d(out_channels))    # TODO make an argument for using BatchNorm
         block_layers.append(nn.ReLU())
 
         if pool:
@@ -403,7 +403,7 @@ def get_cnn(conv_channels: List[int],
                   n_hidden_layers=len(linear_channels),
                   hidden_dimensions=linear_channels,
                   use_batch_norm=True,  # TODO make this an argument
-                  organize_as_blocks=True,  # TODO make this an argument
+                  organize_as_blocks=True,
                   sparse_fractions=sparse_connected_fractions[n_convs:])
 
     return features, mlp
@@ -1678,17 +1678,15 @@ def initialize_wandb_logger(args, name_suffix: str = ''):
     return WandbLogger(project='thesis', config=args.flattened_dict(), name=run_name, log_model=True)
 
 
-def initialize_model(arch_args: ArchitectureArgs,
-                     opt_args: OptimizationArgs,
-                     data_args: DataArgs,
-                     wandb_logger: WandbLogger):
-    if arch_args.use_pretrained:
-        artifact = wandb_logger.experiment.use_artifact(arch_args.pretrained_path, type='model')
+def initialize_model(args,
+                     wandb_logger: WandbLogger,
+                     model_class: Type[pl.LightningModule]):
+    if args.arch.use_pretrained:
+        artifact = wandb_logger.experiment.use_artifact(args.arch.pretrained_path, type='model')
         artifact_dir = artifact.download()
-        model = CNN.load_from_checkpoint(str(Path(artifact_dir) / "model.ckpt"),
-                                         arch_args=arch_args, opt_args=opt_args, data_args=data_args)
+        model = model_class.load_from_checkpoint(str(Path(artifact_dir) / "model.ckpt"), args=args)
     else:
-        model = CNN(arch_args, opt_args, data_args)
+        model = model_class(args)
 
     return model
 
@@ -1733,6 +1731,12 @@ def get_cnn_config_neyshabur(arch_args: ArchitectureArgs, data_args: DataArgs):
     "Towards Learning Convolutions from Scratch", Behnam Neyshabur, Google.
     and the exact architectures are defined in Appendix A.1
     https://proceedings.neurips.cc/paper/2020/file/5c528e25e1fdeaf9d8160dc24dbf4d60-Supplemental.pdf
+
+    > One challenge in studying the inductive bias of convolutions is that the existence of other components
+    > such as pooling and residual connections makes it difficult to isolate the effect of convolutions
+    > in modern architectures.
+    > ...
+    > To this end, below we propose two all-convolutional networks to overcome the discussed issues.
 
     Args:
         arch_args: The architecture arguments.
@@ -1923,16 +1927,14 @@ def get_cnn_config(arch_args: ArchitectureArgs, data_args: DataArgs):
 
 
 class CNN(pl.LightningModule):
-    def __init__(self, arch_args: ArchitectureArgs, opt_args: OptimizationArgs, data_args: DataArgs):
-        """A basic CNN, containing only convolutional / linear layers (+ BatchNorm and ReLU).
+    def __init__(self, args):
+        """A generel class for a sequencial Convolutional Neural Network.
 
-        The idea is taken from "Towards Learning Convolutions from Scratch", Behnam Neyshabur, Google.
-
-        > One challenge in studying the inductive bias of convolutions is that the existence of other components
-        > such as pooling and residual connections makes it difficult to isolate the effect of convolutions
-        > in modern architectures.
-        > ...
-        > To this end, below we propose two all-convolutional networks to overcome the discussed issues.
+        Any CNN which consists of a sequence of convolution layers (+ReLU) 
+        followed by a sequence of fully connected (+ReLU)
+        layers can be implemented using this class.
+        Additional layers that are might be added in between are BatchNorm, MaxPool,
+        and more "custom" layers like ShuffleTensor and RandomlySparseLinear.
 
         Args:
             arch_args: The arguments for the architecture.
@@ -1941,28 +1943,28 @@ class CNN(pl.LightningModule):
         """
         super(CNN, self).__init__()
 
-        self.features, self.mlp = get_cnn(*get_cnn_config(arch_args, data_args),
-                                          paddings=arch_args.padding,
-                                          shuffle_outputs=arch_args.shuffle_blocks_output,
-                                          spatial_only=arch_args.spatial_shuffle_only,
-                                          fixed_permutation=arch_args.fixed_permutation_per_block,
-                                          replace_with_linear=arch_args.replace_with_linear,
-                                          replace_with_bottleneck=arch_args.replace_with_bottleneck,
-                                          sparse_connected_fractions=arch_args.sparse_connected_fractions,
-                                          adaptive_avg_pool_before_mlp=arch_args.adaptive_avg_pool_before_mlp,
-                                          max_pool_after_first_conv=arch_args.max_pool_after_first_conv,
-                                          in_spatial_size=data_args.spatial_size,
-                                          in_channels=data_args.n_channels,
-                                          n_classes=data_args.n_classes)
+        self.features, self.mlp = get_cnn(*get_cnn_config(args.arch, args.data),
+                                          paddings=args.arch.padding,
+                                          shuffle_outputs=args.arch.shuffle_blocks_output,
+                                          spatial_only=args.arch.spatial_shuffle_only,
+                                          fixed_permutation=args.arch.fixed_permutation_per_block,
+                                          replace_with_linear=args.arch.replace_with_linear,
+                                          replace_with_bottleneck=args.arch.replace_with_bottleneck,
+                                          sparse_connected_fractions=args.arch.sparse_connected_fractions,
+                                          adaptive_avg_pool_before_mlp=args.arch.adaptive_avg_pool_before_mlp,
+                                          max_pool_after_first_conv=args.arch.max_pool_after_first_conv,
+                                          in_spatial_size=args.data.spatial_size,
+                                          in_channels=args.data.n_channels,
+                                          n_classes=args.data.n_classes)
         self.loss = nn.CrossEntropyLoss()
 
-        self.arch_args: ArchitectureArgs = arch_args
-        self.opt_args: OptimizationArgs = opt_args
-        self.data_args: DataArgs = data_args
+        self.arch_args: ArchitectureArgs = args.arch
+        self.opt_args: OptimizationArgs = args.opt
+        self.data_args: DataArgs = args.data
 
-        self.save_hyperparameters(arch_args.dict())
-        self.save_hyperparameters(opt_args.dict())
-        self.save_hyperparameters(data_args.dict())
+        self.save_hyperparameters(args.arch.dict())
+        self.save_hyperparameters(args.opt.dict())
+        self.save_hyperparameters(args.data.dict())
 
         self.num_blocks = len(self.features) + len(self.mlp)
 

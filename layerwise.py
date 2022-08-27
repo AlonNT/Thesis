@@ -21,8 +21,8 @@ from utils import (configure_logger,
                    CNN,
                    get_mlp,
                    get_cnn,
-                   log_args)
-from utils import initialize_model as initialize_model_trained_end2end
+                   log_args,
+                   initialize_model)
 
 
 class LayerwiseCNN(CNN):
@@ -261,37 +261,15 @@ def get_auto_decoder(in_channels: int,
     return nn.Sequential(*layers)
 
 
-def initialize_model_trained_layerwise(args: Args, wandb_logger: WandbLogger):
-    assert args.arch.model_name.startswith('VGG'), 'Only VGG models are implemented layerwise.'
-
-    if args.arch.use_pretrained:
-        artifact = wandb_logger.experiment.use_artifact(args.arch.pretrained_path, type='model')
-        artifact_dir = artifact.download()
-        model = LayerwiseCNN.load_from_checkpoint(str(Path(artifact_dir) / "model.ckpt"), args=args)
-    else:
-        model = LayerwiseCNN(args)
-
-    return model
-
-
-def initialize_random_features_model(args: Args, wandb_logger: WandbLogger):
-    if args.arch.use_pretrained:
-        artifact = wandb_logger.experiment.use_artifact(args.arch.pretrained_path, type='model')
-        artifact_dir = artifact.download()
-        model = RandomConvsFollowedByMLP.load_from_checkpoint(str(Path(artifact_dir) / "model.ckpt"), args=args)
-    else:
-        model = RandomConvsFollowedByMLP(args)
-
-    return model
-
-
-def initialize_model(args: Args, wandb_logger: WandbLogger):
+def get_model(args: Args, wandb_logger: WandbLogger):
     if args.layerwise.fix_random_initialized_conv_weights:
-        return initialize_random_features_model(args, wandb_logger)
+        model_class = RandomConvsFollowedByMLP
     if args.layerwise.dgl:
-        return initialize_model_trained_layerwise(args, wandb_logger)
+        model_class = LayerwiseCNN
     else:
-        return initialize_model_trained_end2end(args.arch, args.opt, args.data, wandb_logger)
+        model_class = CNN
+    
+    return initialize_model(args, wandb_logger, model_class)
 
 
 def main():
@@ -301,7 +279,7 @@ def main():
 
     datamodule = initialize_datamodule(args.data, args.opt.batch_size)
     wandb_logger = initialize_wandb_logger(args)
-    model = initialize_model(args, wandb_logger)
+    model = get_model(args, wandb_logger)
     wandb.watch(model, log='all')
 
     trainer = initialize_trainer(args.env, args.opt, wandb_logger)

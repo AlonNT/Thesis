@@ -62,7 +62,7 @@ class ArchitectureArgs(ImmutableArgs):
     stride: Union[PositiveInt, List[PositiveInt]] = 1
 
     #: The padding amount to use in each convolution-layer.
-    padding: Union[None, NonNegativeInt, List[NonNegativeInt]] = 1
+    padding: Union[None, NonNegativeInt, List[NonNegativeInt]] = None
 
     # TODO: Consider deleting this, if these are not used.
     # #: The pooling size and stride to use in the AvgPool / MaxPool layers.
