@@ -288,7 +288,7 @@ def main():
     datamodule = initialize_datamodule(args.data, args.opt.batch_size)
     wandb_logger = initialize_wandb_logger(args)
     model = get_model(args, wandb_logger)
-    wandb.watch(model, log='all')
+    wandb_logger.watch(model, log='all')  # TODO move it to later on (during fit?)
 
     trainer = initialize_trainer(args.env, args.opt, wandb_logger)
     trainer.fit(model, datamodule=datamodule)
