@@ -3,16 +3,17 @@ channels:
   - conda-forge
 dependencies:
   - python=3.9.13
+  - numpy=1.23.2
+  - pandas=1.4.4
   - loguru=0.6.0
   - wandb=0.13.1
-  - pandas=1.4.3
   - flatten-dict=0.4.2
   - matplotlib=3.5.3
   - scikit-learn=1.1.2
-  - pydantic=1.9.2
+  - pydantic=1.10.2
   - plotly=5.10.0
   - tikzplotlib=0.10.1
   - pytorch=1.12.1
   - torchvision=0.13.1
   - cudatoolkit=11.3  # Delete this when creating env on a machine without GPUs
-  - pytorch-lightning=1.7.3
+  - pytorch-lightning=1.7.5
