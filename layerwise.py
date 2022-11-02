@@ -56,26 +56,26 @@ class LayerwiseCNN(CNN):
             channels, height, width = self.shapes[i + 1]
             assert height == width, "Only square tensors are supported"
             spatial_size = height
-
-            if args.adaptive_avg_pool_size_in_classification_aux_net > 0:
-                spatial_size = args.adaptive_avg_pool_size_in_classification_aux_net
-                height = spatial_size
-                width = spatial_size
+            adaptive_avg_pool_in_aux_net = (args.adaptive_avg_pool_size_in_classification_aux_net > 0)
 
             if args.classification_aux_type == 'mlp':
-                auxiliary_network = get_mlp(input_dim=channels * height * width,
+                if adaptive_avg_pool_in_aux_net:
+                    spatial_size = args.adaptive_avg_pool_size_in_classification_aux_net
+                auxiliary_network = get_mlp(input_dim=channels * (spatial_size ** 2),
                                             output_dim=self.data_args.n_classes,
                                             n_hidden_layers=args.aux_mlp_n_hidden_layers,
                                             hidden_dimensions=args.aux_mlp_hidden_dim)
+                if adaptive_avg_pool_in_aux_net:
+                    auxiliary_network = nn.Sequential(nn.AdaptiveAvgPool2d(spatial_size), *list(auxiliary_network))
             else:  # args.pred_aux_type == 'cnn'
+                if adaptive_avg_pool_in_aux_net:
+                    assert args.adaptive_avg_pool_size_in_classification_aux_net == 1, '2 isnt supported in auxCNN'
                 aux_convs, aux_mlp = get_cnn(conv_channels=[channels],
                                              linear_channels=[args.aux_mlp_hidden_dim] * args.aux_mlp_n_hidden_layers,
                                              in_spatial_size=spatial_size, in_channels=channels,
-                                             n_classes=self.data_args.n_classes)
+                                             n_classes=self.data_args.n_classes, 
+                                             adaptive_avg_pool_before_mlp=adaptive_avg_pool_in_aux_net)
                 auxiliary_network = nn.Sequential(aux_convs, aux_mlp)
-
-            if args.adaptive_avg_pool_size_in_classification_aux_net > 0:
-                auxiliary_network = nn.Sequential(nn.AdaptiveAvgPool2d(spatial_size), *list(auxiliary_network))
 
             classification_auxiliary_networks.append(auxiliary_network)
 
@@ -288,7 +288,7 @@ def main():
     datamodule = initialize_datamodule(args.data, args.opt.batch_size)
     wandb_logger = initialize_wandb_logger(args)
     model = get_model(args, wandb_logger)
-    wandb_logger.watch(model, log='all')  # TODO move it to later on (during fit?)
+    # wandb_logger.watch(model, log='all')  # TODO move it to later on (during fit?)
 
     trainer = initialize_trainer(args.env, args.opt, wandb_logger)
     trainer.fit(model, datamodule=datamodule)
